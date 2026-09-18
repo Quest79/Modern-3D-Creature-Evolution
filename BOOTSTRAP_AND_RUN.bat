@@ -35,7 +35,7 @@ if errorlevel 1 (
 where git >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Git was installed but is not visible yet.
-    echo Close this window and run this batch file again.
+    echo Close this window and run this file again.
     pause
     exit /b 1
 )
@@ -55,7 +55,7 @@ if errorlevel 1 (
 where rustup >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Rustup was installed but is not visible yet.
-    echo Close this window and run this batch file again.
+    echo Close this window and run this file again.
     pause
     exit /b 1
 )
@@ -150,44 +150,37 @@ if /i "%~1"=="--cli" (
     exit /b %errorlevel%
 )
 
-set "GODOT_CMD="
-where godot.exe >nul 2>&1
-if not errorlevel 1 set "GODOT_CMD=godot.exe"
-if not defined GODOT_CMD (
-    where godot4.exe >nul 2>&1
-    if not errorlevel 1 set "GODOT_CMD=godot4.exe"
-)
+call :FindGodot
 
 if not defined GODOT_CMD (
     echo.
     echo [SETUP] Godot 4 was not found. Installing Godot...
     winget install --id GodotEngine.GodotEngine -e --source winget --accept-package-agreements --accept-source-agreements
-    set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%PATH%"
-
-    where godot.exe >nul 2>&1
-    if not errorlevel 1 set "GODOT_CMD=godot.exe"
-    if not defined GODOT_CMD (
-        where godot4.exe >nul 2>&1
-        if not errorlevel 1 set "GODOT_CMD=godot4.exe"
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Godot installation failed.
+        pause
+        exit /b 1
     )
-)
 
-if not defined GODOT_CMD (
-    for /f "usebackq delims=" %%G in (`powershell -NoProfile -Command "$p = Get-ChildItem -Path '$env:LOCALAPPDATA\Microsoft\WinGet\Packages' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Godot*_win64.exe' -or $_.Name -eq 'godot.exe' } | Select-Object -First 1 -ExpandProperty FullName; if ($p) { $p }"`) do (
-        set "GODOT_CMD=%%G"
-    )
+    rem WinGet often says a shell restart is needed. Do not rely on PATH;
+    rem search the WinGet package directory directly in this same run.
+    call :FindGodot
 )
 
 if not defined GODOT_CMD (
     echo.
-    echo [ERROR] Godot was installed but its executable could not be found.
-    echo Close this window and run this batch file again.
+    echo [ERROR] Godot is installed, but the executable could not be located.
+    echo Looked in PATH, WinGet Links, and WinGet Packages.
+    echo.
+    echo Try closing this window and running this batch file once more.
     pause
     exit /b 1
 )
 
 echo.
 echo [RUN] Launching Modern 3D Creature Evolution GUI...
+echo [RUN] Godot: %GODOT_CMD%
 echo.
 "%GODOT_CMD%" --path "%PROJECT_DIR%\apps\godot"
 
@@ -199,3 +192,37 @@ if errorlevel 1 (
 )
 
 endlocal
+exit /b 0
+
+:FindGodot
+set "GODOT_CMD="
+
+for %%N in (godot.exe godot4.exe godot) do (
+    if not defined GODOT_CMD (
+        for /f "delims=" %%G in ('where %%N 2^>nul') do (
+            if not defined GODOT_CMD set "GODOT_CMD=%%~fG"
+        )
+    )
+)
+
+if not defined GODOT_CMD if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\godot.exe" (
+    set "GODOT_CMD=%LOCALAPPDATA%\Microsoft\WinGet\Links\godot.exe"
+)
+
+if not defined GODOT_CMD if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\godot4.exe" (
+    set "GODOT_CMD=%LOCALAPPDATA%\Microsoft\WinGet\Links\godot4.exe"
+)
+
+if not defined GODOT_CMD if exist "%LOCALAPPDATA%\Microsoft\WinGet\Packages" (
+    for /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages" %%G in (Godot*_win64.exe) do (
+        if not defined GODOT_CMD set "GODOT_CMD=%%~fG"
+    )
+)
+
+if not defined GODOT_CMD if exist "%LOCALAPPDATA%\Microsoft\WinGet\Packages" (
+    for /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages" %%G in (godot.exe) do (
+        if not defined GODOT_CMD set "GODOT_CMD=%%~fG"
+    )
+)
+
+exit /b 0
