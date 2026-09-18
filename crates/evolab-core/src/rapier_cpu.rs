@@ -1,6 +1,9 @@
 use rapier3d::prelude::*;
 
-use crate::{PhysicsBackend, ProbeSpec, SimulationConfig, SimulationReport};
+use crate::{
+    BackendCapabilities, PhysicsBackend, ProbeSpec, SimulationConfig, SimulationReport,
+    WorldSnapshot,
+};
 
 /// General-purpose CPU physics backend.
 ///
@@ -10,18 +13,8 @@ use crate::{PhysicsBackend, ProbeSpec, SimulationConfig, SimulationReport};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RapierCpuBackend;
 
-impl PhysicsBackend for RapierCpuBackend {
-    fn name(&self) -> &'static str {
-        "rapier-cpu"
-    }
-
-    fn run_probe(
-        &self,
-        config: &SimulationConfig,
-        probe: &ProbeSpec,
-    ) -> Result<SimulationReport, String> {
-        config.validate()?;
-
+impl RapierCpuBackend {
+    fn validate_probe(probe: &ProbeSpec) -> Result<(), String> {
         if probe
             .half_extents
             .iter()
@@ -35,6 +28,35 @@ impl PhysicsBackend for RapierCpuBackend {
         if !probe.friction.is_finite() || probe.friction < 0.0 {
             return Err("probe friction must be finite and non-negative".into());
         }
+        Ok(())
+    }
+
+    fn snapshot(body: &RigidBody, step: usize, dt: f32) -> WorldSnapshot {
+        let p = body.translation();
+        let q = body.rotation().quaternion();
+        let v = body.linvel();
+        let w = body.angvel();
+
+        WorldSnapshot {
+            step,
+            simulated_seconds: step as f32 * dt,
+            position: [p.x, p.y, p.z],
+            rotation_xyzw: [q.i, q.j, q.k, q.w],
+            linear_velocity: [v.x, v.y, v.z],
+            angular_velocity: [w.x, w.y, w.z],
+            sleeping: body.is_sleeping(),
+        }
+    }
+
+    fn simulate_probe(
+        &self,
+        config: &SimulationConfig,
+        probe: &ProbeSpec,
+        sample_every_steps: usize,
+        observer: &mut dyn FnMut(&WorldSnapshot) -> Result<(), String>,
+    ) -> Result<SimulationReport, String> {
+        config.validate()?;
+        Self::validate_probe(probe)?;
 
         let mut rigid_bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
@@ -81,7 +103,15 @@ impl PhysicsBackend for RapierCpuBackend {
         let mut multibody_joints = MultibodyJointSet::new();
         let mut ccd_solver = CCDSolver::new();
 
-        for _ in 0..config.step_count() {
+        let body = rigid_bodies
+            .get(body_handle)
+            .ok_or_else(|| "probe rigid body disappeared from simulation".to_string())?;
+        observer(&Self::snapshot(body, 0, config.dt))?;
+
+        let total_steps = config.step_count();
+        let sample_every_steps = sample_every_steps.max(1);
+
+        for step in 1..=total_steps {
             physics_pipeline.step(
                 gravity,
                 &integration_parameters,
@@ -96,6 +126,13 @@ impl PhysicsBackend for RapierCpuBackend {
                 &(),
                 &(),
             );
+
+            if step % sample_every_steps == 0 || step == total_steps {
+                let body = rigid_bodies
+                    .get(body_handle)
+                    .ok_or_else(|| "probe rigid body disappeared from simulation".to_string())?;
+                observer(&Self::snapshot(body, step, config.dt))?;
+            }
         }
 
         let body = rigid_bodies
@@ -104,21 +141,57 @@ impl PhysicsBackend for RapierCpuBackend {
 
         let p = body.translation();
         let v = body.linvel();
-        let steps = config.step_count();
 
         Ok(SimulationReport {
             backend: self.name().to_string(),
-            steps,
-            simulated_seconds: steps as f32 * config.dt,
+            steps: total_steps,
+            simulated_seconds: total_steps as f32 * config.dt,
             final_position: [p.x, p.y, p.z],
             final_linear_velocity: [v.x, v.y, v.z],
         })
     }
 }
 
+impl PhysicsBackend for RapierCpuBackend {
+    fn name(&self) -> &'static str {
+        "rapier-cpu"
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            name: self.name().to_string(),
+            deterministic: true,
+            state_streaming: true,
+            parallel_worlds: true,
+            gpu_accelerated: false,
+        }
+    }
+
+    fn run_probe(
+        &self,
+        config: &SimulationConfig,
+        probe: &ProbeSpec,
+    ) -> Result<SimulationReport, String> {
+        let mut ignore = |_snapshot: &WorldSnapshot| Ok(());
+        self.simulate_probe(config, probe, usize::MAX, &mut ignore)
+    }
+
+    fn run_probe_streaming(
+        &self,
+        config: &SimulationConfig,
+        probe: &ProbeSpec,
+        sample_every_steps: usize,
+        observer: &mut dyn FnMut(&WorldSnapshot) -> Result<(), String>,
+    ) -> Result<SimulationReport, String> {
+        self.simulate_probe(config, probe, sample_every_steps, observer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig};
+    use crate::{
+        PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot,
+    };
 
     #[test]
     fn falling_probe_reaches_ground() {
@@ -141,5 +214,28 @@ mod tests {
         let a = backend.run_probe(&config, &probe).unwrap();
         let b = backend.run_probe(&config, &probe).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn streaming_includes_initial_and_final_state() {
+        let backend = RapierCpuBackend;
+        let config = SimulationConfig::default();
+        let mut frames: Vec<WorldSnapshot> = Vec::new();
+
+        backend
+            .run_probe_streaming(
+                &config,
+                &ProbeSpec::default(),
+                60,
+                &mut |snapshot| {
+                    frames.push(snapshot.clone());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(frames.first().unwrap().step, 0);
+        assert_eq!(frames.last().unwrap().step, config.step_count());
+        assert!(frames.len() > 2);
     }
 }

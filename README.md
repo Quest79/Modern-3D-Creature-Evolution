@@ -8,41 +8,42 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 1 — Simulation Foundation: in progress.**
+**Step 1 — Simulation Foundation: live.**
 
-The project now has:
+Current foundation:
 
-- headless Rust simulation core
+- Rust simulation core independent of the renderer
 - Rapier 3D CPU physics
-- fixed-timestep deterministic execution
+- deterministic fixed-timestep execution
 - parallel independent-world evaluation with Rayon
 - replaceable physics-backend interface
-- JSON output protocol for GUI/automation clients
-- Godot 4 desktop GUI with basic 3D preview and simulation controls
+- backend-neutral world-state snapshots
+- real-time Rust → Godot state streaming
+- progress and Stop/cancel controls
+- capability reporting
+- Godot 4 desktop GUI
 - GitHub Actions CI
+
+The blue Step 1 probe can now be watched falling in real time while the Rust
+backend remains the authoritative simulator.
 
 See [docs/STEP-1.md](docs/STEP-1.md).
 
 ## Windows quick start
 
-Download/run:
+Run:
 
 ```text
 BOOTSTRAP_AND_RUN.bat
 ```
 
-It installs missing prerequisites, updates the repository, builds the Rust backend,
-and launches the Godot GUI.
+The bootstrapper installs missing prerequisites, updates the repository, builds
+the Rust backend, and launches the Godot GUI.
 
-## Headless quick start
+## Headless examples
 
 ```bash
 cargo test --workspace
 cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12
-```
-
-Machine-readable output:
-
-```bash
-cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12 --json
+cargo run --release -p evolab-cli -- capabilities
 ```

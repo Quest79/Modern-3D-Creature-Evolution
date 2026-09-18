@@ -9,10 +9,10 @@ run/main_scene="res://main.tscn"
 
 [display]
 
-window/size/viewport_width=1280
-window/size/viewport_height=760
-window/size/window_width_override=1280
-window/size/window_height_override=760
+window/size/viewport_width=1360
+window/size/viewport_height=840
+window/size/window_width_override=1360
+window/size/window_height_override=840
 window/stretch/mode="canvas_items"
 
 [rendering]

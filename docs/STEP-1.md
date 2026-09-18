@@ -9,84 +9,108 @@ Establish the architecture that every later creature/evolution feature will use:
 - reproducible isolated worlds
 - parallel CPU evaluation
 - replaceable physics backend interface
-- CLI execution without a GUI
-- a Godot frontend that talks to the backend through a machine-readable boundary
+- backend-neutral world-state snapshots
+- live state streaming to the Godot viewer
+- progress and cancellation for long-running jobs
+- backend capability reporting
 - CI that compiles, tests, formats, and lints the Rust workspace
 
 ## Implemented
 
-### Rust workspace
+### Rust simulation core
 
 `evolab-core`
-- backend-neutral simulation configuration
-- `PhysicsBackend` trait
+
+- backend-neutral `SimulationConfig`
+- `PhysicsBackend` interface
+- backend capability reporting
+- `WorldSnapshot` state API containing:
+  - step
+  - simulated time
+  - position
+  - rotation
+  - linear velocity
+  - angular velocity
+  - sleeping state
 - Rapier 3D CPU backend
-- deterministic fixed-step probe simulation
+- deterministic fixed-step simulation
+- observer-based live state sampling
 - Rayon worker-pool batch execution
-- tests for config validation, repeatability, and parallel batches
+- thread-safe progress callbacks
+- tests for repeatability, streaming, and progress
+
+### CLI/backend process
 
 `evolab-cli`
-- `evolab probe` command
-- configurable batch size
-- configurable worker count
-- configurable evaluation duration
-- configurable fixed timestep
-- human-readable throughput output
-- `--json` machine-readable result protocol for GUI/automation clients
-- worlds/s and physics-steps/s metrics
+
+- `probe`: parallel simulation benchmark
+- `stream`: real-time single-world state streaming
+- `capabilities`: machine/backend capability report
+- versioned JSON event protocol
+- UDP localhost events for:
+  - batch start
+  - batch progress
+  - batch completion
+  - live world state
+  - live completion
+- human-readable CLI mode remains available
 
 ### Godot GUI
 
-`apps/godot/` now contains a runnable Godot 4 frontend.
+The GUI now supports two different execution paths.
 
-The GUI can:
+**Watch Live Physics**
 
-- set number of independent worlds
-- set CPU worker count
-- set simulation duration
-- set fixed physics timestep
-- launch the Rust simulation without freezing the UI
-- parse the backend's JSON result
-- display performance metrics
-- show the Step 1 probe in a basic 3D preview
+Runs one authoritative physics world in Rust and streams state snapshots to
+Godot at 60 Hz. The blue probe actually falls and settles in real time. Godot is
+only visualizing the state; it is not re-simulating the body.
 
-Godot does not own the physics loop. The Rust executable remains the source of
-simulation truth.
+**Run Parallel Benchmark**
+
+Evaluates the configured number of independent simulations using CPU workers.
+The GUI shows completion progress, final throughput, and physics steps/second.
+
+The GUI also provides:
+
+- Stop button for either type of job
+- backend/app version
+- logical CPU-thread count
+- deterministic/streaming/GPU capability status
+- live height, speed, step, and simulated-time display
 
 ## Run it
 
-On Windows, use:
+On Windows:
 
 ```text
 BOOTSTRAP_AND_RUN.bat
 ```
 
-The bootstrap script installs/builds the required components and launches the GUI.
-
-For headless testing:
+For headless benchmarking:
 
 ```bash
 cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12
 ```
 
-For the GUI protocol directly:
+Inspect capabilities:
 
 ```bash
-cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12 --json
+cargo run --release -p evolab-cli -- capabilities
 ```
 
 ## Step 1 remaining work
 
-1. formal world snapshot/state API
-2. backend capability reporting
-3. dedicated benchmark harness
-4. cancellation and progress callbacks for long batches
-5. backend registry/factory
-6. persistent IPC or native FFI boundary if needed for high-frequency visualization
-7. CUDA batch-backend prototype behind a feature flag
-8. checkpoint-safe serialization of simulation inputs/results
-9. stream intermediate world state to the viewer for true live playback
+1. dedicated benchmark suite and historical benchmark storage
+2. backend registry/factory for multiple installed physics implementations
+3. persistent IPC/native FFI if later creature visualization needs more bandwidth
+4. CUDA batch-backend prototype behind a feature flag
+5. checkpoint-safe serialization of simulation inputs/results
+6. richer contact/joint state in world snapshots
 
 The CPU backend remains the reference implementation. Accelerator backends must
 match its public contracts rather than leaking device-specific details into
 evolution code.
+
+After these foundations are stable, Step 2 begins with the actual evolvable
+creature-body genome: multiple segments, joints, motors, constraints, and
+mutation-ready morphology.

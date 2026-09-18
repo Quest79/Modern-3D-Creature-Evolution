@@ -1,26 +1,69 @@
 extends Node
 
+const EVENT_PORT_START := 47821
+const EVENT_PORT_TRIES := 32
+
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
 var _seconds_spin: SpinBox
 var _dt_spin: SpinBox
-var _run_button: Button
+var _batch_button: Button
+var _live_button: Button
+var _stop_button: Button
 var _status_label: Label
+var _progress_bar: ProgressBar
 var _metrics: RichTextLabel
+var _capabilities_label: Label
 var _probe_mesh: MeshInstance3D
-var _thread: Thread
-var _running := false
+
+var _udp: PacketPeerUDP
+var _event_port := 0
+var _job_pid := 0
+var _job_kind := ""
+var _last_state_time := 0.0
 
 
 func _ready() -> void:
     _build_3d_preview()
     _build_ui()
-    _set_status("Ready. Rust backend found: %s" % _backend_exists())
+
+    if not _backend_exists():
+        _set_status("Rust backend missing. Run BOOTSTRAP_AND_RUN.bat.")
+        _set_controls_enabled(false)
+        return
+
+    if not _open_event_socket():
+        _set_status("Could not open a local event port for the simulator.")
+        _set_controls_enabled(false)
+        return
+
+    _load_capabilities()
+    _set_status("Ready • backend connected on localhost:%d" % _event_port)
+
+
+func _process(_delta: float) -> void:
+    if _udp == null:
+        return
+
+    while _udp.get_available_packet_count() > 0:
+        var raw := _udp.get_packet().get_string_from_utf8()
+        var parsed = JSON.parse_string(raw)
+        if typeof(parsed) == TYPE_DICTIONARY:
+            _handle_event(parsed)
+
+    if _job_pid > 0 and not OS.is_process_running(_job_pid):
+        # Completion is normally received by UDP before the process exits. If
+        # it was lost, avoid leaving the UI stuck forever.
+        _job_pid = 0
+        if _job_kind != "":
+            _set_status("Simulator process ended.")
+            _finish_job_controls()
 
 
 func _exit_tree() -> void:
-    if _thread != null and _thread.is_started():
-        _thread.wait_to_finish()
+    _stop_current_job()
+    if _udp != null:
+        _udp.close()
 
 
 func _backend_path() -> String:
@@ -32,6 +75,18 @@ func _backend_path() -> String:
 
 func _backend_exists() -> bool:
     return FileAccess.file_exists(_backend_path())
+
+
+func _open_event_socket() -> bool:
+    _udp = PacketPeerUDP.new()
+
+    for port in range(EVENT_PORT_START, EVENT_PORT_START + EVENT_PORT_TRIES):
+        if _udp.bind(port, "127.0.0.1") == OK:
+            _event_port = port
+            return true
+
+    _udp = null
+    return false
 
 
 func _build_3d_preview() -> void:
@@ -85,7 +140,7 @@ func _build_ui() -> void:
 
     var panel := PanelContainer.new()
     panel.position = Vector2(18, 18)
-    panel.size = Vector2(430, 724)
+    panel.size = Vector2(470, 800)
     layer.add_child(panel)
 
     var margin := MarginContainer.new()
@@ -96,7 +151,7 @@ func _build_ui() -> void:
     panel.add_child(margin)
 
     var column := VBoxContainer.new()
-    column.add_theme_constant_override("separation", 10)
+    column.add_theme_constant_override("separation", 9)
     margin.add_child(column)
 
     var title := Label.new()
@@ -105,27 +160,48 @@ func _build_ui() -> void:
     column.add_child(title)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 1 • Simulation Foundation"
+    subtitle.text = "Step 1 • Live Simulation Foundation"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
     column.add_child(HSeparator.new())
 
-    _batch_spin = _add_number_row(column, "Worlds", 1, 1000000, 1000, 1)
+    _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
+    _batch_spin.tooltip_text = "Independent physics worlds evaluated as a batch."
     _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
-    _seconds_spin = _add_number_row(column, "Seconds / world", 0.1, 120.0, 5.0, 0.1)
+    _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 5.0, 0.1)
     _dt_spin = _add_number_row(column, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
 
-    _run_button = Button.new()
-    _run_button.text = "Run Parallel Physics Test"
-    _run_button.custom_minimum_size = Vector2(0, 42)
-    _run_button.pressed.connect(_on_run_pressed)
-    column.add_child(_run_button)
+    _live_button = Button.new()
+    _live_button.text = "▶ Watch Live Physics"
+    _live_button.custom_minimum_size = Vector2(0, 40)
+    _live_button.pressed.connect(_on_live_pressed)
+    column.add_child(_live_button)
+
+    _batch_button = Button.new()
+    _batch_button.text = "Run Parallel Benchmark"
+    _batch_button.custom_minimum_size = Vector2(0, 40)
+    _batch_button.pressed.connect(_on_batch_pressed)
+    column.add_child(_batch_button)
+
+    _stop_button = Button.new()
+    _stop_button.text = "■ Stop"
+    _stop_button.custom_minimum_size = Vector2(0, 34)
+    _stop_button.disabled = true
+    _stop_button.pressed.connect(_on_stop_pressed)
+    column.add_child(_stop_button)
 
     _status_label = Label.new()
-    _status_label.text = "Ready"
+    _status_label.text = "Starting..."
     _status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     column.add_child(_status_label)
+
+    _progress_bar = ProgressBar.new()
+    _progress_bar.min_value = 0
+    _progress_bar.max_value = 100
+    _progress_bar.value = 0
+    _progress_bar.show_percentage = true
+    column.add_child(_progress_bar)
 
     column.add_child(HSeparator.new())
 
@@ -137,12 +213,18 @@ func _build_ui() -> void:
     _metrics = RichTextLabel.new()
     _metrics.bbcode_enabled = true
     _metrics.fit_content = false
-    _metrics.custom_minimum_size = Vector2(0, 300)
-    _metrics.text = "[color=#9aa7bd]Run a test to populate metrics.[/color]"
+    _metrics.custom_minimum_size = Vector2(0, 205)
+    _metrics.text = "[color=#9aa7bd]Run a live preview or benchmark.[/color]"
     column.add_child(_metrics)
 
+    _capabilities_label = Label.new()
+    _capabilities_label.text = "Backend capabilities: loading..."
+    _capabilities_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    _capabilities_label.modulate = Color(0.64, 0.7, 0.8)
+    column.add_child(_capabilities_label)
+
     var footer := Label.new()
-    footer.text = "The 3D box is the Step 1 probe. Simulation runs in Rust; Godot is only the UI/viewer."
+    footer.text = "Rust owns the physics. Godot receives world-state snapshots and renders them."
     footer.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     footer.modulate = Color(0.64, 0.7, 0.8)
     column.add_child(footer)
@@ -174,95 +256,248 @@ func _add_number_row(
     return spin
 
 
-func _on_run_pressed() -> void:
-    if _running:
-        return
-
-    if not _backend_exists():
-        _set_status("Rust backend is missing. Run BOOTSTRAP_AND_RUN.bat to build it.")
-        return
-
-    _running = true
-    _run_button.disabled = true
-    _run_button.text = "Running..."
-    _probe_mesh.position = Vector3(1.8, 3.0, 0.0)
-    _metrics.text = "[color=#9aa7bd]Evaluating independent physics worlds...[/color]"
-    _set_status("Running Rust simulation backend...")
-
-    var request := {
-        "batch": int(_batch_spin.value),
-        "workers": int(_workers_spin.value),
-        "seconds": float(_seconds_spin.value),
-        "dt": float(_dt_spin.value),
-    }
-
-    _thread = Thread.new()
-    _thread.start(_run_probe_worker.bind(request))
-
-
-func _run_probe_worker(request: Dictionary) -> void:
+func _load_capabilities() -> void:
     var output: Array = []
+    var exit_code := OS.execute(
+        _backend_path(),
+        PackedStringArray(["capabilities", "--json"]),
+        output,
+        true,
+        false
+    )
+
+    if exit_code != 0 or output.is_empty():
+        _capabilities_label.text = "Backend capabilities unavailable."
+        return
+
+    var parsed = JSON.parse_string(str(output[0]).strip_edges())
+    if typeof(parsed) != TYPE_DICTIONARY:
+        _capabilities_label.text = "Backend capabilities unavailable."
+        return
+
+    var backends: Array = parsed.get("backends", [])
+    var backend: Dictionary = backends[0] if not backends.is_empty() else {}
+    _capabilities_label.text = (
+        "v%s • %s logical CPU threads • %s • deterministic: %s • live streaming: %s • GPU: %s"
+        % [
+            str(parsed.get("app_version", "?")),
+            str(parsed.get("logical_cpu_threads", "?")),
+            str(backend.get("name", "unknown")),
+            _yes_no(backend.get("deterministic", false)),
+            _yes_no(backend.get("state_streaming", false)),
+            "yes" if backend.get("gpu_accelerated", false) else "not yet",
+        ]
+    )
+
+
+func _on_live_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    _reset_probe()
+    _progress_bar.value = 0
+    _metrics.text = "[color=#9aa7bd]Receiving live world-state snapshots...[/color]"
+
     var args := PackedStringArray([
-        "probe",
-        "--batch", str(request.batch),
-        "--workers", str(request.workers),
-        "--seconds", str(request.seconds),
-        "--dt", str(request.dt),
-        "--json",
+        "stream",
+        "--event-port", str(_event_port),
+        "--seconds", str(_seconds_spin.value),
+        "--dt", str(_dt_spin.value),
+        "--frame-hz", "60",
     ])
 
-    var exit_code := OS.execute(_backend_path(), args, output, true, false)
-    var raw := ""
-    for line in output:
-        raw += str(line)
-
-    call_deferred("_probe_finished", exit_code, raw)
+    if _start_job("live", args):
+        _set_status("Live physics running...")
 
 
-func _probe_finished(exit_code: int, raw: String) -> void:
-    if _thread != null:
-        _thread.wait_to_finish()
-        _thread = null
-
-    _running = false
-    _run_button.disabled = false
-    _run_button.text = "Run Parallel Physics Test"
-
-    if exit_code != 0:
-        _set_status("Backend failed with exit code %d" % exit_code)
-        _metrics.text = "[color=#ff7b7b]%s[/color]" % raw.strip_edges()
+func _on_batch_pressed() -> void:
+    if _job_pid > 0:
         return
 
-    var parsed = JSON.parse_string(raw.strip_edges())
-    if typeof(parsed) != TYPE_DICTIONARY:
-        _set_status("Backend returned invalid JSON.")
-        _metrics.text = "[color=#ff7b7b]%s[/color]" % raw.strip_edges()
+    _reset_probe()
+    _progress_bar.value = 0
+    _metrics.text = "[color=#9aa7bd]Evaluating independent simulations in parallel...[/color]"
+
+    var args := PackedStringArray([
+        "probe",
+        "--batch", str(int(_batch_spin.value)),
+        "--workers", str(int(_workers_spin.value)),
+        "--seconds", str(_seconds_spin.value),
+        "--dt", str(_dt_spin.value),
+        "--event-port", str(_event_port),
+    ])
+
+    if _start_job("batch", args):
+        _set_status("Parallel benchmark running...")
+
+
+func _start_job(kind: String, args: PackedStringArray) -> bool:
+    _job_kind = kind
+    _job_pid = OS.create_process(_backend_path(), args, false)
+
+    if _job_pid <= 0:
+        _job_pid = 0
+        _job_kind = ""
+        _set_status("Failed to start Rust simulator.")
+        return false
+
+    _live_button.disabled = true
+    _batch_button.disabled = true
+    _stop_button.disabled = false
+    return true
+
+
+func _on_stop_pressed() -> void:
+    _stop_current_job()
+    _set_status("Stopped.")
+    _metrics.text = "[color=#9aa7bd]Simulation cancelled.[/color]"
+
+
+func _stop_current_job() -> void:
+    if _job_pid > 0 and OS.is_process_running(_job_pid):
+        OS.kill(_job_pid)
+    _job_pid = 0
+    _job_kind = ""
+    _finish_job_controls()
+
+
+func _finish_job_controls() -> void:
+    _live_button.disabled = false
+    _batch_button.disabled = false
+    _stop_button.disabled = true
+
+
+func _handle_event(event: Dictionary) -> void:
+    var kind := str(event.get("kind", ""))
+
+    match kind:
+        "batch_started":
+            _progress_bar.value = 0
+            _set_status("Benchmark started • %s simulations" % str(event.get("total", 0)))
+
+        "batch_progress":
+            var fraction := float(event.get("fraction", 0.0))
+            _progress_bar.value = fraction * 100.0
+            _set_status(
+                "Benchmark • %s / %s simulations"
+                % [str(event.get("completed", 0)), str(event.get("total", 0))]
+            )
+
+        "probe_result":
+            _show_probe_result(event)
+            _progress_bar.value = 100
+            _job_pid = 0
+            _job_kind = ""
+            _finish_job_controls()
+
+        "stream_started":
+            _progress_bar.value = 0
+            _last_state_time = 0.0
+            _set_status("Live stream • %s Hz" % str(event.get("frame_hz", 60)))
+
+        "world_state":
+            _show_world_state(event.get("state", {}))
+
+        "stream_complete":
+            _progress_bar.value = 100
+            _set_status("Live simulation complete • %s s" % _format_float(event.get("simulated_seconds", 0.0), 3))
+            _job_pid = 0
+            _job_kind = ""
+            _finish_job_controls()
+
+
+func _show_world_state(state_value) -> void:
+    if typeof(state_value) != TYPE_DICTIONARY:
         return
 
-    var result: Dictionary = parsed
-    var position: Array = result.get("final_probe_position", [0.0, 0.35, 0.0])
+    var state: Dictionary = state_value
+    var position: Array = state.get("position", [0.0, 3.0, 0.0])
+    var rotation: Array = state.get("rotation_xyzw", [0.0, 0.0, 0.0, 1.0])
+
     if position.size() >= 3:
-        _probe_mesh.position = Vector3(1.8 + float(position[0]), float(position[1]), float(position[2]))
+        _probe_mesh.position = Vector3(
+            1.8 + float(position[0]),
+            float(position[1]),
+            float(position[2])
+        )
 
-    _set_status("Complete • %s backend" % result.get("backend", "unknown"))
+    if rotation.size() >= 4:
+        _probe_mesh.quaternion = Quaternion(
+            float(rotation[0]),
+            float(rotation[1]),
+            float(rotation[2]),
+            float(rotation[3])
+        )
+
+    _last_state_time = float(state.get("simulated_seconds", 0.0))
+    if _seconds_spin.value > 0:
+        _progress_bar.value = clamp(_last_state_time / _seconds_spin.value * 100.0, 0.0, 100.0)
+
+    var velocity: Array = state.get("linear_velocity", [0.0, 0.0, 0.0])
+    var speed := 0.0
+    if velocity.size() >= 3:
+        speed = Vector3(
+            float(velocity[0]),
+            float(velocity[1]),
+            float(velocity[2])
+        ).length()
 
     _metrics.text = (
         "[table=2]"
-        + "[cell]Worlds evaluated[/cell][cell][b]%s[/b][/cell]" % _format_int(result.get("worlds_evaluated", 0))
+        + "[cell]Mode[/cell][cell][b]Live world state[/b][/cell]"
+        + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
+        + "[cell]Simulated time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
+        + "[cell]Height[/cell][cell]%s m[/cell]" % _format_float(position[1] if position.size() >= 2 else 0.0, 3)
+        + "[cell]Speed[/cell][cell]%s m/s[/cell]" % _format_float(speed, 3)
+        + "[cell]Sleeping[/cell][cell]%s[/cell]" % str(state.get("sleeping", false))
+        + "[/table]"
+    )
+
+
+func _show_probe_result(result: Dictionary) -> void:
+    var position: Array = result.get("final_probe_position", [0.0, 0.35, 0.0])
+    if position.size() >= 3:
+        _probe_mesh.position = Vector3(
+            1.8 + float(position[0]),
+            float(position[1]),
+            float(position[2])
+        )
+
+    _set_status("Benchmark complete • %s backend" % result.get("backend", "unknown"))
+
+    _metrics.text = (
+        "[table=2]"
+        + "[cell]Simulations evaluated[/cell][cell][b]%s[/b][/cell]" % _format_int(result.get("worlds_evaluated", 0))
         + "[cell]Wall time[/cell][cell][b]%.4f s[/b][/cell]" % float(result.get("wall_seconds", 0.0))
-        + "[cell]World throughput[/cell][cell][b]%s / s[/b][/cell]" % _format_float(result.get("worlds_per_second", 0.0), 1)
+        + "[cell]Simulation throughput[/cell][cell][b]%s / s[/b][/cell]" % _format_float(result.get("worlds_per_second", 0.0), 1)
         + "[cell]Physics throughput[/cell][cell][b]%s steps / s[/b][/cell]" % _format_float(result.get("physics_steps_per_second", 0.0), 0)
-        + "[cell]Steps / world[/cell][cell]%s[/cell]" % _format_int(result.get("steps_per_world", 0))
+        + "[cell]Steps / simulation[/cell][cell]%s[/cell]" % _format_int(result.get("steps_per_world", 0))
         + "[cell]Physics dt[/cell][cell]%.8f s[/cell]" % float(result.get("physics_dt_seconds", 0.0))
-        + "[cell]Simulated time / world[/cell][cell]%.3f s[/cell]" % float(result.get("simulated_seconds_per_world", 0.0))
+        + "[cell]Simulated time[/cell][cell]%.3f s[/cell]" % float(result.get("simulated_seconds_per_world", 0.0))
         + "[cell]Deterministic[/cell][cell]%s[/cell]" % str(result.get("deterministic", false))
         + "[/table]"
     )
 
 
+func _reset_probe() -> void:
+    _probe_mesh.position = Vector3(1.8, 3.0, 0.0)
+    _probe_mesh.quaternion = Quaternion.IDENTITY
+
+
+func _set_controls_enabled(enabled: bool) -> void:
+    if _live_button != null:
+        _live_button.disabled = not enabled
+    if _batch_button != null:
+        _batch_button.disabled = not enabled
+
+
 func _set_status(text: String) -> void:
     if _status_label != null:
         _status_label.text = text
+
+
+func _yes_no(value) -> String:
+    return "yes" if bool(value) else "no"
 
 
 func _format_int(value) -> String:
