@@ -33,7 +33,7 @@ impl RapierCpuBackend {
 
     fn snapshot(body: &RigidBody, step: usize, dt: f32) -> WorldSnapshot {
         let p = body.translation();
-        let q = body.rotation().quaternion();
+        let q = body.rotation();
         let v = body.linvel();
         let w = body.angvel();
 
@@ -41,7 +41,7 @@ impl RapierCpuBackend {
             step,
             simulated_seconds: step as f32 * dt,
             position: [p.x, p.y, p.z],
-            rotation_xyzw: [q.i, q.j, q.k, q.w],
+            rotation_xyzw: [q.x, q.y, q.z, q.w],
             linear_velocity: [v.x, v.y, v.z],
             angular_velocity: [w.x, w.y, w.z],
             sleeping: body.is_sleeping(),
