@@ -6,16 +6,10 @@ use crate::{PhysicsBackend, ProbeSpec, SimulationConfig, SimulationReport};
 ///
 /// This outer-world parallelism avoids coupling creatures together and maps
 /// naturally to future GPU batches and distributed workers.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct BatchRunner {
     /// 0 means "let Rayon choose".
     pub threads: usize,
-}
-
-impl Default for BatchRunner {
-    fn default() -> Self {
-        Self { threads: 0 }
-    }
 }
 
 impl BatchRunner {

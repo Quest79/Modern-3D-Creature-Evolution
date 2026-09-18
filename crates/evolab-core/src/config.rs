@@ -68,8 +68,10 @@ mod tests {
 
     #[test]
     fn rejects_zero_timestep() {
-        let mut config = SimulationConfig::default();
-        config.dt = 0.0;
+        let config = SimulationConfig {
+            dt: 0.0,
+            ..SimulationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 }

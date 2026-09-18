@@ -68,8 +68,10 @@ impl PhysicsBackend for RapierCpuBackend {
         colliders.insert_with_parent(collider, body_handle, &mut rigid_bodies);
 
         let gravity = Vector::new(config.gravity[0], config.gravity[1], config.gravity[2]);
-        let mut integration_parameters = IntegrationParameters::default();
-        integration_parameters.dt = config.dt;
+        let integration_parameters = IntegrationParameters {
+            dt: config.dt,
+            ..IntegrationParameters::default()
+        };
 
         let mut physics_pipeline = PhysicsPipeline::new();
         let mut island_manager = IslandManager::new();
