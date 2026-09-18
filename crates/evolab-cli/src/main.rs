@@ -161,14 +161,7 @@ fn run() -> Result<(), String> {
             dt,
             frame_hz,
             max_speed,
-        } => run_creature_stream(
-            &event_host,
-            event_port,
-            seconds,
-            dt,
-            frame_hz,
-            !max_speed,
-        ),
+        } => run_creature_stream(&event_host, event_port, seconds, dt, frame_hz, !max_speed),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
