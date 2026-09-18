@@ -189,9 +189,7 @@ impl PhysicsBackend for RapierCpuBackend {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot,
-    };
+    use crate::{PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot};
 
     #[test]
     fn falling_probe_reaches_ground() {
@@ -223,15 +221,10 @@ mod tests {
         let mut frames: Vec<WorldSnapshot> = Vec::new();
 
         backend
-            .run_probe_streaming(
-                &config,
-                &ProbeSpec::default(),
-                60,
-                &mut |snapshot| {
-                    frames.push(snapshot.clone());
-                    Ok(())
-                },
-            )
+            .run_probe_streaming(&config, &ProbeSpec::default(), 60, &mut |snapshot| {
+                frames.push(snapshot.clone());
+                Ok(())
+            })
             .unwrap();
 
         assert_eq!(frames.first().unwrap().step, 0);

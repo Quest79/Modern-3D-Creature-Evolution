@@ -125,14 +125,7 @@ fn run() -> Result<(), String> {
             dt,
             frame_hz,
             max_speed,
-        } => run_stream(
-            &event_host,
-            event_port,
-            seconds,
-            dt,
-            frame_hz,
-            !max_speed,
-        ),
+        } => run_stream(&event_host, event_port, seconds, dt, frame_hz, !max_speed),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
@@ -291,8 +284,7 @@ fn run_stream(
     let wall_start = Instant::now();
     let mut observer = |snapshot: &WorldSnapshot| -> Result<(), String> {
         if realtime {
-            let target =
-                wall_start + Duration::from_secs_f64(snapshot.simulated_seconds as f64);
+            let target = wall_start + Duration::from_secs_f64(snapshot.simulated_seconds as f64);
             let now = Instant::now();
             if target > now {
                 thread::sleep(target - now);
