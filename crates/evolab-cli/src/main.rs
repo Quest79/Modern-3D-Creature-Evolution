@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use evolab_core::{
-    BatchRunner, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot,
+    BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, PhysicsBackend, ProbeSpec,
+    RapierCpuBackend, SimulationConfig, WorldSnapshot,
 };
 use serde_json::{Value, json};
 
@@ -80,6 +81,33 @@ enum Command {
         max_speed: bool,
     },
 
+    /// Stream the default three-segment creature with motorized joints.
+    CreatureStream {
+        /// UDP port receiving creature frames.
+        #[arg(long)]
+        event_port: u16,
+
+        /// Host receiving creature frames.
+        #[arg(long, default_value = "127.0.0.1")]
+        event_host: String,
+
+        /// Simulated seconds.
+        #[arg(long, default_value_t = 8.0)]
+        seconds: f32,
+
+        /// Fixed physics timestep in seconds.
+        #[arg(long, default_value_t = 1.0 / 120.0)]
+        dt: f32,
+
+        /// Viewer update frequency.
+        #[arg(long, default_value_t = 60.0)]
+        frame_hz: f32,
+
+        /// Disable real-time pacing and stream as fast as the CPU can simulate.
+        #[arg(long, default_value_t = false)]
+        max_speed: bool,
+    },
+
     /// Report backend and machine capabilities.
     Capabilities {
         #[arg(long, default_value_t = false)]
@@ -126,6 +154,21 @@ fn run() -> Result<(), String> {
             frame_hz,
             max_speed,
         } => run_stream(&event_host, event_port, seconds, dt, frame_hz, !max_speed),
+        Command::CreatureStream {
+            event_port,
+            event_host,
+            seconds,
+            dt,
+            frame_hz,
+            max_speed,
+        } => run_creature_stream(
+            &event_host,
+            event_port,
+            seconds,
+            dt,
+            frame_hz,
+            !max_speed,
+        ),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
@@ -319,6 +362,83 @@ fn run_stream(
             "simulated_seconds": report.simulated_seconds,
             "final_probe_position": report.final_position,
             "final_probe_velocity": report.final_linear_velocity,
+        }),
+    );
+
+    Ok(())
+}
+
+fn run_creature_stream(
+    event_host: &str,
+    event_port: u16,
+    seconds: f32,
+    dt: f32,
+    frame_hz: f32,
+    realtime: bool,
+) -> Result<(), String> {
+    if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
+        return Err("frame_hz must be between 1 and 240".into());
+    }
+
+    let config = SimulationConfig {
+        duration_seconds: seconds,
+        dt,
+        ..SimulationConfig::default()
+    };
+    config.validate()?;
+
+    let socket = make_event_socket(event_host, Some(event_port))?
+        .ok_or_else(|| "creature streaming requires an event port".to_string())?;
+    let simulator = CreatureSimulator;
+    let genome = CreatureGenome::three_segment_walker();
+    let sample_every_steps = ((1.0 / frame_hz) / config.dt).round().max(1.0) as usize;
+
+    send_event(
+        &socket,
+        &json!({
+            "protocol_version": 1,
+            "kind": "creature_stream_started",
+            "creature_name": genome.name,
+            "segment_count": genome.segments.len(),
+            "joint_count": genome.joints.len(),
+            "frame_hz": frame_hz,
+            "sample_every_steps": sample_every_steps,
+            "realtime": realtime,
+            "genome": genome,
+        }),
+    );
+
+    let wall_start = Instant::now();
+    let mut observer = |snapshot: &CreatureSnapshot| -> Result<(), String> {
+        if realtime {
+            let target = wall_start + Duration::from_secs_f64(snapshot.simulated_seconds as f64);
+            let now = Instant::now();
+            if target > now {
+                thread::sleep(target - now);
+            }
+        }
+
+        send_event(
+            &socket,
+            &json!({
+                "protocol_version": 1,
+                "kind": "creature_state",
+                "state": snapshot,
+            }),
+        );
+        Ok(())
+    };
+
+    let report = simulator.run_streaming(&config, &genome, sample_every_steps, &mut observer)?;
+
+    send_event(
+        &socket,
+        &json!({
+            "protocol_version": 1,
+            "kind": "creature_stream_complete",
+            "steps": report.steps,
+            "simulated_seconds": report.simulated_seconds,
+            "final_root_position": report.final_root_position,
         }),
     );
 
