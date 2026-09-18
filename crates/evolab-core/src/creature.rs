@@ -122,14 +122,24 @@ impl CreatureGenome {
                     segment.id
                 ));
             }
-            if segment.initial_position.iter().any(|value| !value.is_finite()) {
+            if segment
+                .initial_position
+                .iter()
+                .any(|value| !value.is_finite())
+            {
                 return Err(format!("segment {} position must be finite", segment.id));
             }
             if !segment.density.is_finite() || segment.density <= 0.0 {
-                return Err(format!("segment {} density must be greater than 0", segment.id));
+                return Err(format!(
+                    "segment {} density must be greater than 0",
+                    segment.id
+                ));
             }
             if !segment.friction.is_finite() || segment.friction < 0.0 {
-                return Err(format!("segment {} friction must be non-negative", segment.id));
+                return Err(format!(
+                    "segment {} friction must be non-negative",
+                    segment.id
+                ));
             }
         }
 
@@ -246,11 +256,7 @@ impl CreatureSimulator {
                 .get(&joint_gene.child_id)
                 .ok_or_else(|| "missing child body handle".to_string())?;
 
-            let axis = Vector::new(
-                joint_gene.axis[0],
-                joint_gene.axis[1],
-                joint_gene.axis[2],
-            );
+            let axis = Vector::new(joint_gene.axis[0], joint_gene.axis[1], joint_gene.axis[2]);
 
             let joint = RevoluteJointBuilder::new(axis)
                 .local_anchor1(Vector::new(
@@ -265,11 +271,7 @@ impl CreatureSimulator {
                 ))
                 .contacts_enabled(false)
                 .limits(joint_gene.limits_radians)
-                .motor_position(
-                    0.0,
-                    joint_gene.motor_stiffness,
-                    joint_gene.motor_damping,
-                )
+                .motor_position(0.0, joint_gene.motor_stiffness, joint_gene.motor_damping)
                 .motor_max_force(joint_gene.motor_max_torque)
                 .build();
 
@@ -289,7 +291,13 @@ impl CreatureSimulator {
         let mut multibody_joints = MultibodyJointSet::new();
         let mut ccd_solver = CCDSolver::new();
 
-        observer(&Self::snapshot(genome, &handles, &rigid_bodies, 0, config.dt)?)?;
+        observer(&Self::snapshot(
+            genome,
+            &handles,
+            &rigid_bodies,
+            0,
+            config.dt,
+        )?)?;
 
         let sample_every_steps = sample_every_steps.max(1);
         let total_steps = config.step_count();
