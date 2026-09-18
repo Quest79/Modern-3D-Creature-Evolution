@@ -25,7 +25,9 @@ func _exit_tree() -> void:
 
 func _backend_path() -> String:
     var exe_name := "evolab.exe" if OS.get_name() == "Windows" else "evolab"
-    return ProjectSettings.globalize_path("res://../../target/release/%s" % exe_name)
+    var project_dir := ProjectSettings.globalize_path("res://")
+    var repo_root := project_dir.path_join("../..").simplify_path()
+    return repo_root.path_join("target").path_join("release").path_join(exe_name)
 
 
 func _backend_exists() -> bool:
@@ -113,7 +115,6 @@ func _build_ui() -> void:
     _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
     _seconds_spin = _add_number_row(column, "Seconds / world", 0.1, 120.0, 5.0, 0.1)
     _dt_spin = _add_number_row(column, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
-    _dt_spin.custom_arrow_step = 0.0001
 
     _run_button = Button.new()
     _run_button.text = "Run Parallel Physics Test"
