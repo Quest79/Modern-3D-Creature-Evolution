@@ -7,14 +7,16 @@ var _batch_spin: SpinBox
 var _workers_spin: SpinBox
 var _seconds_spin: SpinBox
 var _dt_spin: SpinBox
-var _batch_button: Button
 var _live_button: Button
+var _creature_button: Button
+var _batch_button: Button
 var _stop_button: Button
 var _status_label: Label
 var _progress_bar: ProgressBar
 var _metrics: RichTextLabel
 var _capabilities_label: Label
 var _probe_mesh: MeshInstance3D
+var _creature_meshes: Dictionary = {}
 
 var _udp: PacketPeerUDP
 var _event_port := 0
@@ -52,8 +54,6 @@ func _process(_delta: float) -> void:
             _handle_event(parsed)
 
     if _job_pid > 0 and not OS.is_process_running(_job_pid):
-        # Completion is normally received by UDP before the process exits. If
-        # it was lost, avoid leaving the UI stuck forever.
         _job_pid = 0
         if _job_kind != "":
             _set_status("Simulator process ended.")
@@ -151,7 +151,7 @@ func _build_ui() -> void:
     panel.add_child(margin)
 
     var column := VBoxContainer.new()
-    column.add_theme_constant_override("separation", 9)
+    column.add_theme_constant_override("separation", 8)
     margin.add_child(column)
 
     var title := Label.new()
@@ -160,27 +160,33 @@ func _build_ui() -> void:
     column.add_child(title)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 1 • Live Simulation Foundation"
+    subtitle.text = "Step 2 • Creature Morphology"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
     column.add_child(HSeparator.new())
 
     _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
-    _batch_spin.tooltip_text = "Independent physics worlds evaluated as a batch."
+    _batch_spin.tooltip_text = "Independent physics simulations evaluated as a batch."
     _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
-    _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 5.0, 0.1)
+    _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 8.0, 0.1)
     _dt_spin = _add_number_row(column, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
 
+    _creature_button = Button.new()
+    _creature_button.text = "🧬 Watch 3-Segment Creature"
+    _creature_button.custom_minimum_size = Vector2(0, 42)
+    _creature_button.pressed.connect(_on_creature_pressed)
+    column.add_child(_creature_button)
+
     _live_button = Button.new()
-    _live_button.text = "▶ Watch Live Physics"
-    _live_button.custom_minimum_size = Vector2(0, 40)
+    _live_button.text = "Watch Single-Box Physics"
+    _live_button.custom_minimum_size = Vector2(0, 38)
     _live_button.pressed.connect(_on_live_pressed)
     column.add_child(_live_button)
 
     _batch_button = Button.new()
     _batch_button.text = "Run Parallel Benchmark"
-    _batch_button.custom_minimum_size = Vector2(0, 40)
+    _batch_button.custom_minimum_size = Vector2(0, 38)
     _batch_button.pressed.connect(_on_batch_pressed)
     column.add_child(_batch_button)
 
@@ -206,15 +212,15 @@ func _build_ui() -> void:
     column.add_child(HSeparator.new())
 
     var heading := Label.new()
-    heading.text = "Latest result"
+    heading.text = "Live state / latest result"
     heading.add_theme_font_size_override("font_size", 18)
     column.add_child(heading)
 
     _metrics = RichTextLabel.new()
     _metrics.bbcode_enabled = true
     _metrics.fit_content = false
-    _metrics.custom_minimum_size = Vector2(0, 205)
-    _metrics.text = "[color=#9aa7bd]Run a live preview or benchmark.[/color]"
+    _metrics.custom_minimum_size = Vector2(0, 190)
+    _metrics.text = "[color=#9aa7bd]Watch the creature or run a benchmark.[/color]"
     column.add_child(_metrics)
 
     _capabilities_label = Label.new()
@@ -224,7 +230,7 @@ func _build_ui() -> void:
     column.add_child(_capabilities_label)
 
     var footer := Label.new()
-    footer.text = "Rust owns the physics. Godot receives world-state snapshots and renders them."
+    footer.text = "The creature body and motorized joints are simulated in Rust. Godot only renders snapshots."
     footer.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     footer.modulate = Color(0.64, 0.7, 0.8)
     column.add_child(footer)
@@ -290,10 +296,33 @@ func _load_capabilities() -> void:
     )
 
 
+func _on_creature_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    _probe_mesh.visible = false
+    _clear_creature_meshes()
+    _progress_bar.value = 0
+    _metrics.text = "[color=#9aa7bd]Starting three-segment creature...[/color]"
+
+    var args := PackedStringArray([
+        "creature-stream",
+        "--event-port", str(_event_port),
+        "--seconds", str(_seconds_spin.value),
+        "--dt", str(_dt_spin.value),
+        "--frame-hz", "60",
+    ])
+
+    if _start_job("creature", args):
+        _set_status("Three-segment creature running...")
+
+
 func _on_live_pressed() -> void:
     if _job_pid > 0:
         return
 
+    _clear_creature_meshes()
+    _probe_mesh.visible = true
     _reset_probe()
     _progress_bar.value = 0
     _metrics.text = "[color=#9aa7bd]Receiving live world-state snapshots...[/color]"
@@ -307,13 +336,15 @@ func _on_live_pressed() -> void:
     ])
 
     if _start_job("live", args):
-        _set_status("Live physics running...")
+        _set_status("Single-box physics running...")
 
 
 func _on_batch_pressed() -> void:
     if _job_pid > 0:
         return
 
+    _clear_creature_meshes()
+    _probe_mesh.visible = true
     _reset_probe()
     _progress_bar.value = 0
     _metrics.text = "[color=#9aa7bd]Evaluating independent simulations in parallel...[/color]"
@@ -341,8 +372,7 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
         _set_status("Failed to start Rust simulator.")
         return false
 
-    _live_button.disabled = true
-    _batch_button.disabled = true
+    _set_run_buttons_disabled(true)
     _stop_button.disabled = false
     return true
 
@@ -362,9 +392,14 @@ func _stop_current_job() -> void:
 
 
 func _finish_job_controls() -> void:
-    _live_button.disabled = false
-    _batch_button.disabled = false
+    _set_run_buttons_disabled(false)
     _stop_button.disabled = true
+
+
+func _set_run_buttons_disabled(disabled: bool) -> void:
+    _creature_button.disabled = disabled
+    _live_button.disabled = disabled
+    _batch_button.disabled = disabled
 
 
 func _handle_event(event: Dictionary) -> void:
@@ -393,17 +428,160 @@ func _handle_event(event: Dictionary) -> void:
         "stream_started":
             _progress_bar.value = 0
             _last_state_time = 0.0
-            _set_status("Live stream • %s Hz" % str(event.get("frame_hz", 60)))
+            _set_status("Single-box stream • %s Hz" % str(event.get("frame_hz", 60)))
 
         "world_state":
             _show_world_state(event.get("state", {}))
 
         "stream_complete":
             _progress_bar.value = 100
-            _set_status("Live simulation complete • %s s" % _format_float(event.get("simulated_seconds", 0.0), 3))
+            _set_status(
+                "Single-box simulation complete • %s s"
+                % _format_float(event.get("simulated_seconds", 0.0), 3)
+            )
             _job_pid = 0
             _job_kind = ""
             _finish_job_controls()
+
+        "creature_stream_started":
+            _progress_bar.value = 0
+            _last_state_time = 0.0
+            _probe_mesh.visible = false
+            _build_creature_from_genome(event.get("genome", {}))
+            _set_status(
+                "%s • %s segments • %s motorized joints"
+                % [
+                    str(event.get("creature_name", "Creature")),
+                    str(event.get("segment_count", 0)),
+                    str(event.get("joint_count", 0)),
+                ]
+            )
+
+        "creature_state":
+            _show_creature_state(event.get("state", {}))
+
+        "creature_stream_complete":
+            _progress_bar.value = 100
+            _set_status(
+                "Creature simulation complete • %s s"
+                % _format_float(event.get("simulated_seconds", 0.0), 3)
+            )
+            _job_pid = 0
+            _job_kind = ""
+            _finish_job_controls()
+
+
+func _build_creature_from_genome(genome_value) -> void:
+    _clear_creature_meshes()
+    if typeof(genome_value) != TYPE_DICTIONARY:
+        return
+
+    var genome: Dictionary = genome_value
+    var segments: Array = genome.get("segments", [])
+
+    for segment_value in segments:
+        if typeof(segment_value) != TYPE_DICTIONARY:
+            continue
+
+        var segment: Dictionary = segment_value
+        var id_key := str(segment.get("id", 0))
+        var half: Array = segment.get("half_extents", [0.25, 0.25, 0.25])
+
+        var instance := MeshInstance3D.new()
+        var box := BoxMesh.new()
+        if half.size() >= 3:
+            box.size = Vector3(
+                float(half[0]) * 2.0,
+                float(half[1]) * 2.0,
+                float(half[2]) * 2.0
+            )
+        instance.mesh = box
+
+        var material := StandardMaterial3D.new()
+        material.albedo_color = _segment_color(int(segment.get("id", 0)))
+        material.metallic = 0.08
+        material.roughness = 0.45
+        instance.material_override = material
+        add_child(instance)
+        _creature_meshes[id_key] = instance
+
+
+func _clear_creature_meshes() -> void:
+    for mesh_value in _creature_meshes.values():
+        var mesh := mesh_value as MeshInstance3D
+        if is_instance_valid(mesh):
+            mesh.queue_free()
+    _creature_meshes.clear()
+
+
+func _show_creature_state(state_value) -> void:
+    if typeof(state_value) != TYPE_DICTIONARY:
+        return
+
+    var state: Dictionary = state_value
+    var bodies: Array = state.get("bodies", [])
+
+    for body_value in bodies:
+        if typeof(body_value) != TYPE_DICTIONARY:
+            continue
+
+        var body: Dictionary = body_value
+        var id_key := str(body.get("id", 0))
+        if not _creature_meshes.has(id_key):
+            continue
+
+        var mesh := _creature_meshes[id_key] as MeshInstance3D
+        var position: Array = body.get("position", [0.0, 0.0, 0.0])
+        var rotation: Array = body.get("rotation_xyzw", [0.0, 0.0, 0.0, 1.0])
+
+        if position.size() >= 3:
+            mesh.position = Vector3(
+                1.8 + float(position[0]),
+                float(position[1]),
+                float(position[2])
+            )
+
+        if rotation.size() >= 4:
+            mesh.quaternion = Quaternion(
+                float(rotation[0]),
+                float(rotation[1]),
+                float(rotation[2]),
+                float(rotation[3])
+            )
+
+    _last_state_time = float(state.get("simulated_seconds", 0.0))
+    if _seconds_spin.value > 0:
+        _progress_bar.value = clamp(
+            _last_state_time / _seconds_spin.value * 100.0,
+            0.0,
+            100.0
+        )
+
+    var root_height := 0.0
+    var root_speed := 0.0
+    if not bodies.is_empty() and typeof(bodies[0]) == TYPE_DICTIONARY:
+        var root: Dictionary = bodies[0]
+        var root_pos: Array = root.get("position", [0.0, 0.0, 0.0])
+        var root_vel: Array = root.get("linear_velocity", [0.0, 0.0, 0.0])
+        if root_pos.size() >= 2:
+            root_height = float(root_pos[1])
+        if root_vel.size() >= 3:
+            root_speed = Vector3(
+                float(root_vel[0]),
+                float(root_vel[1]),
+                float(root_vel[2])
+            ).length()
+
+    _metrics.text = (
+        "[table=2]"
+        + "[cell]Mode[/cell][cell][b]3-segment creature[/b][/cell]"
+        + "[cell]Segments[/cell][cell]%s[/cell]" % str(bodies.size())
+        + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
+        + "[cell]Simulated time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
+        + "[cell]Torso height[/cell][cell]%s m[/cell]" % _format_float(root_height, 3)
+        + "[cell]Torso speed[/cell][cell]%s m/s[/cell]" % _format_float(root_speed, 3)
+        + "[/table]"
+    )
 
 
 func _show_world_state(state_value) -> void:
@@ -431,7 +609,11 @@ func _show_world_state(state_value) -> void:
 
     _last_state_time = float(state.get("simulated_seconds", 0.0))
     if _seconds_spin.value > 0:
-        _progress_bar.value = clamp(_last_state_time / _seconds_spin.value * 100.0, 0.0, 100.0)
+        _progress_bar.value = clamp(
+            _last_state_time / _seconds_spin.value * 100.0,
+            0.0,
+            100.0
+        )
 
     var velocity: Array = state.get("linear_velocity", [0.0, 0.0, 0.0])
     var speed := 0.0
@@ -444,7 +626,7 @@ func _show_world_state(state_value) -> void:
 
     _metrics.text = (
         "[table=2]"
-        + "[cell]Mode[/cell][cell][b]Live world state[/b][/cell]"
+        + "[cell]Mode[/cell][cell][b]Single-box physics[/b][/cell]"
         + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
         + "[cell]Simulated time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
         + "[cell]Height[/cell][cell]%s m[/cell]" % _format_float(position[1] if position.size() >= 2 else 0.0, 3)
@@ -479,12 +661,26 @@ func _show_probe_result(result: Dictionary) -> void:
     )
 
 
+func _segment_color(id: int) -> Color:
+    match id:
+        0:
+            return Color(0.25, 0.78, 1.0)
+        1:
+            return Color(0.95, 0.55, 0.22)
+        2:
+            return Color(0.45, 0.92, 0.42)
+        _:
+            return Color(0.75, 0.75, 0.85)
+
+
 func _reset_probe() -> void:
     _probe_mesh.position = Vector3(1.8, 3.0, 0.0)
     _probe_mesh.quaternion = Quaternion.IDENTITY
 
 
 func _set_controls_enabled(enabled: bool) -> void:
+    if _creature_button != null:
+        _creature_button.disabled = not enabled
     if _live_button != null:
         _live_button.disabled = not enabled
     if _batch_button != null:
