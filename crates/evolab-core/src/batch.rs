@@ -1,4 +1,4 @@
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{ThreadPoolBuilder, prelude::*};
 
 use crate::{PhysicsBackend, ProbeSpec, SimulationConfig, SimulationReport};
 

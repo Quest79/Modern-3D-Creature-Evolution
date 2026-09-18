@@ -68,8 +68,7 @@ fn run() -> Result<(), String> {
             let backend = RapierCpuBackend;
 
             let started = Instant::now();
-            let reports =
-                runner.run_identical(&backend, &config, ProbeSpec::default(), batch)?;
+            let reports = runner.run_identical(&backend, &config, ProbeSpec::default(), batch)?;
             let elapsed = started.elapsed();
 
             let first = &reports[0];

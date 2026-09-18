@@ -22,7 +22,11 @@ impl PhysicsBackend for RapierCpuBackend {
     ) -> Result<SimulationReport, String> {
         config.validate()?;
 
-        if probe.half_extents.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        if probe
+            .half_extents
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+        {
             return Err("probe half_extents must be finite and greater than 0".into());
         }
         if !probe.restitution.is_finite() || !(0.0..=1.0).contains(&probe.restitution) {
