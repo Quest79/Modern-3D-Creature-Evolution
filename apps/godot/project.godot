@@ -1,0 +1,20 @@
+; Engine configuration file.
+; Step 1 only establishes the UI/backend boundary. Rendering and editor work
+; starts after the headless simulation API is stable.
+
+config_version=5
+
+[application]
+
+config/name="Modern 3D Creature Evolution"
+run/main_scene=""
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

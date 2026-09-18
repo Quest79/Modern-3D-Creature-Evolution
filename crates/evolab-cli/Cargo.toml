@@ -1,0 +1,13 @@
+[package]
+name = "evolab-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "evolab"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+evolab-core = { path = "../evolab-core" }

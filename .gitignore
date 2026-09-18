@@ -1,0 +1,6 @@
+/target/
+**/.godot/
+*.pdb
+*.log
+.DS_Store
+Thumbs.db

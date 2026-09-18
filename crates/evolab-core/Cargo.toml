@@ -1,0 +1,10 @@
+[package]
+name = "evolab-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rapier3d.workspace = true
+rayon.workspace = true
+serde.workspace = true
