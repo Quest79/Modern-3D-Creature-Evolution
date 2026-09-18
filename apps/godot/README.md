@@ -1,8 +1,18 @@
 # Godot frontend
 
-This directory is reserved for the modern desktop UI and 3D viewer.
+The Step 1 GUI is now functional.
 
-Step 1 intentionally keeps physics and evaluation in `evolab-core` so the UI
-never owns the simulation loop. The frontend will eventually communicate with
-the core through a stable API/FFI boundary and will be optional for headless
-runs.
+It provides:
+
+- a modern desktop window
+- settings for batch size, CPU worker count, simulation duration, and fixed timestep
+- a basic 3D probe preview
+- asynchronous execution so the UI stays responsive
+- machine-readable JSON communication with the Rust `evolab` backend
+- live result display for worlds/s, physics steps/s, wall time, and simulation settings
+
+The Rust simulation remains completely independent of Godot. Godot launches the
+compiled backend as a child process and consumes its versioned JSON result.
+
+This is intentionally a simple IPC boundary for Step 1. It can later be upgraded
+to a persistent local IPC server/FFI layer without putting physics into the UI.

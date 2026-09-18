@@ -4,16 +4,16 @@
 
 Establish the architecture that every later creature/evolution feature will use:
 
-- simulation is independent from rendering
+- simulation independent from rendering
 - fixed-timestep headless physics
 - reproducible isolated worlds
 - parallel CPU evaluation
 - replaceable physics backend interface
 - CLI execution without a GUI
-- a clean boundary for the future Godot frontend
+- a Godot frontend that talks to the backend through a machine-readable boundary
 - CI that compiles, tests, formats, and lints the Rust workspace
 
-## Implemented in this milestone
+## Implemented
 
 ### Rust workspace
 
@@ -31,36 +31,62 @@ Establish the architecture that every later creature/evolution feature will use:
 - configurable worker count
 - configurable evaluation duration
 - configurable fixed timestep
-- throughput report
+- human-readable throughput output
+- `--json` machine-readable result protocol for GUI/automation clients
+- worlds/s and physics-steps/s metrics
 
-### UI boundary
+### Godot GUI
 
-`apps/godot/` establishes the location of the future Godot 4 frontend. It does
-not contain physics or evolution logic.
+`apps/godot/` now contains a runnable Godot 4 frontend.
 
-## Try it
+The GUI can:
+
+- set number of independent worlds
+- set CPU worker count
+- set simulation duration
+- set fixed physics timestep
+- launch the Rust simulation without freezing the UI
+- parse the backend's JSON result
+- display performance metrics
+- show the Step 1 probe in a basic 3D preview
+
+Godot does not own the physics loop. The Rust executable remains the source of
+simulation truth.
+
+## Run it
+
+On Windows, use:
+
+```text
+BOOTSTRAP_AND_RUN.bat
+```
+
+The bootstrap script installs/builds the required components and launches the GUI.
+
+For headless testing:
 
 ```bash
 cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12
 ```
 
-A probe is currently just a rigid box dropped onto a flat ground plane. It is
-deliberately boring: its purpose is to verify that independent worlds can be
-simulated reproducibly and in parallel before creature morphology is added.
+For the GUI protocol directly:
+
+```bash
+cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12 --json
+```
 
 ## Step 1 remaining work
 
-The foundation is started, not finished. Before moving fully into Step 2:
+1. formal world snapshot/state API
+2. backend capability reporting
+3. dedicated benchmark harness
+4. cancellation and progress callbacks for long batches
+5. backend registry/factory
+6. persistent IPC or native FFI boundary if needed for high-frequency visualization
+7. CUDA batch-backend prototype behind a feature flag
+8. checkpoint-safe serialization of simulation inputs/results
+9. stream intermediate world state to the viewer for true live playback
 
-1. add a formal world snapshot/state API
-2. add backend capability reporting
-3. add benchmark harnesses and physics-steps/s metrics
-4. add cancellation and progress callbacks for long batches
-5. add a backend registry/factory
-6. define the FFI/IPC boundary used by Godot
-7. add a CUDA batch-backend prototype behind a feature flag
-8. add checkpoint-safe serialization of simulation inputs/results
-
-The CPU backend is intentionally the reference implementation. Accelerator
-backends must match its public contracts rather than leaking device-specific
-details into evolution code.
+The CPU backend remains the reference implementation. Accelerator backends must
+match its public contracts rather than leaking device-specific details into
+evolution code.

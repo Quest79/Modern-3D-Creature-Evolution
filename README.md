@@ -8,23 +8,41 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 1 — Simulation Foundation: started.**
+**Step 1 — Simulation Foundation: in progress.**
 
-The repository now has a headless Rust simulation core, a Rapier 3D CPU physics
-backend, fixed-timestep execution, parallel independent-world evaluation with
-Rayon, a CLI probe/benchmark command, a Godot frontend boundary, and CI.
+The project now has:
 
-See [docs/STEP-1.md](docs/STEP-1.md) for the current Step 1 implementation and
-remaining work.
+- headless Rust simulation core
+- Rapier 3D CPU physics
+- fixed-timestep deterministic execution
+- parallel independent-world evaluation with Rayon
+- replaceable physics-backend interface
+- JSON output protocol for GUI/automation clients
+- Godot 4 desktop GUI with basic 3D preview and simulation controls
+- GitHub Actions CI
 
-## Quick start
+See [docs/STEP-1.md](docs/STEP-1.md).
 
-Install a current stable Rust toolchain, then:
+## Windows quick start
+
+Download/run:
+
+```text
+BOOTSTRAP_AND_RUN.bat
+```
+
+It installs missing prerequisites, updates the repository, builds the Rust backend,
+and launches the Godot GUI.
+
+## Headless quick start
 
 ```bash
 cargo test --workspace
 cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12
 ```
 
-The probe is the first end-to-end test of the architecture: many isolated 3D
-physics worlds are evaluated headlessly and in parallel without any renderer.
+Machine-readable output:
+
+```bash
+cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12 --json
+```

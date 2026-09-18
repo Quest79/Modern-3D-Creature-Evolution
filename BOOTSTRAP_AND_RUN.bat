@@ -12,9 +12,6 @@ echo   Modern 3D Creature Evolution - Bootstrap and Run
 echo ============================================================
 echo.
 
-rem ------------------------------------------------------------
-rem 1) Make sure WinGet exists
-rem ------------------------------------------------------------
 where winget >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] WinGet is required but was not found.
@@ -23,9 +20,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem ------------------------------------------------------------
-rem 2) Install Git if needed
-rem ------------------------------------------------------------
 where git >nul 2>&1
 if errorlevel 1 (
     echo [SETUP] Git was not found. Installing Git...
@@ -35,22 +29,17 @@ if errorlevel 1 (
         pause
         exit /b 1
     )
-
-    rem Refresh the common Git locations into this process PATH.
     set "PATH=%ProgramFiles%\Git\cmd;%LOCALAPPDATA%\Programs\Git\cmd;%PATH%"
 )
 
 where git >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Git was installed but is not visible yet.
-    echo Close this window and run the batch file again.
+    echo Close this window and run this batch file again.
     pause
     exit /b 1
 )
 
-rem ------------------------------------------------------------
-rem 3) Install Rustup / Rust if needed
-rem ------------------------------------------------------------
 where rustup >nul 2>&1
 if errorlevel 1 (
     echo [SETUP] Rust was not found. Installing Rustup...
@@ -60,14 +49,13 @@ if errorlevel 1 (
         pause
         exit /b 1
     )
-
     set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 )
 
 where rustup >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Rustup was installed but is not visible yet.
-    echo Close this window and run the batch file again.
+    echo Close this window and run this batch file again.
     pause
     exit /b 1
 )
@@ -79,15 +67,10 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-
 set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 
-rem ------------------------------------------------------------
-rem 4) Make sure the MSVC C++ linker/build tools exist
-rem ------------------------------------------------------------
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VC_TOOLS_FOUND="
-
 if exist "%VSWHERE%" (
     for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
         set "VC_TOOLS_FOUND=%%I"
@@ -98,12 +81,10 @@ if not defined VC_TOOLS_FOUND (
     echo.
     echo [SETUP] Microsoft C++ Build Tools were not detected.
     echo [SETUP] Installing the Visual Studio 2022 C++ Build Tools.
-    echo [SETUP] Windows may ask for Administrator permission.
     echo.
     winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget ^
         --accept-package-agreements --accept-source-agreements ^
         --override "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-
     if errorlevel 1 (
         echo [ERROR] Visual Studio Build Tools installation failed.
         pause
@@ -111,9 +92,6 @@ if not defined VC_TOOLS_FOUND (
     )
 )
 
-rem ------------------------------------------------------------
-rem 5) Find, clone, or update the project
-rem ------------------------------------------------------------
 if exist "%SCRIPT_DIR%.git\" (
     set "PROJECT_DIR=%SCRIPT_DIR%"
 ) else if exist "%SCRIPT_DIR%%REPO_NAME%\.git\" (
@@ -150,11 +128,8 @@ if errorlevel 1 (
     echo.
 )
 
-rem ------------------------------------------------------------
-rem 6) Build the Step 1 executable
-rem ------------------------------------------------------------
 echo.
-echo [BUILD] Building release version...
+echo [BUILD] Building release backend...
 cargo build --release -p evolab-cli
 if errorlevel 1 (
     echo.
@@ -165,28 +140,62 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem ------------------------------------------------------------
-rem 7) Run
-rem ------------------------------------------------------------
-echo.
-echo [RUN] Build complete.
-echo.
-
-if "%~1"=="" (
-    echo Running the default Step 1 test:
-    echo   1000 independent physics worlds, automatic CPU thread count
+if /i "%~1"=="--cli" (
+    shift
     echo.
-    "%PROJECT_DIR%\target\release\evolab.exe" probe --batch 1000 --workers 0
-) else (
-    echo Running with custom arguments:
-    echo   %*
-    echo.
+    echo [RUN] Starting headless CLI...
     "%PROJECT_DIR%\target\release\evolab.exe" %*
+    echo.
+    pause
+    exit /b %errorlevel%
+)
+
+set "GODOT_CMD="
+where godot.exe >nul 2>&1
+if not errorlevel 1 set "GODOT_CMD=godot.exe"
+if not defined GODOT_CMD (
+    where godot4.exe >nul 2>&1
+    if not errorlevel 1 set "GODOT_CMD=godot4.exe"
+)
+
+if not defined GODOT_CMD (
+    echo.
+    echo [SETUP] Godot 4 was not found. Installing Godot...
+    winget install --id GodotEngine.GodotEngine -e --source winget --accept-package-agreements --accept-source-agreements
+    set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%PATH%"
+
+    where godot.exe >nul 2>&1
+    if not errorlevel 1 set "GODOT_CMD=godot.exe"
+    if not defined GODOT_CMD (
+        where godot4.exe >nul 2>&1
+        if not errorlevel 1 set "GODOT_CMD=godot4.exe"
+    )
+)
+
+if not defined GODOT_CMD (
+    for /f "usebackq delims=" %%G in (`powershell -NoProfile -Command "$p = Get-ChildItem -Path '$env:LOCALAPPDATA\Microsoft\WinGet\Packages' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Godot*_win64.exe' -or $_.Name -eq 'godot.exe' } | Select-Object -First 1 -ExpandProperty FullName; if ($p) { $p }"`) do (
+        set "GODOT_CMD=%%G"
+    )
+)
+
+if not defined GODOT_CMD (
+    echo.
+    echo [ERROR] Godot was installed but its executable could not be found.
+    echo Close this window and run this batch file again.
+    pause
+    exit /b 1
 )
 
 echo.
-echo ============================================================
-echo   Finished
-echo ============================================================
+echo [RUN] Launching Modern 3D Creature Evolution GUI...
 echo.
-pause
+"%GODOT_CMD%" --path "%PROJECT_DIR%\apps\godot"
+
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Godot exited with an error.
+    pause
+    exit /b 1
+)
+
+endlocal
