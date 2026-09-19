@@ -142,12 +142,15 @@ func _process(delta: float) -> void:
             if (
                 (ended_kind == "live" or ended_kind == "creature")
                 and _replay_active
-                and _replay_source_complete
             ):
-                # The Rust producer is expected to exit before slow-motion
-                # playback finishes. Keep the viewer alive until its buffer is
-                # consumed.
-                pass
+                # The producer is expected to finish before slow-motion
+                # playback. If its tiny completion packet was dropped, use the
+                # newest buffered frame as the replay end instead of aborting.
+                if not _replay_source_complete and not _replay_frames.is_empty():
+                    _replay_source_complete = true
+                    _replay_final_time = float(
+                        _replay_frames.back().get("simulated_seconds", 0.0)
+                    )
             elif ended_kind == "evolution" and _load_genome_file(_evolution_champion_path()):
                 _job_kind = ""
                 _has_evolution_champion = true
