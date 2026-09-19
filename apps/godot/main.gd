@@ -193,7 +193,7 @@ func _build_ui() -> void:
     column.add_child(title)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 2 • Population Evolution"
+    subtitle.text = "Step 3 • Evolvable Expression-Tree Brains"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
@@ -730,6 +730,7 @@ func _handle_event(event: Dictionary) -> void:
                 + "[cell]Average distance[/cell][cell]%.4f m[/cell]" % float(event.get("average_fitness", 0.0))
                 + "[cell]Worst distance[/cell][cell]%.4f m[/cell]" % float(event.get("worst_fitness", 0.0))
                 + "[cell]Champion segments[/cell][cell]%s[/cell]" % str(event.get("best_segments", 0))
+                + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(event.get("best_brain_nodes", 0))
                 + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
                 + "[/table]"
             )
@@ -816,11 +817,12 @@ func _handle_event(event: Dictionary) -> void:
 
             _build_creature_from_genome(_current_genome)
             _set_status(
-                "%s • %s segments • %s joints • %s mutations"
+                "%s • %s segments • %s joints • %s brain nodes • %s mutations"
                 % [
                     str(event.get("creature_name", "Creature")),
                     str(event.get("segment_count", 0)),
                     str(event.get("joint_count", 0)),
+                    str(event.get("brain_nodes", 0)),
                     str(_current_mutation_count),
                 ]
             )
@@ -954,6 +956,7 @@ func _show_creature_state(state_value) -> void:
         + "[cell]Genome[/cell][cell][b]%s[/b][/cell]" % _current_genome_source
         + "[cell]Segments[/cell][cell]%s[/cell]" % str(bodies.size())
         + "[cell]Mutations[/cell][cell]%s[/cell]" % str(_current_mutation_count)
+        + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(_current_brain_node_count())
         + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
         + "[cell]Time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
         + "[cell]Root height[/cell][cell]%s m[/cell]" % _format_float(root_height, 3)
@@ -1033,6 +1036,53 @@ func _show_probe_result(result: Dictionary) -> void:
         + "[cell]Steps / simulation[/cell][cell]%s[/cell]" % _format_int(result.get("steps_per_world", 0))
         + "[/table]"
     )
+
+
+func _current_brain_node_count() -> int:
+    if _current_genome.is_empty():
+        return 0
+
+    var brain_value = _current_genome.get("brain", {})
+    if typeof(brain_value) != TYPE_DICTIONARY:
+        return 0
+
+    var brain: Dictionary = brain_value
+    var outputs: Array = brain.get("outputs", [])
+    var total := 0
+    for output_value in outputs:
+        if typeof(output_value) != TYPE_DICTIONARY:
+            continue
+        var output: Dictionary = output_value
+        total += _expression_node_count(output.get("expression", null))
+    return total
+
+
+func _expression_node_count(expression_value) -> int:
+    if expression_value == null:
+        return 0
+    if typeof(expression_value) != TYPE_DICTIONARY:
+        return 1
+
+    var expression: Dictionary = expression_value
+    if expression.has("Constant") or expression.has("Sensor"):
+        return 1
+
+    for key in ["Negate", "Sin", "Cos"]:
+        if expression.has(key):
+            return 1 + _expression_node_count(expression[key])
+
+    for key in ["Add", "Subtract", "Multiply"]:
+        if expression.has(key):
+            var pair = expression[key]
+            if typeof(pair) == TYPE_ARRAY and pair.size() >= 2:
+                return 1 + _expression_node_count(pair[0]) + _expression_node_count(pair[1])
+
+    if expression.has("Clamp"):
+        var clamp_value = expression["Clamp"]
+        if typeof(clamp_value) == TYPE_DICTIONARY:
+            return 1 + _expression_node_count(clamp_value.get("value", null))
+
+    return 1
 
 
 func _segment_color(id: int) -> Color:
