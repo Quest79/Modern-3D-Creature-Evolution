@@ -12,6 +12,7 @@ mod evolution;
 mod fitness;
 mod ga;
 mod rapier_cpu;
+mod world;
 
 pub use backend::{
     BackendCapabilities, PhysicsBackend, ProbeSpec, SimulationReport, WorldSnapshot,
@@ -35,3 +36,4 @@ pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
 };
 pub use rapier_cpu::RapierCpuBackend;
+pub use world::{TerrainKind, WorldBox, WorldBoxKind, WorldConfig};
