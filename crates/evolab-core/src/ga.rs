@@ -4,8 +4,9 @@ use rayon::{ThreadPoolBuilder, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceleratorConfig, AcceleratorMode, ChampionArchiveEntry, ConditionContext, CreatureGenome,
-    DiversitySummary, EffectiveEvolutionSettings, ExecutionPerformance, FitnessConfig,
+    AcceleratorConfig, AcceleratorMode, CHECKPOINT_FORMAT_VERSION, ChampionArchiveEntry,
+    CheckpointCandidate, ConditionContext, CreatureGenome, DiversitySummary,
+    EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
     MutationRecord, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
     TrialAggregation, crossover_brain_subtree, discover_cuda_devices, evaluate_fitness,
@@ -173,10 +174,30 @@ struct Candidate {
 pub fn evolve_population<F>(
     ancestor: &CreatureGenome,
     config: &EvolutionConfig,
-    mut on_generation: F,
+    on_generation: F,
 ) -> Result<EvolutionResult, String>
 where
     F: FnMut(&GenerationSummary) -> Result<(), String>,
+{
+    evolve_population_checkpointed(
+        ancestor,
+        config,
+        None,
+        on_generation,
+        |_checkpoint| Ok(()),
+    )
+}
+
+pub fn evolve_population_checkpointed<F, C>(
+    ancestor: &CreatureGenome,
+    config: &EvolutionConfig,
+    resume: Option<&EvolutionCheckpoint>,
+    mut on_generation: F,
+    mut on_checkpoint: C,
+) -> Result<EvolutionResult, String>
+where
+    F: FnMut(&GenerationSummary) -> Result<(), String>,
+    C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
 {
     config.validate()?;
     ancestor.validate()?;
@@ -191,24 +212,86 @@ where
             .map_err(|err| format!("failed to create evolution worker pool: {err}"))?
     };
 
-    let mut rng = GenomeRng::new(config.seed);
-    let mut active_condition_ids = HashSet::new();
-    let mut first_settings = EffectiveEvolutionSettings::from(config);
-    config
-        .timeline
-        .apply_to(1, &active_condition_ids, &mut first_settings);
-    validate_effective_settings(&first_settings)?;
+    let (
+        start_generation,
+        mut rng,
+        mut active_condition_ids,
+        mut next_individual_id,
+        mut population,
+        mut history,
+        mut champion_archive,
+        mut evaluations_completed,
+        mut final_champion,
+        mut final_settings,
+    ) = if let Some(checkpoint) = resume {
+        checkpoint.validate()?;
+        if checkpoint.config != *config {
+            return Err(
+                "checkpoint configuration differs from the requested evolution configuration"
+                    .into(),
+            );
+        }
 
-    let mut next_individual_id = 1_u64;
-    let mut population =
-        initial_population(ancestor, &first_settings, &mut rng, &mut next_individual_id)?;
-    let mut history = Vec::with_capacity(config.generations);
-    let mut champion_archive = Vec::with_capacity(config.generations);
-    let mut evaluations_completed = 0usize;
-    let mut final_champion: Option<EvaluatedCreature> = None;
-    let mut final_settings = first_settings.clone();
+        (
+            checkpoint.next_generation,
+            GenomeRng::from_state(checkpoint.rng_state),
+            checkpoint
+                .active_condition_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>(),
+            checkpoint.next_individual_id,
+            checkpoint
+                .population
+                .iter()
+                .cloned()
+                .map(Candidate::from)
+                .collect::<Vec<_>>(),
+            checkpoint.history.clone(),
+            checkpoint.champion_archive.clone(),
+            checkpoint.evaluations_completed,
+            checkpoint.last_champion.clone(),
+            checkpoint.final_settings.clone(),
+        )
+    } else {
+        let mut rng = GenomeRng::new(config.seed);
+        let active_condition_ids = HashSet::new();
+        let mut first_settings = EffectiveEvolutionSettings::from(config);
+        config
+            .timeline
+            .apply_to(1, &active_condition_ids, &mut first_settings);
+        validate_effective_settings(&first_settings)?;
 
-    for generation in 1..=config.generations {
+        let mut next_individual_id = 1_u64;
+        let population =
+            initial_population(ancestor, &first_settings, &mut rng, &mut next_individual_id)?;
+
+        (
+            1,
+            rng,
+            active_condition_ids,
+            next_individual_id,
+            population,
+            Vec::with_capacity(config.generations),
+            Vec::with_capacity(config.generations),
+            0,
+            None,
+            first_settings,
+        )
+    };
+
+    if start_generation > config.generations {
+        return finish_evolution(
+            config,
+            final_champion,
+            evaluations_completed,
+            final_settings,
+            champion_archive,
+            history,
+        );
+    }
+
+    for generation in start_generation..=config.generations {
         let mut settings = EffectiveEvolutionSettings::from(config);
         config
             .timeline
@@ -305,8 +388,12 @@ where
 
         final_champion = Some(best.clone());
         final_settings = settings;
-        on_generation(&summary)?;
         history.push(summary);
+        on_generation(
+            history
+                .last()
+                .expect("generation summary was just appended"),
+        )?;
 
         if generation < config.generations {
             let mut next_settings = EffectiveEvolutionSettings::from(config);
@@ -321,9 +408,52 @@ where
                 &mut rng,
                 &mut next_individual_id,
             )?;
+        } else {
+            population.clear();
         }
+
+        let mut active_ids: Vec<String> = active_condition_ids.iter().cloned().collect();
+        active_ids.sort();
+        let checkpoint = EvolutionCheckpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            config: config.clone(),
+            next_generation: generation + 1,
+            rng_state: rng.state(),
+            next_individual_id,
+            active_condition_ids: active_ids,
+            population: population
+                .iter()
+                .cloned()
+                .map(CheckpointCandidate::from)
+                .collect(),
+            evaluations_completed,
+            final_settings: final_settings.clone(),
+            last_champion: final_champion.clone(),
+            champion_archive: champion_archive.clone(),
+            history: history.clone(),
+        };
+        checkpoint.validate()?;
+        on_checkpoint(&checkpoint)?;
     }
 
+    finish_evolution(
+        config,
+        final_champion,
+        evaluations_completed,
+        final_settings,
+        champion_archive,
+        history,
+    )
+}
+
+fn finish_evolution(
+    config: &EvolutionConfig,
+    final_champion: Option<EvaluatedCreature>,
+    evaluations_completed: usize,
+    final_settings: EffectiveEvolutionSettings,
+    champion_archive: Vec<ChampionArchiveEntry>,
+    history: Vec<GenerationSummary>,
+) -> Result<EvolutionResult, String> {
     let champion = final_champion.ok_or_else(|| "evolution produced no champion".to_string())?;
 
     Ok(EvolutionResult {
@@ -337,6 +467,28 @@ where
         champion_archive,
         history,
     })
+}
+
+impl From<CheckpointCandidate> for Candidate {
+    fn from(value: CheckpointCandidate) -> Self {
+        Self {
+            individual_id: value.individual_id,
+            parent_ids: value.parent_ids,
+            genome: value.genome,
+            mutations: value.mutations,
+        }
+    }
+}
+
+impl From<Candidate> for CheckpointCandidate {
+    fn from(value: Candidate) -> Self {
+        Self {
+            individual_id: value.individual_id,
+            parent_ids: value.parent_ids,
+            genome: value.genome,
+            mutations: value.mutations,
+        }
+    }
 }
 
 fn initial_population(
