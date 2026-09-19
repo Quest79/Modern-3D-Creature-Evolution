@@ -20,6 +20,7 @@ var _population_spin: SpinBox
 var _generations_spin: SpinBox
 var _tournament_spin: SpinBox
 var _elite_spin: SpinBox
+var _crossover_spin: SpinBox
 var _evolution_mutations_spin: SpinBox
 
 var _seed_creature_button: Button
@@ -362,6 +363,8 @@ func _build_ui() -> void:
     _generations_spin = _add_number_row(column, "Generations", 1, 10000, 100, 1)
     _tournament_spin = _add_number_row(column, "Tournament size", 1, 1000, 7, 1)
     _elite_spin = _add_number_row(column, "Elite kept", 1, 999, 2, 1)
+    _crossover_spin = _add_number_row(column, "Brain crossover", 0.0, 1.0, 0.5, 0.05)
+    _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
     _evolution_mutations_spin = _add_number_row(column, "Mutations / child", 1, 500, 8, 1)
 
     var evolution_row := HBoxContainer.new()
@@ -877,6 +880,7 @@ func _on_evolve_pressed() -> void:
         "--generations", str(int(_generations_spin.value)),
         "--tournament", str(int(_tournament_spin.value)),
         "--elite", str(int(_elite_spin.value)),
+        "--crossover", str(_crossover_spin.value),
         "--mutations", str(int(_evolution_mutations_spin.value)),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(int(_seed_spin.value)),
@@ -1130,6 +1134,12 @@ func _handle_event(event: Dictionary) -> void:
                 + "[cell]Worst distance[/cell][cell]%.4f m[/cell]" % float(event.get("worst_fitness", 0.0))
                 + "[cell]Champion segments[/cell][cell]%s[/cell]" % str(event.get("best_segments", 0))
                 + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(event.get("best_brain_nodes", 0))
+                + "[cell]Sensors used[/cell][cell]%s unique / %s nodes[/cell]"
+                    % [
+                        str(event.get("best_brain_unique_sensors", 0)),
+                        str(event.get("best_brain_sensor_nodes", 0)),
+                    ]
+                + "[cell]Brain outputs[/cell][cell]%s[/cell]" % str(event.get("best_brain_outputs", 0))
                 + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
                 + "[/table]"
             )
@@ -1155,6 +1165,13 @@ func _handle_event(event: Dictionary) -> void:
                 + "[cell]Champion distance[/cell][cell][b]%.4f m[/b][/cell]" % float(event.get("champion_distance", 0.0))
                 + "[cell]Generations[/cell][cell]%s[/cell]" % str(event.get("generations_completed", 0))
                 + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
+                + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(event.get("champion_brain_nodes", 0))
+                + "[cell]Sensors used[/cell][cell]%s unique / %s nodes[/cell]"
+                    % [
+                        str(event.get("champion_brain_unique_sensors", 0)),
+                        str(event.get("champion_brain_sensor_nodes", 0)),
+                    ]
+                + "[cell]Brain outputs[/cell][cell]%s[/cell]" % str(event.get("champion_brain_outputs", 0))
                 + "[cell]Wall time[/cell][cell]%.3f s[/cell]" % float(event.get("wall_seconds", 0.0))
                 + "[cell]Next[/cell][cell]Click Watch Champion[/cell]"
                 + "[/table]"
@@ -1611,6 +1628,8 @@ func _show_creature_state(state_value) -> void:
         + "[cell]Segments[/cell][cell]%s[/cell]" % str(bodies.size())
         + "[cell]Mutations[/cell][cell]%s[/cell]" % str(_current_mutation_count)
         + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(_current_brain_node_count())
+        + "[cell]Sensors used[/cell][cell]%s[/cell]" % str(_current_brain_unique_sensor_count())
+        + "[cell]Brain outputs[/cell][cell]%s[/cell]" % str(_current_brain_output_count())
         + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
         + "[cell]Time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
         + "[cell]Root height[/cell][cell]%s m[/cell]" % _format_float(root_height, 3)
@@ -1709,6 +1728,66 @@ func _current_brain_node_count() -> int:
         var output: Dictionary = output_value
         total += _expression_node_count(output.get("expression", null))
     return total
+
+
+func _current_brain_output_count() -> int:
+    if _current_genome.is_empty():
+        return 0
+    var brain_value = _current_genome.get("brain", {})
+    if typeof(brain_value) != TYPE_DICTIONARY:
+        return 0
+    var brain: Dictionary = brain_value
+    var outputs: Array = brain.get("outputs", [])
+    return outputs.size()
+
+
+func _current_brain_unique_sensor_count() -> int:
+    if _current_genome.is_empty():
+        return 0
+
+    var brain_value = _current_genome.get("brain", {})
+    if typeof(brain_value) != TYPE_DICTIONARY:
+        return 0
+
+    var brain: Dictionary = brain_value
+    var outputs: Array = brain.get("outputs", [])
+    var sensors: Dictionary = {}
+
+    for output_value in outputs:
+        if typeof(output_value) != TYPE_DICTIONARY:
+            continue
+        var output: Dictionary = output_value
+        _collect_expression_sensors(output.get("expression", null), sensors)
+
+    return sensors.size()
+
+
+func _collect_expression_sensors(expression_value, sensors: Dictionary) -> void:
+    if expression_value == null or typeof(expression_value) != TYPE_DICTIONARY:
+        return
+
+    var expression: Dictionary = expression_value
+    if expression.has("Sensor"):
+        sensors[JSON.stringify(expression["Sensor"])] = true
+        return
+
+    for key in ["Negate", "Sin", "Cos"]:
+        if expression.has(key):
+            _collect_expression_sensors(expression[key], sensors)
+            return
+
+    for key in ["Add", "Subtract", "Multiply"]:
+        if expression.has(key):
+            var pair = expression[key]
+            if typeof(pair) == TYPE_ARRAY and pair.size() >= 2:
+                _collect_expression_sensors(pair[0], sensors)
+                _collect_expression_sensors(pair[1], sensors)
+            return
+
+    if expression.has("Clamp"):
+        var clamp_value = expression["Clamp"]
+        if typeof(clamp_value) == TYPE_DICTIONARY:
+            _collect_expression_sensors(clamp_value.get("value", null), sensors)
 
 
 func _expression_node_count(expression_value) -> int:
