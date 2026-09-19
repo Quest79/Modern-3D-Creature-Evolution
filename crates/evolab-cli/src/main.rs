@@ -13,6 +13,10 @@ use evolab_core::{
 };
 use serde_json::{Value, json};
 
+/// Stream simulation snapshots ahead of the viewer so slow-motion playback can
+/// interpolate smoothly instead of waiting on wall-clock-spaced packets.
+const STREAM_TRANSPORT_SPEED: f64 = 4.0;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "evolab",
@@ -497,7 +501,7 @@ fn run_stream(
         if realtime {
             let target = wall_start
                 + Duration::from_secs_f64(
-                    snapshot.simulated_seconds as f64 / playback_speed as f64,
+                    snapshot.simulated_seconds as f64 / STREAM_TRANSPORT_SPEED,
                 );
             let now = Instant::now();
             if target > now {
@@ -650,7 +654,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         if realtime {
             let target = wall_start
                 + Duration::from_secs_f64(
-                    snapshot.simulated_seconds as f64 / playback_speed as f64,
+                    snapshot.simulated_seconds as f64 / STREAM_TRANSPORT_SPEED,
                 );
             let now = Instant::now();
             if target > now {
