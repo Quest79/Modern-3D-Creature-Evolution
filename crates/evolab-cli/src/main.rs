@@ -713,7 +713,9 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let config = simulation_config(seconds, dt, world_json)?;
+    let mut config = simulation_config(seconds, dt, world_json)?;
+    config.motor_strength_multiplier = motor_strength;
+    config.validate()?;
 
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "creature streaming requires an event port".to_string())?;
@@ -778,6 +780,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
             "genome": genome,
             "world": config.world,
             "world_geometry": config.world.geometry(),
+            "motor_strength_multiplier": config.motor_strength_multiplier,
         }),
     );
 
@@ -826,7 +829,6 @@ fn run_genome_generate(
     seed: u64,
     random_segments: usize,
     mutations: usize,
-    structural_mutation_chance: f32,
     max_segments: usize,
 ) -> Result<(), String> {
     let mutation_config = MutationConfig {
@@ -865,6 +867,7 @@ struct EvolveRequest<'a> {
     elite: usize,
     crossover: f32,
     mutations: usize,
+    structural_mutation_chance: f32,
     max_segments: usize,
     seed: u64,
     workers: usize,
