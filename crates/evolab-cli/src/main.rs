@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
-    FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec,
+    RapierCpuBackend,
     SimulationConfig, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     evolve_population, mutate_genome, random_creature,
 };
@@ -279,6 +280,24 @@ enum Command {
         json: bool,
     },
 
+    /// Run a complete saved .evo experiment headlessly.
+    Run {
+        /// Path to a saved EvoLab experiment file.
+        experiment: PathBuf,
+
+        /// Override CPU worker threads. Omit to use the experiment value.
+        #[arg(long)]
+        workers: Option<usize>,
+
+        /// Optional path for the final champion genome JSON.
+        #[arg(long)]
+        champion_output: Option<PathBuf>,
+
+        /// Emit the complete result as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// Generate the exact static world geometry used by the simulator.
     WorldGeometry {
         /// Serialized WorldConfig JSON.
@@ -440,6 +459,12 @@ fn run() -> Result<(), String> {
             champion_output: champion_output.as_ref(),
             json_output: json,
         }),
+        Command::Run {
+            experiment,
+            workers,
+            champion_output,
+            json,
+        } => run_experiment(&experiment, workers, champion_output.as_ref(), json),
         Command::WorldGeometry { world_json } => run_world_geometry(world_json.as_deref()),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
@@ -1116,6 +1141,86 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
 
     Ok(())
 }
+
+fn run_experiment(
+    path: &PathBuf,
+    workers: Option<usize>,
+    champion_output: Option<&PathBuf>,
+    json_output: bool,
+) -> Result<(), String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read experiment {}: {err}", path.display()))?;
+    let mut experiment: ExperimentFile = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid experiment JSON {}: {err}", path.display()))?;
+    experiment.validate()?;
+
+    if let Some(worker_threads) = workers {
+        experiment.evolution.worker_threads = worker_threads;
+    }
+
+    let started = Instant::now();
+    let result = evolve_population(
+        &experiment.ancestor,
+        &experiment.evolution,
+        |summary| {
+            if !json_output {
+                println!(
+                    "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
+                    summary.generation,
+                    experiment.evolution.generations,
+                    summary.best_fitness,
+                    summary.average_fitness,
+                    summary.best_distance,
+                    summary.effective_settings.trials_per_creature,
+                );
+                if !summary.triggered_timeline_events.is_empty() {
+                    println!(
+                        "  timeline triggered: {}",
+                        summary.triggered_timeline_events.join(", ")
+                    );
+                }
+            }
+            Ok(())
+        },
+    )?;
+    let elapsed = started.elapsed();
+
+    if let Some(output) = champion_output {
+        write_genome(output, &result.champion)?;
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            json!({
+                "protocol_version": 1,
+                "kind": "experiment_complete",
+                "experiment_name": experiment.name,
+                "champion_fitness": result.champion_fitness,
+                "champion_distance": result.champion_distance,
+                "champion_metrics": result.champion_metrics,
+                "generations_completed": result.generations_completed,
+                "evaluations_completed": result.evaluations_completed,
+                "final_settings": result.final_settings,
+                "wall_seconds": elapsed.as_secs_f64(),
+                "champion": result.champion,
+                "history": result.history,
+            })
+        );
+    } else {
+        println!(
+            "complete: '{}' champion {:.4} (distance {:.4} m), {} evaluations in {:.3} s",
+            experiment.name,
+            result.champion_fitness,
+            result.champion_distance,
+            result.evaluations_completed,
+            elapsed.as_secs_f64(),
+        );
+    }
+
+    Ok(())
+}
+
 
 fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
     let json = serde_json::to_string_pretty(genome)
