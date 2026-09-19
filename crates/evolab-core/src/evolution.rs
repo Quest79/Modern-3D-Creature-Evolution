@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BrainGenome, BrainOutputGene, CreatureGenome, Expression, JointGene, SegmentGene, SensorKind,
+    BrainGenome, CreatureGenome, Expression, JointGene, SegmentGene, SensorKind,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
