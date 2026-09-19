@@ -47,6 +47,7 @@ var _udp: PacketPeerUDP
 var _event_port := 0
 var _job_pid := 0
 var _job_kind := ""
+var _dead_process_since_ms := -1
 var _last_state_time := 0.0
 
 
@@ -79,10 +80,27 @@ func _process(_delta: float) -> void:
         if typeof(parsed) == TYPE_DICTIONARY:
             _handle_event(parsed)
 
-    if _job_pid > 0 and not OS.is_process_running(_job_pid):
-        _job_pid = 0
-        if _job_kind != "":
-            _set_status("Simulator process ended.")
+    if _job_pid > 0:
+        if OS.is_process_running(_job_pid):
+            _dead_process_since_ms = -1
+        elif _dead_process_since_ms < 0:
+            # Give final UDP packets a moment to arrive before declaring the
+            # process dead. Fast benchmark jobs can otherwise race the GUI.
+            _dead_process_since_ms = Time.get_ticks_msec()
+        elif Time.get_ticks_msec() - _dead_process_since_ms >= 300:
+            var ended_kind := _job_kind
+            _job_pid = 0
+            _job_kind = ""
+            _dead_process_since_ms = -1
+
+            if ended_kind == "evolution" and _load_genome_file(_evolution_champion_path()):
+                _has_evolution_champion = true
+                _current_genome_source = "latest evolution champion"
+                _build_creature_from_genome(_current_genome)
+                _set_status("Evolution process ended • latest champion recovered.")
+            else:
+                _set_status("Simulator process ended unexpectedly.")
+
             _finish_job_controls()
 
 
@@ -503,6 +521,10 @@ func _on_evolve_pressed() -> void:
     _watch_champion_button.disabled = true
     _metrics.text = "[color=#9aa7bd]Creating and evaluating generation 1...[/color]"
 
+    var champion_path := _evolution_champion_path()
+    if FileAccess.file_exists(champion_path):
+        DirAccess.remove_absolute(champion_path)
+
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
@@ -516,6 +538,7 @@ func _on_evolve_pressed() -> void:
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
         "--event-port", str(_event_port),
+        "--champion-output", champion_path,
     ])
 
     if not _current_genome.is_empty():
@@ -533,10 +556,11 @@ func _on_watch_champion_pressed() -> void:
     if _job_pid > 0 or _current_genome.is_empty():
         return
 
-    var champion_path := ProjectSettings.globalize_path("user://evolution_champion.json")
-    if not _write_genome_file(champion_path, _current_genome):
-        _set_status("Could not prepare champion genome.")
-        return
+    var champion_path := _evolution_champion_path()
+    if not FileAccess.file_exists(champion_path):
+        if not _write_genome_file(champion_path, _current_genome):
+            _set_status("Could not prepare champion genome.")
+            return
 
     _prepare_creature_run()
     var args := _base_creature_args()
@@ -588,6 +612,29 @@ func _on_load_file_selected(path: String) -> void:
 
     if _start_job("creature", args):
         _set_status("Loaded genome. Rust is validating and simulating it...")
+
+
+func _evolution_champion_path() -> String:
+    return ProjectSettings.globalize_path("user://evolution_champion.json")
+
+
+func _load_genome_file(path: String) -> bool:
+    if not FileAccess.file_exists(path):
+        return false
+
+    var file := FileAccess.open(path, FileAccess.READ)
+    if file == null:
+        return false
+
+    var parsed = JSON.parse_string(file.get_as_text())
+    file.close()
+
+    if typeof(parsed) != TYPE_DICTIONARY:
+        return false
+
+    _current_genome = parsed
+    _save_button.disabled = false
+    return true
 
 
 func _write_genome_file(path: String, genome: Dictionary) -> bool:
@@ -646,6 +693,7 @@ func _on_batch_pressed() -> void:
 
 func _start_job(kind: String, args: PackedStringArray) -> bool:
     _job_kind = kind
+    _dead_process_since_ms = -1
     _job_pid = OS.create_process(_backend_path(), args, false)
 
     if _job_pid <= 0:
@@ -670,6 +718,7 @@ func _stop_current_job() -> void:
         OS.kill(_job_pid)
     _job_pid = 0
     _job_kind = ""
+    _dead_process_since_ms = -1
     _finish_job_controls()
 
 
@@ -707,9 +756,8 @@ func _handle_event(event: Dictionary) -> void:
             var generations := int(event.get("generations", 1))
             _progress_bar.value = float(event.get("fraction", 0.0)) * 100.0
 
-            var champion_value = event.get("champion", {})
-            if typeof(champion_value) == TYPE_DICTIONARY:
-                _current_genome = champion_value
+            var champion_file := str(event.get("champion_file", ""))
+            if champion_file != "" and _load_genome_file(champion_file):
                 _current_genome_source = "generation %d champion" % generation
                 _probe_mesh.visible = false
                 _build_creature_from_genome(_current_genome)
@@ -736,13 +784,13 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "evolution_complete":
-            var final_champion = event.get("champion", {})
-            if typeof(final_champion) == TYPE_DICTIONARY:
-                _current_genome = final_champion
-                _current_genome_source = "evolution champion"
-                _build_creature_from_genome(_current_genome)
+            var champion_file := str(event.get("champion_file", ""))
+            if champion_file != "":
+                _load_genome_file(champion_file)
 
-            _has_evolution_champion = true
+            _current_genome_source = "evolution champion"
+            _build_creature_from_genome(_current_genome)
+            _has_evolution_champion = not _current_genome.is_empty()
             _progress_bar.value = 100
             _set_status(
                 "Evolution complete • champion %.4f m • %s evaluations"
@@ -762,6 +810,19 @@ func _handle_event(event: Dictionary) -> void:
             )
             _job_pid = 0
             _job_kind = ""
+            _dead_process_since_ms = -1
+            _finish_job_controls()
+
+        "evolution_error":
+            _progress_bar.value = 0
+            _set_status("Evolution error: %s" % str(event.get("message", "unknown error")))
+            _metrics.text = (
+                "[color=#ff8a8a][b]Evolution stopped:[/b] %s[/color]"
+                % str(event.get("message", "unknown error"))
+            )
+            _job_pid = 0
+            _job_kind = ""
+            _dead_process_since_ms = -1
             _finish_job_controls()
 
         "batch_started":
@@ -781,6 +842,7 @@ func _handle_event(event: Dictionary) -> void:
             _progress_bar.value = 100
             _job_pid = 0
             _job_kind = ""
+            _dead_process_since_ms = -1
             _finish_job_controls()
 
         "stream_started":
@@ -799,6 +861,7 @@ func _handle_event(event: Dictionary) -> void:
             )
             _job_pid = 0
             _job_kind = ""
+            _dead_process_since_ms = -1
             _finish_job_controls()
 
         "creature_stream_started":
@@ -838,6 +901,7 @@ func _handle_event(event: Dictionary) -> void:
             )
             _job_pid = 0
             _job_kind = ""
+            _dead_process_since_ms = -1
             _finish_job_controls()
 
 
