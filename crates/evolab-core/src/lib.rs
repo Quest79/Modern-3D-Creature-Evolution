@@ -17,7 +17,8 @@ pub use backend::{
 };
 pub use batch::BatchRunner;
 pub use brain::{
-    BrainContext, BrainGenome, BrainOutputGene, Expression, SensorKind, legacy_expression,
+    BrainContext, BrainGenome, BrainOutputGene, Expression, JointSensorState, SegmentSensorState,
+    SensorKind, legacy_expression,
 };
 pub use config::SimulationConfig;
 pub use creature::{
@@ -25,8 +26,8 @@ pub use creature::{
     JointGene, SegmentGene,
 };
 pub use evolution::{
-    GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult, mutate_genome,
-    random_creature,
+    GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult,
+    crossover_brain_subtree, mutate_genome, random_creature,
 };
 pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
