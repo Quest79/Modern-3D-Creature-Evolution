@@ -441,6 +441,8 @@ fn run() -> Result<(), String> {
             event_port,
             event_host,
             champion_output,
+            result_output,
+            experiment_name,
             json,
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
@@ -469,6 +471,8 @@ fn run() -> Result<(), String> {
             event_port,
             event_host: &event_host,
             champion_output: champion_output.as_ref(),
+            result_output: result_output.as_ref(),
+            experiment_name: &experiment_name,
             json_output: json,
         }),
         Command::Run {
