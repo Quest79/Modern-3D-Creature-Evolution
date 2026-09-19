@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::f32::consts::TAU;
-
 use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::SimulationConfig;
+use crate::{BrainContext, BrainGenome, SimulationConfig, legacy_expression};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SegmentGene {
@@ -37,11 +35,13 @@ pub struct CreatureGenome {
     pub name: String,
     pub segments: Vec<SegmentGene>,
     pub joints: Vec<JointGene>,
+    #[serde(default)]
+    pub brain: BrainGenome,
 }
 
 impl CreatureGenome {
     pub fn three_segment_walker() -> Self {
-        Self {
+        let mut creature = Self {
             name: "Three Segment Walker".to_string(),
             segments: vec![
                 SegmentGene {
@@ -99,7 +99,10 @@ impl CreatureGenome {
                     motor_max_torque: 18.0,
                 },
             ],
-        }
+            brain: BrainGenome::default(),
+        };
+        creature.brain.sync_with_joints(&creature.joints);
+        creature
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -159,6 +162,7 @@ impl CreatureGenome {
             }
         }
 
+        self.brain.validate(&self.joints)?;
         Ok(())
     }
 }
@@ -245,6 +249,10 @@ impl CreatureSimulator {
             handles.insert(segment.id, body_handle);
         }
 
+        let root_body_handle = *handles
+            .get(&genome.segments[0].id)
+            .ok_or_else(|| "missing root body handle".to_string())?;
+
         let mut impulse_joints = ImpulseJointSet::new();
         let mut motor_handles: Vec<(ImpulseJointHandle, JointGene)> = Vec::new();
 
@@ -303,11 +311,29 @@ impl CreatureSimulator {
         let total_steps = config.step_count();
 
         for step in 1..=total_steps {
-            let t = (step - 1) as f32 * config.dt;
+            let time_seconds = (step - 1) as f32 * config.dt;
+            let root = rigid_bodies
+                .get(root_body_handle)
+                .ok_or_else(|| "root body disappeared".to_string())?;
+            let p = root.translation();
+            let q = root.rotation();
+            let v = root.linvel();
+            let w = root.angvel();
+            let context = BrainContext {
+                time_seconds,
+                root_position: [p.x, p.y, p.z],
+                root_linear_velocity: [v.x, v.y, v.z],
+                root_angular_velocity: [w.x, w.y, w.z],
+                root_rotation_xyzw: [q.x, q.y, q.z, q.w],
+            };
 
             for (joint_handle, gene) in &motor_handles {
-                let target = gene.motor_amplitude_radians
-                    * (TAU * gene.motor_frequency_hz * t + gene.motor_phase_radians).sin();
+                let target = genome
+                    .brain
+                    .output_for_joint(gene.child_id)
+                    .map(|expression| expression.evaluate(context))
+                    .unwrap_or_else(|| legacy_expression(gene).evaluate(context))
+                    .clamp(gene.limits_radians[0], gene.limits_radians[1]);
 
                 if let Some(joint) = impulse_joints.get_mut(*joint_handle, true) {
                     joint.data.set_motor_position(
@@ -348,11 +374,8 @@ impl CreatureSimulator {
             }
         }
 
-        let root_handle = handles
-            .get(&genome.segments[0].id)
-            .ok_or_else(|| "missing root body handle".to_string())?;
         let root = rigid_bodies
-            .get(*root_handle)
+            .get(root_body_handle)
             .ok_or_else(|| "root body disappeared".to_string())?;
         let p = root.translation();
 
