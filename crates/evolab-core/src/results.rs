@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CreatureGenome, EvolutionConfig, EvolutionResult, FitnessMetrics};
+use crate::{CreatureGenome, EvolutionConfig, EvolutionResult, FitnessMetrics, MutationRecord};
 
-pub const RESULTS_FORMAT_VERSION: u32 = 1;
+pub const RESULTS_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct DiversitySummary {
@@ -36,6 +36,9 @@ pub struct LineageRecord {
     pub segments: usize,
     pub joints: usize,
     pub brain_nodes: usize,
+    pub trial_seeds: Vec<u64>,
+    pub mutations: Vec<MutationRecord>,
+    pub genome: CreatureGenome,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -46,6 +49,8 @@ pub struct ChampionArchiveEntry {
     pub species_id: u64,
     pub fitness: f32,
     pub metrics: FitnessMetrics,
+    pub trial_seeds: Vec<u64>,
+    pub mutations: Vec<MutationRecord>,
     pub genome: CreatureGenome,
 }
 
