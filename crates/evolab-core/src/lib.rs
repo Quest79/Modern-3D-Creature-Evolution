@@ -13,6 +13,7 @@ mod experiment;
 mod fitness;
 mod ga;
 mod rapier_cpu;
+mod results;
 mod timeline;
 mod world;
 
@@ -39,6 +40,10 @@ pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
 };
 pub use rapier_cpu::RapierCpuBackend;
+pub use results::{
+    ChampionArchiveEntry, DiversitySummary, EvolutionResultsFile, LineageRecord, MapEliteCell,
+    ParetoEntry, RESULTS_FORMAT_VERSION, SpeciesSummary,
+};
 pub use timeline::{
     ConditionContext, EffectiveEvolutionSettings, TimelineChanges, TimelineCondition,
     TimelineConfig, TimelineKeyframe, TrialAggregation,
