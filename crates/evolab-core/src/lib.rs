@@ -7,6 +7,7 @@ mod backend;
 mod batch;
 mod config;
 mod creature;
+mod evolution;
 mod rapier_cpu;
 
 pub use backend::{
@@ -17,5 +18,9 @@ pub use config::SimulationConfig;
 pub use creature::{
     CreatureBodySnapshot, CreatureGenome, CreatureReport, CreatureSimulator, CreatureSnapshot,
     JointGene, SegmentGene,
+};
+pub use evolution::{
+    GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult, mutate_genome,
+    random_creature,
 };
 pub use rapier_cpu::RapierCpuBackend;
