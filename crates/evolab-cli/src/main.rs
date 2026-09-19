@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
-    ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec,
+    EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig,
+    PhysicsBackend, ProbeSpec,
     RapierCpuBackend, SimulationConfig, TimelineConfig, TrialAggregation, WorldConfig,
     WorldSnapshot, evolve_population, mutate_genome, random_creature,
 };
@@ -274,6 +275,14 @@ enum Command {
         #[arg(long)]
         champion_output: Option<PathBuf>,
 
+        /// Optional path where the complete persistent evolution analysis result is written.
+        #[arg(long)]
+        result_output: Option<PathBuf>,
+
+        /// Human-readable experiment name stored in persisted results.
+        #[arg(long, default_value = "Evolution")]
+        experiment_name: String,
+
         /// Emit final evolution result as JSON.
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -291,6 +300,10 @@ enum Command {
         /// Optional path for the final champion genome JSON.
         #[arg(long)]
         champion_output: Option<PathBuf>,
+
+        /// Optional path for the complete persistent evolution analysis result.
+        #[arg(long)]
+        result_output: Option<PathBuf>,
 
         /// Emit the complete result as JSON.
         #[arg(long, default_value_t = false)]
@@ -462,8 +475,15 @@ fn run() -> Result<(), String> {
             experiment,
             workers,
             champion_output,
+            result_output,
             json,
-        } => run_experiment(&experiment, workers, champion_output.as_ref(), json),
+        } => run_experiment(
+            &experiment,
+            workers,
+            champion_output.as_ref(),
+            result_output.as_ref(),
+            json,
+        ),
         Command::WorldGeometry { world_json } => run_world_geometry(world_json.as_deref()),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
@@ -908,6 +928,8 @@ struct EvolveRequest<'a> {
     event_port: Option<u16>,
     event_host: &'a str,
     champion_output: Option<&'a PathBuf>,
+    result_output: Option<&'a PathBuf>,
+    experiment_name: &'a str,
     json_output: bool,
 }
 
@@ -1080,6 +1102,15 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     if let Some(path) = request.champion_output {
         write_genome(path, &result.champion)?;
     }
+    if let Some(path) = request.result_output {
+        write_results_file(
+            path,
+            request.experiment_name,
+            &config,
+            elapsed.as_secs_f64(),
+            &result,
+        )?;
+    }
 
     let transport_event = json!({
         "protocol_version": 1,
@@ -1143,6 +1174,7 @@ fn run_experiment(
     path: &PathBuf,
     workers: Option<usize>,
     champion_output: Option<&PathBuf>,
+    result_output: Option<&PathBuf>,
     json_output: bool,
 ) -> Result<(), String> {
     let raw = fs::read_to_string(path)
@@ -1181,6 +1213,15 @@ fn run_experiment(
     if let Some(output) = champion_output {
         write_genome(output, &result.champion)?;
     }
+    if let Some(output) = result_output {
+        write_results_file(
+            output,
+            &experiment.name,
+            &experiment.evolution,
+            elapsed.as_secs_f64(),
+            &result,
+        )?;
+    }
 
     if json_output {
         println!(
@@ -1213,6 +1254,27 @@ fn run_experiment(
 
     Ok(())
 }
+
+fn write_results_file(
+    path: &PathBuf,
+    experiment_name: &str,
+    evolution: &EvolutionConfig,
+    wall_seconds: f64,
+    result: &evolab_core::EvolutionResult,
+) -> Result<(), String> {
+    let results = EvolutionResultsFile::new(
+        experiment_name,
+        evolution.clone(),
+        wall_seconds,
+        result.clone(),
+    );
+    results.validate()?;
+    let json = serde_json::to_string_pretty(&results)
+        .map_err(|err| format!("failed to serialize evolution results: {err}"))?;
+    fs::write(path, json)
+        .map_err(|err| format!("failed to write results {}: {err}", path.display()))
+}
+
 
 fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
     let json = serde_json::to_string_pretty(genome)
