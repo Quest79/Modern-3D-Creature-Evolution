@@ -55,6 +55,9 @@ var _timeline_generation_spin: SpinBox
 var _timeline_condition_option: OptionButton
 var _timeline_condition_value_spin: SpinBox
 var _timeline_list: ItemList
+var _add_timeline_button: Button
+var _remove_timeline_button: Button
+var _clear_timeline_button: Button
 
 var _seed_creature_button: Button
 var _mutate_button: Button
@@ -89,6 +92,7 @@ var _hud_resize_handle: ColorRect
 var _probe_mesh: MeshInstance3D
 var _camera: Camera3D
 var _world_meshes: Array[MeshInstance3D] = []
+var _rendered_world_json := ""
 var _creature_meshes: Dictionary = {}
 var _current_genome: Dictionary = {}
 var _current_genome_source := ""
@@ -680,23 +684,23 @@ func _build_ui() -> void:
     timeline_buttons.add_theme_constant_override("separation", 6)
     column.add_child(timeline_buttons)
 
-    var add_keyframe_button := Button.new()
-    add_keyframe_button.text = "Add Snapshot"
-    add_keyframe_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    add_keyframe_button.pressed.connect(_on_add_timeline_keyframe)
-    timeline_buttons.add_child(add_keyframe_button)
+    _add_timeline_button = Button.new()
+    _add_timeline_button.text = "Add Snapshot"
+    _add_timeline_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _add_timeline_button.pressed.connect(_on_add_timeline_keyframe)
+    timeline_buttons.add_child(_add_timeline_button)
 
-    var remove_keyframe_button := Button.new()
-    remove_keyframe_button.text = "Remove"
-    remove_keyframe_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    remove_keyframe_button.pressed.connect(_on_remove_timeline_keyframe)
-    timeline_buttons.add_child(remove_keyframe_button)
+    _remove_timeline_button = Button.new()
+    _remove_timeline_button.text = "Remove"
+    _remove_timeline_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _remove_timeline_button.pressed.connect(_on_remove_timeline_keyframe)
+    timeline_buttons.add_child(_remove_timeline_button)
 
-    var clear_timeline_button := Button.new()
-    clear_timeline_button.text = "Clear"
-    clear_timeline_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    clear_timeline_button.pressed.connect(_on_clear_timeline)
-    timeline_buttons.add_child(clear_timeline_button)
+    _clear_timeline_button = Button.new()
+    _clear_timeline_button.text = "Clear"
+    _clear_timeline_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _clear_timeline_button.pressed.connect(_on_clear_timeline)
+    timeline_buttons.add_child(_clear_timeline_button)
 
     _refresh_timeline_list()
 
@@ -1124,13 +1128,17 @@ func _render_world_config(world_config: Dictionary) -> void:
     if not _backend_exists():
         return
 
+    var world_json := JSON.stringify(world_config)
+    if world_json == _rendered_world_json:
+        return
+
     var output: Array = []
     var exit_code := OS.execute(
         _backend_path(),
         PackedStringArray([
             "world-geometry",
             "--world-json",
-            JSON.stringify(world_config),
+            world_json,
         ]),
         output,
         true,
@@ -1144,6 +1152,7 @@ func _render_world_config(world_config: Dictionary) -> void:
         return
 
     _build_world_from_geometry(parsed.get("geometry", []))
+    _rendered_world_json = world_json
 
 
 func _build_world_from_geometry(geometry_value) -> void:
@@ -1317,7 +1326,7 @@ func _load_settings() -> void:
     _trial_aggregation = str(
         config.get_value("evolution", "trial_aggregation", _trial_aggregation)
     )
-    if not _trial_aggregation in ["mean", "median", "worst", "best"]:
+    if _trial_aggregation not in ["mean", "median", "worst", "best"]:
         _trial_aggregation = "mean"
     _structural_mutation_chance = float(
         config.get_value(
@@ -2279,6 +2288,12 @@ func _set_timeline_controls_enabled(enabled: bool) -> void:
         _timeline_list.mouse_filter = (
             Control.MOUSE_FILTER_STOP if enabled else Control.MOUSE_FILTER_IGNORE
         )
+    if _add_timeline_button != null:
+        _add_timeline_button.disabled = not enabled
+    if _remove_timeline_button != null:
+        _remove_timeline_button.disabled = not enabled
+    if _clear_timeline_button != null:
+        _clear_timeline_button.disabled = not enabled
 
 
 func _set_run_buttons_disabled(disabled: bool) -> void:
