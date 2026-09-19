@@ -8,9 +8,9 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 4 — Configurable Fitness: in progress.**
+**Step 5 — World / Terrain Editor: implemented.**
 
-Steps 1–3 are live. Creatures now evolve morphology and expression-tree controllers under configurable weighted fitness.
+Steps 1–5 are live. Creatures evolve morphology and expression-tree controllers under configurable weighted fitness inside configurable deterministic worlds.
 
 Current foundation:
 
@@ -33,7 +33,7 @@ Current foundation:
 - JSON genome save/load
 - mutate-current / random-creature controls in the GUI
 - population evolution with tournament selection and elitism
-- distance fitness and champion tracking
+- configurable fitness and champion tracking
 - evolvable expression-tree brains stored inside each creature genome
 - time, motion, and orientation sensors
 - add/subtract/multiply/negate/sine/cosine/clamp brain nodes
@@ -41,11 +41,19 @@ Current foundation:
 - joint outputs driven by the evolved brain every physics step
 - configurable weighted fitness for distance, speed, uprightness, stability, and actuator effort
 - champion fitness metric breakdown in the Godot GUI
+- flat, slope, hills, and stairs terrain
+- editable gravity and ground friction
+- deterministic seeded world generation
+- static walls, blocks, gaps, and pits
+- saved world/terrain settings in the Godot GUI
+- exact Rust-generated world geometry rendered in the Godot preview
+- the same configured world used for evolution, creature playback, live probe runs, and benchmarks
 
-The Rust backend remains the authoritative simulator. Godot renders streamed
-snapshots and now acts as a simple creature-generation/mutation editor.
+The Rust backend remains the authoritative simulator. Godot renders streamed snapshots and provides creature, fitness, evolution, and
+world/terrain controls while Rust remains authoritative for physics and world
+geometry.
 
-See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), and [docs/STEP-4.md](docs/STEP-4.md).
+See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), [docs/STEP-4.md](docs/STEP-4.md), and [docs/STEP-5.md](docs/STEP-5.md).
 
 ## Windows quick start
 
