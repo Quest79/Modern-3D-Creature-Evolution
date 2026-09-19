@@ -128,9 +128,7 @@ impl Expression {
                 }
                 value.validate()
             }
-            Self::Add(left, right)
-            | Self::Subtract(left, right)
-            | Self::Multiply(left, right) => {
+            Self::Add(left, right) | Self::Subtract(left, right) | Self::Multiply(left, right) => {
                 left.validate()?;
                 right.validate()
             }
