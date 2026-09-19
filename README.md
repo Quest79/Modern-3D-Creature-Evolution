@@ -8,7 +8,9 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 1 — Simulation Foundation: live.**
+**Step 2 — Creature Morphology: in progress.**
+
+Step 1 is live and Step 2 now has a mutation-ready creature genome.
 
 Current foundation:
 
@@ -23,11 +25,18 @@ Current foundation:
 - capability reporting
 - Godot 4 desktop GUI
 - GitHub Actions CI
+- multi-segment creature genomes
+- revolute joints with limits and motor parameters
+- deterministic seeded mutation
+- structural add/remove-segment mutation
+- random morphology generation
+- JSON genome save/load
+- mutate-current / random-creature controls in the GUI
 
-The blue Step 1 probe can now be watched falling in real time while the Rust
-backend remains the authoritative simulator.
+The Rust backend remains the authoritative simulator. Godot renders streamed
+snapshots and now acts as a simple creature-generation/mutation editor.
 
-See [docs/STEP-1.md](docs/STEP-1.md).
+See [docs/STEP-1.md](docs/STEP-1.md) and [docs/STEP-2.md](docs/STEP-2.md).
 
 ## Windows quick start
 
@@ -46,4 +55,5 @@ the Rust backend, and launches the Godot GUI.
 cargo test --workspace
 cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12
 cargo run --release -p evolab-cli -- capabilities
+cargo run --release -p evolab-cli -- genome-generate --output creature.json --seed 42 --random-segments 6 --mutations 12
 ```
