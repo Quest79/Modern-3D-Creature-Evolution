@@ -82,6 +82,10 @@ enum Command {
         /// Disable real-time pacing and stream as fast as the CPU can simulate.
         #[arg(long, default_value_t = false)]
         max_speed: bool,
+
+        /// Playback speed for live viewing. 1.0 = real time.
+        #[arg(long, default_value_t = 1.0)]
+        playback_speed: f32,
     },
 
     /// Stream the default three-segment creature with motorized joints.
@@ -109,6 +113,10 @@ enum Command {
         /// Disable real-time pacing and stream as fast as the CPU can simulate.
         #[arg(long, default_value_t = false)]
         max_speed: bool,
+
+        /// Playback speed for live viewing. 1.0 = real time.
+        #[arg(long, default_value_t = 1.0)]
+        playback_speed: f32,
 
         /// Load an exact creature genome from JSON instead of generating one.
         #[arg(long)]
@@ -247,7 +255,16 @@ fn run() -> Result<(), String> {
             dt,
             frame_hz,
             max_speed,
-        } => run_stream(&event_host, event_port, seconds, dt, frame_hz, !max_speed),
+            playback_speed,
+        } => run_stream(
+            &event_host,
+            event_port,
+            seconds,
+            dt,
+            frame_hz,
+            !max_speed,
+            playback_speed,
+        ),
         Command::CreatureStream {
             event_port,
             event_host,
@@ -255,6 +272,7 @@ fn run() -> Result<(), String> {
             dt,
             frame_hz,
             max_speed,
+            playback_speed,
             genome,
             seed,
             mutations,
@@ -267,6 +285,7 @@ fn run() -> Result<(), String> {
             dt,
             frame_hz,
             realtime: !max_speed,
+            playback_speed,
             genome_path: genome.as_ref(),
             seed,
             mutations,
@@ -439,9 +458,13 @@ fn run_stream(
     dt: f32,
     frame_hz: f32,
     realtime: bool,
+    playback_speed: f32,
 ) -> Result<(), String> {
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
+    }
+    if !playback_speed.is_finite() || !(0.01..=2.0).contains(&playback_speed) {
+        return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
     let config = SimulationConfig {
@@ -465,13 +488,15 @@ fn run_stream(
             "frame_hz": frame_hz,
             "sample_every_steps": sample_every_steps,
             "realtime": realtime,
+            "playback_speed": playback_speed,
         }),
     );
 
     let wall_start = Instant::now();
     let mut observer = |snapshot: &WorldSnapshot| -> Result<(), String> {
         if realtime {
-            let target = wall_start + Duration::from_secs_f64(snapshot.simulated_seconds as f64);
+            let target = wall_start
+                + Duration::from_secs_f64(snapshot.simulated_seconds as f64 / playback_speed as f64);
             let now = Instant::now();
             if target > now {
                 thread::sleep(target - now);
@@ -519,6 +544,7 @@ struct CreatureStreamRequest<'a> {
     dt: f32,
     frame_hz: f32,
     realtime: bool,
+    playback_speed: f32,
     genome_path: Option<&'a PathBuf>,
     seed: u64,
     mutations: usize,
@@ -534,6 +560,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         dt,
         frame_hz,
         realtime,
+        playback_speed,
         genome_path,
         seed,
         mutations,
@@ -542,6 +569,9 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
     } = request;
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
+    }
+    if !playback_speed.is_finite() || !(0.01..=2.0).contains(&playback_speed) {
+        return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
     let config = SimulationConfig {
@@ -606,6 +636,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
             "frame_hz": frame_hz,
             "sample_every_steps": sample_every_steps,
             "realtime": realtime,
+            "playback_speed": playback_speed,
             "genome_source": genome_source,
             "mutation_log": mutation_log,
             "genome": genome,
@@ -615,7 +646,8 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
     let wall_start = Instant::now();
     let mut observer = |snapshot: &CreatureSnapshot| -> Result<(), String> {
         if realtime {
-            let target = wall_start + Duration::from_secs_f64(snapshot.simulated_seconds as f64);
+            let target = wall_start
+                + Duration::from_secs_f64(snapshot.simulated_seconds as f64 / playback_speed as f64);
             let now = Instant::now();
             if target > now {
                 thread::sleep(target - now);
