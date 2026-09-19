@@ -179,13 +179,7 @@ pub fn evolve_population<F>(
 where
     F: FnMut(&GenerationSummary) -> Result<(), String>,
 {
-    evolve_population_checkpointed(
-        ancestor,
-        config,
-        None,
-        on_generation,
-        |_checkpoint| Ok(()),
-    )
+    evolve_population_checkpointed(ancestor, config, None, on_generation, |_checkpoint| Ok(()))
 }
 
 pub fn evolve_population_checkpointed<F, C>(
@@ -539,7 +533,9 @@ fn evaluate_population(
     let requested_mode = accelerator.mode;
     let cuda_devices = match requested_mode {
         AcceleratorMode::Cpu => Vec::new(),
-        AcceleratorMode::Auto | AcceleratorMode::Cuda => discover_cuda_devices().unwrap_or_default(),
+        AcceleratorMode::Auto | AcceleratorMode::Cuda => {
+            discover_cuda_devices().unwrap_or_default()
+        }
     };
 
     if requested_mode == AcceleratorMode::Cuda
