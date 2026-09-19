@@ -32,6 +32,7 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)] // Parsed once at startup; keep Clap's subcommand fields direct.
 enum Command {
     /// Evaluate many independent rigid-body worlds in parallel.
     Probe {
