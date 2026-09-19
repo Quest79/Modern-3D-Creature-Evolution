@@ -777,7 +777,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
         let mut genome: CreatureGenome = serde_json::from_str(&raw)
             .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
-        genome.brain.sync_with_structure(&genome.joints, &genome.segments);
+        genome
+            .brain
+            .sync_with_structure(&genome.joints, &genome.segments);
         genome.validate()?;
         genome
     } else {
