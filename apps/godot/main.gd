@@ -27,6 +27,26 @@ var _fitness_speed_spin: SpinBox
 var _fitness_upright_spin: SpinBox
 var _fitness_stability_spin: SpinBox
 var _fitness_energy_spin: SpinBox
+var _terrain_option: OptionButton
+var _gravity_x_spin: SpinBox
+var _gravity_y_spin: SpinBox
+var _gravity_z_spin: SpinBox
+var _ground_friction_spin: SpinBox
+var _world_seed_spin: SpinBox
+var _slope_spin: SpinBox
+var _hill_height_spin: SpinBox
+var _hill_wavelength_spin: SpinBox
+var _stair_height_spin: SpinBox
+var _stair_depth_spin: SpinBox
+var _walls_check: CheckBox
+var _blocks_check: CheckBox
+var _gaps_check: CheckBox
+var _pits_check: CheckBox
+var _obstacle_count_spin: SpinBox
+var _obstacle_spacing_spin: SpinBox
+var _obstacle_size_spin: SpinBox
+var _gap_width_spin: SpinBox
+var _pit_depth_spin: SpinBox
 
 var _seed_creature_button: Button
 var _mutate_button: Button
@@ -57,6 +77,7 @@ var _hud_resize_handle: ColorRect
 
 var _probe_mesh: MeshInstance3D
 var _camera: Camera3D
+var _world_meshes: Array[MeshInstance3D] = []
 var _creature_meshes: Dictionary = {}
 var _current_genome: Dictionary = {}
 var _current_genome_source := ""
@@ -72,6 +93,26 @@ var _fitness_speed_weight := 0.0
 var _fitness_upright_weight := 0.0
 var _fitness_stability_weight := 0.0
 var _fitness_energy_weight := 0.0
+var _terrain_kind := "flat"
+var _gravity_x := 0.0
+var _gravity_y := -9.81
+var _gravity_z := 0.0
+var _ground_friction := 1.0
+var _world_seed := 1
+var _slope_degrees := 8.0
+var _hill_height := 0.75
+var _hill_wavelength := 8.0
+var _stair_height := 0.25
+var _stair_depth := 1.25
+var _walls_enabled := false
+var _blocks_enabled := false
+var _gaps_enabled := false
+var _pits_enabled := false
+var _obstacle_count := 6
+var _obstacle_spacing := 5.0
+var _obstacle_size := 1.0
+var _gap_width := 1.5
+var _pit_depth := 1.5
 var _hud_width := DEFAULT_HUD_WIDTH
 var _visible_hud_width := DEFAULT_HUD_WIDTH
 var _hud_dragging := false
@@ -121,6 +162,7 @@ func _ready() -> void:
         return
 
     _load_capabilities()
+    _refresh_world_preview()
     _set_status("Ready • backend connected on localhost:%d" % _event_port)
 
 
@@ -222,16 +264,6 @@ func _build_3d_preview() -> void:
     light.light_energy = 1.4
     light.shadow_enabled = true
     add_child(light)
-
-    var ground := MeshInstance3D.new()
-    var ground_mesh := BoxMesh.new()
-    ground_mesh.size = Vector3(100.0, 0.2, 100.0)
-    ground.mesh = ground_mesh
-    ground.position = Vector3(2.2, 0.0, 0.0)
-    var ground_material := StandardMaterial3D.new()
-    ground_material.albedo_color = Color(0.15, 0.18, 0.22)
-    ground.material_override = ground_material
-    add_child(ground)
 
     _probe_mesh = MeshInstance3D.new()
     var probe_box := BoxMesh.new()
