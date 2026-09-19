@@ -43,17 +43,9 @@ pub struct FitnessResult {
     pub metrics: FitnessMetrics,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct FitnessConfig {
     pub weights: FitnessWeights,
-}
-
-impl Default for FitnessConfig {
-    fn default() -> Self {
-        Self {
-            weights: FitnessWeights::default(),
-        }
-    }
 }
 
 impl FitnessConfig {
