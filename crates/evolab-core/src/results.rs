@@ -170,7 +170,10 @@ mod tests {
 
         assert_eq!(file.result.history.len(), restored.result.history.len());
         for (expected, actual) in file.result.history.iter().zip(&restored.result.history) {
-            assert_close(expected.execution.wall_seconds, actual.execution.wall_seconds);
+            assert_close(
+                expected.execution.wall_seconds,
+                actual.execution.wall_seconds,
+            );
             assert_close(
                 expected.execution.items_per_second,
                 actual.execution.items_per_second,
@@ -179,9 +182,15 @@ mod tests {
                 expected.execution.physics_steps_per_second,
                 actual.execution.physics_steps_per_second,
             );
-            assert_eq!(expected.execution.devices.len(), actual.execution.devices.len());
-            for (expected_device, actual_device) in
-                expected.execution.devices.iter().zip(&actual.execution.devices)
+            assert_eq!(
+                expected.execution.devices.len(),
+                actual.execution.devices.len()
+            );
+            for (expected_device, actual_device) in expected
+                .execution
+                .devices
+                .iter()
+                .zip(&actual.execution.devices)
             {
                 assert_eq!(expected_device.device_id, actual_device.device_id);
                 assert_eq!(expected_device.items, actual_device.items);
