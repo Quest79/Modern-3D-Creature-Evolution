@@ -7,8 +7,8 @@ use crate::{
     ChampionArchiveEntry, ConditionContext, CreatureGenome, DiversitySummary,
     EffectiveEvolutionSettings, FitnessConfig, FitnessMetrics, FitnessResult, GenomeRng,
     LineageRecord, MapEliteCell, MutationConfig, MutationRecord, ParetoEntry, SimulationConfig,
-    SpeciesSummary,
-    TimelineConfig, TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
+    SpeciesSummary, TimelineConfig, TrialAggregation, crossover_brain_subtree, evaluate_fitness,
+    mutate_genome,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
