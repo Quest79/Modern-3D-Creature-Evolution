@@ -365,10 +365,12 @@ fn add_segment(
     ];
 
     let direction_index = rng.range_usize(6);
-    let mut direction = [0.0_f32; 3];
     let axis_index = direction_index / 2;
-    let sign = if direction_index % 2 == 0 { -1.0 } else { 1.0 };
-    direction[axis_index] = sign;
+    let sign = if direction_index.is_multiple_of(2) {
+        -1.0
+    } else {
+        1.0
+    };
 
     let mut initial_position = parent.initial_position;
     initial_position[axis_index] +=
