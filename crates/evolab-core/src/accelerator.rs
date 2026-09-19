@@ -203,7 +203,10 @@ mod tests {
     fn scheduler_splits_work_without_losing_items() {
         let assignments = schedule_gpu_work(10, &[0, 1, 2]).unwrap();
         assert_eq!(
-            assignments.iter().map(|assignment| assignment.count).sum::<usize>(),
+            assignments
+                .iter()
+                .map(|assignment| assignment.count)
+                .sum::<usize>(),
             10
         );
         assert_eq!(assignments[0].count, 4);
