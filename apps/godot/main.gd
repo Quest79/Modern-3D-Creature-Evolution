@@ -70,6 +70,7 @@ var _evolve_button: Button
 var _watch_champion_button: Button
 var _stop_button: Button
 var _settings_button: Button
+var _results_button: Button
 var _save_experiment_button: Button
 var _load_experiment_button: Button
 var _fork_experiment_button: Button
@@ -83,6 +84,15 @@ var _title_label: Label
 var _section_headings: Array[Label] = []
 var _ui_theme: Theme
 var _settings_window: Window
+var _results_window: Window
+var _results_history_list: ItemList
+var _results_champion_list: ItemList
+var _results_lineage_list: ItemList
+var _results_detail: RichTextLabel
+var _results_analysis: RichTextLabel
+var _results_graph: Control
+var _results_best_line: Line2D
+var _results_average_line: Line2D
 var _font_size_spin: SpinBox
 var _camera_speed_spin: SpinBox
 var _mouse_sensitivity_spin: SpinBox
@@ -100,6 +110,7 @@ var _current_mutation_count := 0
 var _has_evolution_champion := false
 var _champion_world: Dictionary = {}
 var _champion_motor_strength := 1.0
+var _results_data: Dictionary = {}
 
 var _font_size := 16
 var _camera_move_speed := 6.0
@@ -174,6 +185,7 @@ func _ready() -> void:
     _build_3d_preview()
     _build_ui()
     _build_settings_window()
+    _build_results_window()
     _build_file_dialogs()
     get_viewport().size_changed.connect(_update_layout)
     _update_layout()
@@ -357,13 +369,19 @@ func _build_ui() -> void:
     _title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     header_row.add_child(_title_label)
 
+    _results_button = Button.new()
+    _results_button.text = "Results"
+    _results_button.disabled = true
+    _results_button.pressed.connect(_on_results_pressed)
+    header_row.add_child(_results_button)
+
     _settings_button = Button.new()
     _settings_button.text = "⚙ Settings"
     _settings_button.pressed.connect(_on_settings_pressed)
     header_row.add_child(_settings_button)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 6 • Experiment Timeline / Scheduling"
+    subtitle.text = "Step 7 • Results / History / Analysis"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
@@ -795,6 +813,126 @@ func _build_ui() -> void:
     column.add_child(_capabilities_label)
 
     _apply_font_size()
+
+
+func _build_results_window() -> void:
+    _results_window = Window.new()
+    _results_window.title = "Evolution Results / History"
+    _results_window.size = Vector2i(980, 720)
+    _results_window.min_size = Vector2i(760, 560)
+    _results_window.visible = false
+    _results_window.theme = _ui_theme
+    _results_window.close_requested.connect(_results_window.hide)
+    add_child(_results_window)
+
+    var margin := MarginContainer.new()
+    margin.add_theme_constant_override("margin_left", 14)
+    margin.add_theme_constant_override("margin_right", 14)
+    margin.add_theme_constant_override("margin_top", 14)
+    margin.add_theme_constant_override("margin_bottom", 14)
+    margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    _results_window.add_child(margin)
+
+    var tabs := TabContainer.new()
+    tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    margin.add_child(tabs)
+
+    var history_tab := VBoxContainer.new()
+    history_tab.name = "History"
+    history_tab.add_theme_constant_override("separation", 8)
+    tabs.add_child(history_tab)
+
+    _results_graph = Control.new()
+    _results_graph.custom_minimum_size = Vector2(0, 190)
+    _results_graph.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    var graph_bg := ColorRect.new()
+    graph_bg.color = Color(0.05, 0.06, 0.08, 0.92)
+    graph_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    graph_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _results_graph.add_child(graph_bg)
+
+    _results_best_line = Line2D.new()
+    _results_best_line.width = 2.5
+    _results_best_line.default_color = Color(0.35, 0.85, 1.0)
+    _results_graph.add_child(_results_best_line)
+
+    _results_average_line = Line2D.new()
+    _results_average_line.width = 2.0
+    _results_average_line.default_color = Color(1.0, 0.72, 0.32)
+    _results_graph.add_child(_results_average_line)
+
+    history_tab.add_child(_results_graph)
+
+    var graph_key := Label.new()
+    graph_key.text = "Best fitness (blue)   Average fitness (orange)"
+    graph_key.modulate = Color(0.72, 0.78, 0.88)
+    history_tab.add_child(graph_key)
+
+    var history_split := HSplitContainer.new()
+    history_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    history_tab.add_child(history_split)
+
+    _results_history_list = ItemList.new()
+    _results_history_list.custom_minimum_size = Vector2(360, 260)
+    _results_history_list.item_selected.connect(_on_result_history_selected)
+    history_split.add_child(_results_history_list)
+
+    _results_detail = RichTextLabel.new()
+    _results_detail.bbcode_enabled = true
+    _results_detail.fit_content = false
+    _results_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _results_detail.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    history_split.add_child(_results_detail)
+
+    var champions_tab := VBoxContainer.new()
+    champions_tab.name = "Champions"
+    champions_tab.add_theme_constant_override("separation", 8)
+    tabs.add_child(champions_tab)
+
+    _results_champion_list = ItemList.new()
+    _results_champion_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    _results_champion_list.item_selected.connect(_on_result_champion_selected)
+    champions_tab.add_child(_results_champion_list)
+
+    var champion_buttons := HBoxContainer.new()
+    champions_tab.add_child(champion_buttons)
+
+    var load_champion_button := Button.new()
+    load_champion_button.text = "Load Selected Champion"
+    load_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    load_champion_button.pressed.connect(_on_load_archived_champion)
+    champion_buttons.add_child(load_champion_button)
+
+    var compare_champion_button := Button.new()
+    compare_champion_button.text = "Compare Selected vs Final"
+    compare_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    compare_champion_button.pressed.connect(_on_compare_archived_champion)
+    champion_buttons.add_child(compare_champion_button)
+
+    var lineage_tab := VBoxContainer.new()
+    lineage_tab.name = "Lineage"
+    tabs.add_child(lineage_tab)
+    _results_lineage_list = ItemList.new()
+    _results_lineage_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    lineage_tab.add_child(_results_lineage_list)
+
+    var analysis_tab := VBoxContainer.new()
+    analysis_tab.name = "Analysis"
+    tabs.add_child(analysis_tab)
+    _results_analysis = RichTextLabel.new()
+    _results_analysis.bbcode_enabled = true
+    _results_analysis.fit_content = false
+    _results_analysis.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    analysis_tab.add_child(_results_analysis)
+
+
+func _on_results_pressed() -> void:
+    if _results_data.is_empty():
+        return
+    _set_mouse_look(false)
+    _refresh_results_window()
+    _results_window.popup_centered()
 
 
 func _build_settings_window() -> void:
