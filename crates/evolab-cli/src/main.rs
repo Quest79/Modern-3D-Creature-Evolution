@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
     EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig,
-    PhysicsBackend, ProbeSpec,
-    RapierCpuBackend, SimulationConfig, TimelineConfig, TrialAggregation, WorldConfig,
-    WorldSnapshot, evolve_population, mutate_genome, random_creature,
+    PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, TimelineConfig,
+    TrialAggregation, WorldConfig, WorldSnapshot, evolve_population, mutate_genome,
+    random_creature,
 };
 use serde_json::{Value, json};
 
@@ -1281,7 +1281,6 @@ fn write_results_file(
     fs::write(path, json)
         .map_err(|err| format!("failed to write results {}: {err}", path.display()))
 }
-
 
 fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
     let json = serde_json::to_string_pretty(genome)
