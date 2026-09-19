@@ -2,6 +2,8 @@ extends Node
 
 const EVENT_PORT_START := 47821
 const EVENT_PORT_TRIES := 32
+const SETTINGS_PATH := "user://settings.cfg"
+const HUD_WIDTH := 510.0
 
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
@@ -27,18 +29,35 @@ var _batch_button: Button
 var _evolve_button: Button
 var _watch_champion_button: Button
 var _stop_button: Button
+var _settings_button: Button
 
 var _status_label: Label
 var _progress_bar: ProgressBar
 var _metrics: RichTextLabel
 var _capabilities_label: Label
+var _hud_panel: PanelContainer
+var _title_label: Label
+var _section_headings: Array[Label] = []
+var _ui_theme: Theme
+var _settings_window: Window
+var _font_size_spin: SpinBox
+var _camera_speed_spin: SpinBox
+var _mouse_sensitivity_spin: SpinBox
 
 var _probe_mesh: MeshInstance3D
+var _camera: Camera3D
 var _creature_meshes: Dictionary = {}
 var _current_genome: Dictionary = {}
 var _current_genome_source := ""
 var _current_mutation_count := 0
 var _has_evolution_champion := false
+
+var _font_size := 16
+var _camera_move_speed := 6.0
+var _mouse_sensitivity_degrees := 0.15
+var _mouse_looking := false
+var _camera_yaw := 0.0
+var _camera_pitch := 0.0
 
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
@@ -52,9 +71,16 @@ var _last_state_time := 0.0
 
 
 func _ready() -> void:
+    _load_settings()
+    _ui_theme = Theme.new()
+    _ui_theme.default_font_size = _font_size
+
     _build_3d_preview()
     _build_ui()
+    _build_settings_window()
     _build_file_dialogs()
+    get_viewport().size_changed.connect(_update_layout)
+    _update_layout()
 
     if not _backend_exists():
         _set_status("Rust backend missing. Run BOOTSTRAP_AND_RUN.bat.")
@@ -70,7 +96,9 @@ func _ready() -> void:
     _set_status("Ready • backend connected on localhost:%d" % _event_port)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+    _update_camera_movement(delta)
+
     if _udp == null:
         return
 
@@ -105,6 +133,7 @@ func _process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+    _set_mouse_look(false)
     _stop_current_job()
     if _udp != null:
         _udp.close()
@@ -152,7 +181,7 @@ func _build_3d_preview() -> void:
 
     var ground := MeshInstance3D.new()
     var ground_mesh := BoxMesh.new()
-    ground_mesh.size = Vector3(14.0, 0.2, 14.0)
+    ground_mesh.size = Vector3(100.0, 0.2, 100.0)
     ground.mesh = ground_mesh
     ground.position = Vector3(2.2, 0.0, 0.0)
     var ground_material := StandardMaterial3D.new()
@@ -172,20 +201,23 @@ func _build_3d_preview() -> void:
     _probe_mesh.material_override = probe_material
     add_child(_probe_mesh)
 
-    var camera := Camera3D.new()
-    camera.position = Vector3(9.2, 5.8, 9.2)
-    add_child(camera)
-    camera.look_at(Vector3(2.2, 1.2, 0.0), Vector3.UP)
+    _camera = Camera3D.new()
+    _camera.position = Vector3(9.2, 5.8, 9.2)
+    add_child(_camera)
+    _camera.look_at(Vector3(2.2, 1.2, 0.0), Vector3.UP)
+    _camera_yaw = _camera.rotation.y
+    _camera_pitch = _camera.rotation.x
 
 
 func _build_ui() -> void:
     var layer := CanvasLayer.new()
     add_child(layer)
 
-    var panel := PanelContainer.new()
-    panel.position = Vector2(18, 18)
-    panel.size = Vector2(510, 884)
-    layer.add_child(panel)
+    _hud_panel = PanelContainer.new()
+    _hud_panel.position = Vector2.ZERO
+    _hud_panel.size = Vector2(HUD_WIDTH, get_viewport().get_visible_rect().size.y)
+    _hud_panel.theme = _ui_theme
+    layer.add_child(_hud_panel)
 
     var margin := MarginContainer.new()
     margin.add_theme_constant_override("margin_left", 18)
@@ -196,7 +228,7 @@ func _build_ui() -> void:
     scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
     scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-    panel.add_child(scroll)
+    _hud_panel.add_child(scroll)
 
     margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     scroll.add_child(margin)
@@ -205,10 +237,19 @@ func _build_ui() -> void:
     column.add_theme_constant_override("separation", 6)
     margin.add_child(column)
 
-    var title := Label.new()
-    title.text = "Modern 3D Creature Evolution"
-    title.add_theme_font_size_override("font_size", 24)
-    column.add_child(title)
+    var header_row := HBoxContainer.new()
+    header_row.add_theme_constant_override("separation", 8)
+    column.add_child(header_row)
+
+    _title_label = Label.new()
+    _title_label.text = "Modern 3D Creature Evolution"
+    _title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    header_row.add_child(_title_label)
+
+    _settings_button = Button.new()
+    _settings_button.text = "⚙ Settings"
+    _settings_button.pressed.connect(_on_settings_pressed)
+    header_row.add_child(_settings_button)
 
     var subtitle := Label.new()
     subtitle.text = "Step 3 • Evolvable Expression-Tree Brains"
@@ -219,7 +260,7 @@ func _build_ui() -> void:
 
     var editor_heading := Label.new()
     editor_heading.text = "Creature generation"
-    editor_heading.add_theme_font_size_override("font_size", 17)
+    _section_headings.append(editor_heading)
     column.add_child(editor_heading)
 
     _seed_spin = _add_number_row(column, "Seed", 1, 999999999, 1, 1)
@@ -273,7 +314,7 @@ func _build_ui() -> void:
 
     var evolution_heading := Label.new()
     evolution_heading.text = "Evolution"
-    evolution_heading.add_theme_font_size_override("font_size", 17)
+    _section_headings.append(evolution_heading)
     column.add_child(evolution_heading)
 
     _population_spin = _add_number_row(column, "Population", 2, 10000, 50, 1)
@@ -303,7 +344,7 @@ func _build_ui() -> void:
 
     var sim_heading := Label.new()
     sim_heading.text = "Simulation / benchmark"
-    sim_heading.add_theme_font_size_override("font_size", 17)
+    _section_headings.append(sim_heading)
     column.add_child(sim_heading)
 
     _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 8.0, 0.1)
@@ -360,6 +401,210 @@ func _build_ui() -> void:
     _capabilities_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     _capabilities_label.modulate = Color(0.64, 0.7, 0.8)
     column.add_child(_capabilities_label)
+
+    _apply_font_size()
+
+
+func _build_settings_window() -> void:
+    _settings_window = Window.new()
+    _settings_window.title = "Settings"
+    _settings_window.size = Vector2i(430, 260)
+    _settings_window.min_size = Vector2i(360, 220)
+    _settings_window.visible = false
+    _settings_window.theme = _ui_theme
+    _settings_window.close_requested.connect(_settings_window.hide)
+    add_child(_settings_window)
+
+    var margin := MarginContainer.new()
+    margin.add_theme_constant_override("margin_left", 18)
+    margin.add_theme_constant_override("margin_right", 18)
+    margin.add_theme_constant_override("margin_top", 18)
+    margin.add_theme_constant_override("margin_bottom", 18)
+    _settings_window.add_child(margin)
+
+    var column := VBoxContainer.new()
+    column.add_theme_constant_override("separation", 12)
+    margin.add_child(column)
+
+    var heading := Label.new()
+    heading.text = "Interface & Camera"
+    heading.add_theme_font_size_override("font_size", _font_size + 2)
+    column.add_child(heading)
+
+    _font_size_spin = _add_number_row(column, "Font size", 10, 32, _font_size, 1)
+    _font_size_spin.value_changed.connect(_on_font_size_changed)
+
+    _camera_speed_spin = _add_number_row(
+        column,
+        "WASD move speed",
+        0.5,
+        50.0,
+        _camera_move_speed,
+        0.5
+    )
+    _camera_speed_spin.value_changed.connect(_on_camera_speed_changed)
+
+    _mouse_sensitivity_spin = _add_number_row(
+        column,
+        "Mouse sensitivity",
+        0.03,
+        1.0,
+        _mouse_sensitivity_degrees,
+        0.01
+    )
+    _mouse_sensitivity_spin.value_changed.connect(_on_mouse_sensitivity_changed)
+
+    var help := Label.new()
+    help.text = "Hold right mouse button and move the mouse to look. W/S move along your aim; A/D strafe."
+    help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    help.modulate = Color(0.70, 0.76, 0.86)
+    column.add_child(help)
+
+
+func _on_settings_pressed() -> void:
+    _set_mouse_look(false)
+    _settings_window.popup_centered()
+
+
+func _on_font_size_changed(value: float) -> void:
+    _font_size = int(value)
+    _apply_font_size()
+    _save_settings()
+
+
+func _on_camera_speed_changed(value: float) -> void:
+    _camera_move_speed = float(value)
+    _save_settings()
+
+
+func _on_mouse_sensitivity_changed(value: float) -> void:
+    _mouse_sensitivity_degrees = float(value)
+    _save_settings()
+
+
+func _apply_font_size() -> void:
+    if _ui_theme == null:
+        return
+
+    _ui_theme.default_font_size = _font_size
+
+    if is_instance_valid(_title_label):
+        _title_label.add_theme_font_size_override("font_size", _font_size + 8)
+
+    for heading in _section_headings:
+        if is_instance_valid(heading):
+            heading.add_theme_font_size_override("font_size", _font_size + 1)
+
+    if is_instance_valid(_settings_window):
+        _settings_window.theme = _ui_theme
+
+
+func _load_settings() -> void:
+    var config := ConfigFile.new()
+    if config.load(SETTINGS_PATH) != OK:
+        return
+
+    _font_size = int(config.get_value("ui", "font_size", _font_size))
+    _font_size = clampi(_font_size, 10, 32)
+    _camera_move_speed = float(
+        config.get_value("camera", "move_speed", _camera_move_speed)
+    )
+    _camera_move_speed = clampf(_camera_move_speed, 0.5, 50.0)
+    _mouse_sensitivity_degrees = float(
+        config.get_value(
+            "camera",
+            "mouse_sensitivity_degrees",
+            _mouse_sensitivity_degrees
+        )
+    )
+    _mouse_sensitivity_degrees = clampf(_mouse_sensitivity_degrees, 0.03, 1.0)
+
+
+func _save_settings() -> void:
+    var config := ConfigFile.new()
+    config.set_value("ui", "font_size", _font_size)
+    config.set_value("camera", "move_speed", _camera_move_speed)
+    config.set_value(
+        "camera",
+        "mouse_sensitivity_degrees",
+        _mouse_sensitivity_degrees
+    )
+    config.save(SETTINGS_PATH)
+
+
+func _update_layout() -> void:
+    if is_instance_valid(_hud_panel):
+        _hud_panel.position = Vector2.ZERO
+        _hud_panel.size = Vector2(
+            HUD_WIDTH,
+            get_viewport().get_visible_rect().size.y
+        )
+
+
+func _unhandled_input(event: InputEvent) -> void:
+    if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
+        if _mouse_looking:
+            _set_mouse_look(false)
+            get_viewport().set_input_as_handled()
+        return
+
+    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+        if event.pressed:
+            if _settings_window != null and _settings_window.visible:
+                return
+            if event.position.x <= HUD_WIDTH:
+                return
+            _set_mouse_look(true)
+        else:
+            _set_mouse_look(false)
+        get_viewport().set_input_as_handled()
+        return
+
+    if event is InputEventMouseMotion and _mouse_looking:
+        var sensitivity := deg_to_rad(_mouse_sensitivity_degrees)
+        _camera_yaw -= event.relative.x * sensitivity
+        _camera_pitch = clampf(
+            _camera_pitch - event.relative.y * sensitivity,
+            deg_to_rad(-89.0),
+            deg_to_rad(89.0)
+        )
+        _camera.rotation = Vector3(_camera_pitch, _camera_yaw, 0.0)
+        get_viewport().set_input_as_handled()
+
+
+func _set_mouse_look(enabled: bool) -> void:
+    _mouse_looking = enabled
+    Input.mouse_mode = (
+        Input.MOUSE_MODE_CAPTURED if enabled else Input.MOUSE_MODE_VISIBLE
+    )
+
+
+func _update_camera_movement(delta: float) -> void:
+    if not is_instance_valid(_camera):
+        return
+    if _settings_window != null and _settings_window.visible:
+        return
+
+    var focus_owner := get_viewport().gui_get_focus_owner()
+    if focus_owner is LineEdit:
+        return
+
+    var direction := Vector3.ZERO
+    var basis := _camera.global_transform.basis
+
+    if Input.is_key_pressed(KEY_W):
+        direction += -basis.z
+    if Input.is_key_pressed(KEY_S):
+        direction += basis.z
+    if Input.is_key_pressed(KEY_A):
+        direction += -basis.x
+    if Input.is_key_pressed(KEY_D):
+        direction += basis.x
+
+    if direction.length_squared() > 0.0:
+        _camera.global_position += (
+            direction.normalized() * _camera_move_speed * delta
+        )
 
 
 func _build_file_dialogs() -> void:
