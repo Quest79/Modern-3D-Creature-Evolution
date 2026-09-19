@@ -189,12 +189,8 @@ where
     validate_effective_settings(&first_settings)?;
 
     let mut next_individual_id = 1_u64;
-    let mut population = initial_population(
-        ancestor,
-        &first_settings,
-        &mut rng,
-        &mut next_individual_id,
-    )?;
+    let mut population =
+        initial_population(ancestor, &first_settings, &mut rng, &mut next_individual_id)?;
     let mut history = Vec::with_capacity(config.generations);
     let mut champion_archive = Vec::with_capacity(config.generations);
     let mut evaluations_completed = 0usize;
@@ -697,10 +693,7 @@ fn summarize_species(evaluated: &[EvaluatedCreature]) -> Vec<SpeciesSummary> {
         .collect()
 }
 
-fn build_lineage_records(
-    generation: usize,
-    evaluated: &[EvaluatedCreature],
-) -> Vec<LineageRecord> {
+fn build_lineage_records(generation: usize, evaluated: &[EvaluatedCreature]) -> Vec<LineageRecord> {
     evaluated
         .iter()
         .map(|item| LineageRecord {
@@ -717,10 +710,7 @@ fn build_lineage_records(
         .collect()
 }
 
-fn build_pareto_front(
-    generation: usize,
-    evaluated: &[EvaluatedCreature],
-) -> Vec<ParetoEntry> {
+fn build_pareto_front(generation: usize, evaluated: &[EvaluatedCreature]) -> Vec<ParetoEntry> {
     let mut front = Vec::new();
 
     for candidate in evaluated {
@@ -749,14 +739,14 @@ fn build_pareto_front(
     front
 }
 
-fn build_map_elites(
-    generation: usize,
-    evaluated: &[EvaluatedCreature],
-) -> Vec<MapEliteCell> {
+fn build_map_elites(generation: usize, evaluated: &[EvaluatedCreature]) -> Vec<MapEliteCell> {
     let mut cells: BTreeMap<(usize, usize), &EvaluatedCreature> = BTreeMap::new();
 
     for item in evaluated {
-        let key = (item.genome.segments.len(), item.genome.brain.node_count() / 8);
+        let key = (
+            item.genome.segments.len(),
+            item.genome.brain.node_count() / 8,
+        );
         match cells.get(&key) {
             Some(existing) if existing.fitness >= item.fitness => {}
             _ => {
