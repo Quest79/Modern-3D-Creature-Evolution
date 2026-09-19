@@ -1376,6 +1376,198 @@ func _refresh_diversity_graph() -> void:
         _results_class_line.add_point(Vector2(x, class_y))
 
 
+func _result_lineage_record_at(flat_index: int) -> Dictionary:
+    if flat_index < 0 or _results_data.is_empty():
+        return {}
+
+    var result_value = _results_data.get("result", {})
+    if typeof(result_value) != TYPE_DICTIONARY:
+        return {}
+    var result: Dictionary = result_value
+    var history: Array = result.get("history", [])
+    var remaining := flat_index
+
+    for summary_value in history:
+        if typeof(summary_value) != TYPE_DICTIONARY:
+            continue
+        var summary: Dictionary = summary_value
+        var lineage: Array = summary.get("lineage", [])
+        for record_value in lineage:
+            if typeof(record_value) != TYPE_DICTIONARY:
+                continue
+            if remaining == 0:
+                return record_value
+            remaining -= 1
+
+    return {}
+
+
+func _format_mutation_records(value) -> String:
+    if typeof(value) != TYPE_ARRAY:
+        return "None recorded"
+    var mutations: Array = value
+    if mutations.is_empty():
+        return "None (elite copy / original ancestor)"
+
+    var lines: PackedStringArray = []
+    for mutation_value in mutations:
+        if typeof(mutation_value) != TYPE_DICTIONARY:
+            continue
+        var mutation: Dictionary = mutation_value
+        var description := str(mutation.get("description", ""))
+        if description.is_empty():
+            description = str(mutation.get("kind", "Mutation"))
+        lines.append("• " + description)
+
+    return "\n".join(lines) if not lines.is_empty() else "None recorded"
+
+
+func _format_trial_seeds(value) -> String:
+    if typeof(value) != TYPE_ARRAY:
+        return "-"
+    var seeds: Array = value
+    if seeds.is_empty():
+        return "-"
+    var parts: PackedStringArray = []
+    for seed_value in seeds:
+        parts.append(str(seed_value))
+    return ", ".join(parts)
+
+
+func _on_result_lineage_selected(index: int) -> void:
+    var record := _result_lineage_record_at(index)
+    if record.is_empty():
+        _results_lineage_detail.text = ""
+        return
+
+    var metrics: Dictionary = record.get("metrics", {})
+    _results_lineage_detail.text = (
+        "[b]Creature #%s[/b]\n"
+        + "Generation %s • parents [%s]\n\n"
+        + "[table=2]"
+        + "[cell]Fitness[/cell][cell][b]%.5f[/b][/cell]"
+        + "[cell]Analysis class[/cell][cell]%s[/cell]"
+        + "[cell]Distance[/cell][cell]%.4f m[/cell]"
+        + "[cell]Speed[/cell][cell]%.4f m/s[/cell]"
+        + "[cell]Upright[/cell][cell]%.3f[/cell]"
+        + "[cell]Stability[/cell][cell]%.3f[/cell]"
+        + "[cell]Energy[/cell][cell]%.4f[/cell]"
+        + "[cell]Segments / joints[/cell][cell]%s / %s[/cell]"
+        + "[cell]Brain nodes[/cell][cell]%s[/cell]"
+        + "[cell]Trial seeds[/cell][cell]%s[/cell]"
+        + "[/table]\n\n"
+        + "[b]Mutations from parent[/b]\n%s"
+        % [
+            str(record.get("individual_id", 0)),
+            str(record.get("generation", 0)),
+            _format_parent_ids(record.get("parent_ids", [])),
+            float(record.get("fitness", 0.0)),
+            str(record.get("species_id", 0)),
+            float(metrics.get("distance", 0.0)),
+            float(metrics.get("average_speed", 0.0)),
+            float(metrics.get("upright", 0.0)),
+            float(metrics.get("stability", 0.0)),
+            float(metrics.get("energy", 0.0)),
+            str(record.get("segments", 0)),
+            str(record.get("joints", 0)),
+            str(record.get("brain_nodes", 0)),
+            _format_trial_seeds(record.get("trial_seeds", [])),
+            _format_mutation_records(record.get("mutations", [])),
+        ]
+    )
+
+
+func _selected_lineage_record() -> Dictionary:
+    var selected := _results_lineage_list.get_selected_items()
+    if selected.is_empty():
+        return {}
+    return _result_lineage_record_at(int(selected[0]))
+
+
+func _on_load_lineage_creature() -> void:
+    var record := _selected_lineage_record()
+    if record.is_empty():
+        return
+
+    var genome_value = record.get("genome", {})
+    if typeof(genome_value) != TYPE_DICTIONARY:
+        _set_status("This results file does not retain that creature genome.")
+        return
+
+    _current_genome = genome_value.duplicate(true)
+    _current_genome_source = "generation %s creature #%s" % [
+        str(record.get("generation", 0)),
+        str(record.get("individual_id", 0)),
+    ]
+    _save_button.disabled = false
+    _probe_mesh.visible = false
+    _build_creature_from_genome(_current_genome)
+    _results_window.hide()
+    _set_status("Loaded %s." % _current_genome_source)
+
+
+func _on_compare_lineage_creature() -> void:
+    var record := _selected_lineage_record()
+    if record.is_empty():
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var final_metrics: Dictionary = result.get("champion_metrics", {})
+    var selected_metrics: Dictionary = record.get("metrics", {})
+
+    _results_lineage_detail.text = (
+        "[b]Creature #%s vs final champion[/b]\n\n"
+        + "[table=3]"
+        + "[cell][/cell][cell][b]Selected[/b][/cell][cell][b]Final[/b][/cell]"
+        + "[cell]Fitness[/cell][cell]%.5f[/cell][cell]%.5f[/cell]"
+        + "[cell]Distance[/cell][cell]%.4f[/cell][cell]%.4f[/cell]"
+        + "[cell]Speed[/cell][cell]%.4f[/cell][cell]%.4f[/cell]"
+        + "[cell]Upright[/cell][cell]%.3f[/cell][cell]%.3f[/cell]"
+        + "[cell]Stability[/cell][cell]%.3f[/cell][cell]%.3f[/cell]"
+        + "[cell]Energy[/cell][cell]%.4f[/cell][cell]%.4f[/cell]"
+        + "[/table]\n\n"
+        + "[b]Selected mutations[/b]\n%s"
+        % [
+            str(record.get("individual_id", 0)),
+            float(record.get("fitness", 0.0)),
+            float(result.get("champion_fitness", 0.0)),
+            float(selected_metrics.get("distance", 0.0)),
+            float(final_metrics.get("distance", 0.0)),
+            float(selected_metrics.get("average_speed", 0.0)),
+            float(final_metrics.get("average_speed", 0.0)),
+            float(selected_metrics.get("upright", 0.0)),
+            float(final_metrics.get("upright", 0.0)),
+            float(selected_metrics.get("stability", 0.0)),
+            float(final_metrics.get("stability", 0.0)),
+            float(selected_metrics.get("energy", 0.0)),
+            float(final_metrics.get("energy", 0.0)),
+            _format_mutation_records(record.get("mutations", [])),
+        ]
+    )
+
+
+func _on_fork_lineage_creature() -> void:
+    var record := _selected_lineage_record()
+    if record.is_empty():
+        return
+
+    var genome_value = record.get("genome", {})
+    if typeof(genome_value) != TYPE_DICTIONARY:
+        _set_status("This results file does not retain that creature genome.")
+        return
+
+    _current_genome = genome_value.duplicate(true)
+    _current_genome_source = "generation %s creature #%s" % [
+        str(record.get("generation", 0)),
+        str(record.get("individual_id", 0)),
+    ]
+    _experiment_name = str(
+        _results_data.get("experiment_name", _experiment_name)
+    )
+    _results_window.hide()
+    _on_fork_experiment_pressed()
+
+
 func _on_result_champion_selected(_index: int) -> void:
     pass
 
