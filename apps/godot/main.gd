@@ -569,19 +569,19 @@ func _build_ui() -> void:
     _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
     _evolution_mutations_spin = _add_number_row(evolution_section, "Mutations / child", 1, 500, 8, 1)
     _structural_mutation_spin = _add_number_row(
-        column,
-        "Structural mutation chance",
+        evolution_section,
+        "Structural mutation chance"
         0.0,
         1.0,
         _structural_mutation_chance,
         0.01
     )
     _motor_strength_spin = _add_number_row(
-        column, "Motor strength", 0.0, 20.0, _motor_strength, 0.05
+        evolution_section, "Motor strength", 0.0, 20.0, _motor_strength, 0.05
     )
     _motor_strength_spin.suffix = "x"
     _trials_spin = _add_number_row(
-        column, "Trials / creature", 1, 100, _trials_per_creature, 1
+        evolution_section, "Trials / creature", 1, 100, _trials_per_creature, 1
     )
 
     var aggregation_row := HBoxContainer.new()
@@ -632,8 +632,6 @@ func _build_ui() -> void:
         _fitness_energy_spin,
     ]:
         spin.value_changed.connect(_on_fitness_weights_changed)
-
-    fitness_section.add_child(HSeparator.new())
 
     var world_section := _add_collapsible_section(column, "World / Terrain", false)
 
@@ -736,8 +734,6 @@ func _build_ui() -> void:
 
     for world_check in [_walls_check, _blocks_check, _gaps_check, _pits_check]:
         world_check.toggled.connect(_on_world_toggle_changed)
-
-    world_section.add_child(HSeparator.new())
 
     var timeline_section := _add_collapsible_section(column, "Experiment Timeline", false)
 
