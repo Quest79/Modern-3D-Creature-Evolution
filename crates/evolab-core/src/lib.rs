@@ -32,9 +32,7 @@ pub use brain::{
     BrainContext, BrainGenome, BrainOutputGene, Expression, JointSensorState, SegmentSensorState,
     SensorKind, legacy_expression,
 };
-pub use checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, CheckpointCandidate, EvolutionCheckpoint,
-};
+pub use checkpoint::{CHECKPOINT_FORMAT_VERSION, CheckpointCandidate, EvolutionCheckpoint};
 pub use config::SimulationConfig;
 pub use creature::{
     CreatureBodySnapshot, CreatureGenome, CreatureReport, CreatureSimulator, CreatureSnapshot,
