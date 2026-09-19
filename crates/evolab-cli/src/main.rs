@@ -154,6 +154,10 @@ enum Command {
         /// Serialized WorldConfig JSON.
         #[arg(long)]
         world_json: Option<String>,
+
+        /// Global actuator strength multiplier.
+        #[arg(long, default_value_t = 1.0)]
+        motor_strength: f32,
     },
 
     /// Write a generated/mutated creature genome to a JSON file.
@@ -355,6 +359,7 @@ fn run() -> Result<(), String> {
             random_segments,
             max_segments,
             world_json,
+            motor_strength,
         } => run_creature_stream(CreatureStreamRequest {
             event_host: &event_host,
             event_port,
@@ -369,6 +374,7 @@ fn run() -> Result<(), String> {
             random_segments,
             max_segments,
             world_json: world_json.as_deref(),
+            motor_strength,
         }),
         Command::GenomeGenerate {
             output,
@@ -595,7 +601,9 @@ fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let config = simulation_config(seconds, dt, world_json)?;
+    let mut config = simulation_config(seconds, dt, world_json)?;
+    config.motor_strength_multiplier = motor_strength;
+    config.validate()?;
 
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "streaming requires an event port".to_string())?;
@@ -678,6 +686,7 @@ struct CreatureStreamRequest<'a> {
     random_segments: usize,
     max_segments: usize,
     world_json: Option<&'a str>,
+    motor_strength: f32,
 }
 
 fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String> {
@@ -695,6 +704,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         random_segments,
         max_segments,
         world_json,
+        motor_strength,
     } = request;
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
