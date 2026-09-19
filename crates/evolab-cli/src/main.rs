@@ -1055,6 +1055,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     "fraction": summary.generation as f64 / config.generations as f64,
                     "best_fitness": summary.best_fitness,
                     "average_fitness": summary.average_fitness,
+                    "median_fitness": summary.median_fitness,
                     "worst_fitness": summary.worst_fitness,
                     "best_distance": summary.best_distance,
                     "best_metrics": summary.best_metrics,
