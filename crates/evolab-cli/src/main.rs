@@ -625,9 +625,7 @@ fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let mut config = simulation_config(seconds, dt, world_json)?;
-    config.motor_strength_multiplier = motor_strength;
-    config.validate()?;
+    let config = simulation_config(seconds, dt, world_json)?;
 
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "streaming requires an event port".to_string())?;
