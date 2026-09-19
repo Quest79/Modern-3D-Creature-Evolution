@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use evolab_core::{
-    BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
-    EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig,
-    PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, TimelineConfig,
-    TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices, evolve_population,
+    AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
+    CreatureSnapshot, EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile,
+    FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig,
+    WorldSnapshot, discover_cuda_devices, evolve_population, evolve_population_checkpointed,
     mutate_genome, random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
@@ -272,6 +273,42 @@ enum Command {
         #[arg(long, default_value_t = 0.0)]
         fitness_energy: f32,
 
+        /// Evolution accelerator policy: cpu, auto, or cuda.
+        #[arg(long, default_value = "cpu")]
+        accelerator: String,
+
+        /// CUDA device IDs for accelerator scheduling, for example 0 or 0,1.
+        #[arg(long, default_value = "")]
+        gpus: String,
+
+        /// Preferred accelerator batch size.
+        #[arg(long, default_value_t = 4096)]
+        gpu_batch_size: usize,
+
+        /// Maximum body parts supported by the planned creature GPU batch layout.
+        #[arg(long, default_value_t = 64)]
+        gpu_max_parts: usize,
+
+        /// Maximum joints supported by the planned creature GPU batch layout.
+        #[arg(long, default_value_t = 128)]
+        gpu_max_joints: usize,
+
+        /// Disable explicit CPU fallback when a requested accelerator path is unavailable.
+        #[arg(long, default_value_t = false)]
+        no_cpu_fallback: bool,
+
+        /// Throughput policy: deterministic or max.
+        #[arg(long, default_value = "deterministic")]
+        throughput_mode: String,
+
+        /// Write a resumable checkpoint after every completed generation.
+        #[arg(long)]
+        checkpoint_output: Option<PathBuf>,
+
+        /// Resume an evolution from a generation-boundary checkpoint.
+        #[arg(long)]
+        resume_checkpoint: Option<PathBuf>,
+
         /// Optional local UDP port for generation progress/champion events.
         #[arg(long)]
         event_port: Option<u16>,
@@ -312,6 +349,14 @@ enum Command {
         /// Optional path for the complete persistent evolution analysis result.
         #[arg(long)]
         result_output: Option<PathBuf>,
+
+        /// Write a resumable checkpoint after every completed generation.
+        #[arg(long)]
+        checkpoint_output: Option<PathBuf>,
+
+        /// Resume from a checkpoint created from this experiment.
+        #[arg(long)]
+        resume_checkpoint: Option<PathBuf>,
 
         /// Emit the complete result as JSON.
         #[arg(long, default_value_t = false)]
