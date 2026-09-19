@@ -8,9 +8,9 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 2 — Creature Morphology: in progress.**
+**Step 3 — Evolvable Brains: in progress.**
 
-Step 1 is live and Step 2 now has a mutation-ready creature genome.
+Steps 1–2 are live. Creatures now evolve both morphology and an expression-tree controller.
 
 Current foundation:
 
@@ -32,11 +32,18 @@ Current foundation:
 - random morphology generation
 - JSON genome save/load
 - mutate-current / random-creature controls in the GUI
+- population evolution with tournament selection and elitism
+- distance fitness and champion tracking
+- evolvable expression-tree brains stored inside each creature genome
+- time, motion, and orientation sensors
+- add/subtract/multiply/negate/sine/cosine/clamp brain nodes
+- brain constant/expression/wrapper mutation
+- joint outputs driven by the evolved brain every physics step
 
 The Rust backend remains the authoritative simulator. Godot renders streamed
 snapshots and now acts as a simple creature-generation/mutation editor.
 
-See [docs/STEP-1.md](docs/STEP-1.md) and [docs/STEP-2.md](docs/STEP-2.md).
+See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), and [docs/STEP-3.md](docs/STEP-3.md).
 
 ## Windows quick start
 
