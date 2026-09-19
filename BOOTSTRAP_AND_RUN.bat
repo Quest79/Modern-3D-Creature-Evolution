@@ -199,6 +199,17 @@ if not defined GODOT_CMD (
 )
 
 echo.
+echo [CHECK] Validating Godot project and GDScript...
+"%GODOT_CMD%" --headless --editor --quit --path "%PROJECT_DIR%\apps\godot"
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Godot project validation failed.
+    echo Fix the script/scene errors shown above before launching the GUI.
+    pause
+    exit /b 1
+)
+
+echo.
 echo [RUN] Launching Modern 3D Creature Evolution GUI...
 echo [RUN] Godot: %GODOT_CMD%
 echo.
