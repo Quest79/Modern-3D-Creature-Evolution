@@ -885,6 +885,27 @@ struct CreatureStreamRequest<'a> {
 }
 
 fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String> {
+    let socket = make_event_socket(request.event_host, Some(request.event_port))?
+        .ok_or_else(|| "creature streaming requires an event port".to_string())?;
+
+    let result = run_creature_stream_inner(request, &socket);
+    if let Err(err) = &result {
+        send_event(
+            &socket,
+            &json!({
+                "protocol_version": 1,
+                "kind": "creature_stream_error",
+                "message": err,
+            }),
+        );
+    }
+    result
+}
+
+fn run_creature_stream_inner(
+    request: CreatureStreamRequest<'_>,
+    socket: &UdpSocket,
+) -> Result<(), String> {
     let CreatureStreamRequest {
         event_host,
         event_port,
@@ -912,8 +933,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
     config.motor_strength_multiplier = motor_strength;
     config.validate()?;
 
-    let socket = make_event_socket(event_host, Some(event_port))?
-        .ok_or_else(|| "creature streaming requires an event port".to_string())?;
+    let _ = (event_host, event_port);
     let simulator = CreatureSimulator;
     let mutation_config = MutationConfig {
         max_segments: max_segments.max(2),
@@ -955,7 +975,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
     let sample_every_steps = ((1.0 / frame_hz) / config.dt).round().max(1.0) as usize;
 
     send_event(
-        &socket,
+        socket,
         &json!({
             "protocol_version": 1,
             "kind": "creature_stream_started",
@@ -993,7 +1013,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         }
 
         send_event(
-            &socket,
+            socket,
             &json!({
                 "protocol_version": 1,
                 "kind": "creature_state",
@@ -1006,7 +1026,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
     let report = simulator.run_streaming(&config, &genome, sample_every_steps, &mut observer)?;
 
     send_event(
-        &socket,
+        socket,
         &json!({
             "protocol_version": 1,
             "kind": "creature_stream_complete",
