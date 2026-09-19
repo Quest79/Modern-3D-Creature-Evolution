@@ -10,9 +10,9 @@ use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile,
     FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
-    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig,
-    WorldSnapshot, discover_cuda_devices, evolve_population, evolve_population_checkpointed,
-    mutate_genome, random_creature, run_cuda_probe_batch,
+    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    discover_cuda_devices, evolve_population, evolve_population_checkpointed, mutate_genome,
+    random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
@@ -610,12 +610,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
     if backend_name == "cuda" || backend_name == "auto" {
         let cuda_devices = discover_cuda_devices().unwrap_or_default();
         if !cuda_devices.is_empty() {
-            let report = run_cuda_probe_batch(
-                &config,
-                &ProbeSpec::default(),
-                batch,
-                &gpu_ids,
-            )?;
+            let report = run_cuda_probe_batch(&config, &ProbeSpec::default(), batch, &gpu_ids)?;
             let result = json!({
                 "protocol_version": 1,
                 "kind": "probe_result",
@@ -636,14 +631,17 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
             });
 
             if let Some(socket) = event_socket.as_ref() {
-                send_event(socket, &json!({
-                    "protocol_version": 1,
-                    "kind": "batch_started",
-                    "total": batch,
-                    "backend": result["backend"],
-                    "world": config.world,
-                    "world_geometry": config.world.geometry(),
-                }));
+                send_event(
+                    socket,
+                    &json!({
+                        "protocol_version": 1,
+                        "kind": "batch_started",
+                        "total": batch,
+                        "backend": result["backend"],
+                        "world": config.world,
+                        "world_geometry": config.world.geometry(),
+                    }),
+                );
                 send_event(socket, &result);
             }
 
@@ -656,7 +654,10 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
                 println!("physics dt           : {:.8} s", config.dt);
                 println!("steps/world          : {}", report.steps_per_world);
                 println!("wall time            : {:.3} s", report.wall_seconds);
-                println!("throughput           : {:.1} worlds/s", report.worlds_per_second);
+                println!(
+                    "throughput           : {:.1} worlds/s",
+                    report.worlds_per_second
+                );
                 println!(
                     "physics throughput   : {:.0} steps/s",
                     report.physics_steps_per_second
@@ -1228,75 +1229,75 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         &config,
         resume_checkpoint.as_ref(),
         |summary| {
-        if let Some(path) = request.champion_output {
-            write_genome(path, &summary.champion)?;
-        }
+            if let Some(path) = request.champion_output {
+                write_genome(path, &summary.champion)?;
+            }
 
-        if let Some(socket) = socket {
-            send_event(
-                socket,
-                &json!({
-                    "protocol_version": 1,
-                    "kind": "generation_complete",
-                    "generation": summary.generation,
-                    "generations": config.generations,
-                    "fraction": summary.generation as f64 / config.generations as f64,
-                    "best_fitness": summary.best_fitness,
-                    "average_fitness": summary.average_fitness,
-                    "median_fitness": summary.median_fitness,
-                    "worst_fitness": summary.worst_fitness,
-                    "best_distance": summary.best_distance,
-                    "best_metrics": summary.best_metrics,
-                    "best_segments": summary.best_segments,
-                    "best_joints": summary.best_joints,
-                    "best_brain_nodes": summary.best_brain_nodes,
-                    "best_brain_sensor_nodes": summary.best_brain_sensor_nodes,
-                    "best_brain_unique_sensors": summary.best_brain_unique_sensors,
-                    "best_brain_outputs": summary.best_brain_outputs,
-                    "champion_id": summary.champion_id,
-                    "champion_parent_ids": summary.champion_parent_ids,
-                    "champion_species_id": summary.champion_species_id,
-                    "diversity": summary.diversity,
-                    "analysis_species_count": summary.species.len(),
-                    "pareto_front_size": summary.pareto_front.len(),
-                    "map_elites_cells": summary.map_elites.len(),
-                    "evaluations_completed": summary.evaluations_completed,
-                    "execution": summary.execution,
-                    "effective_population": summary.effective_settings.population_size,
-                    "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
-                    "effective_structural_mutation_chance":
-                        summary.effective_settings.mutation.structural_mutation_chance,
-                    "effective_motor_strength_multiplier":
-                        summary.effective_settings.simulation.motor_strength_multiplier,
-                    "effective_duration_seconds":
-                        summary.effective_settings.simulation.duration_seconds,
-                    "effective_trials_per_creature":
-                        summary.effective_settings.trials_per_creature,
-                    "effective_trial_aggregation":
-                        summary.effective_settings.trial_aggregation,
-                    "effective_fitness_weights": summary.effective_settings.fitness.weights,
-                    "effective_world": summary.effective_settings.simulation.world,
-                    "active_timeline_events": summary.active_timeline_events,
-                    "triggered_timeline_events": summary.triggered_timeline_events,
-                    "champion_file": request
-                        .champion_output
-                        .map(|path| path.to_string_lossy().to_string()),
-                }),
-            );
-        } else {
-            println!(
-                "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  segments {}  brain {}",
-                summary.generation,
-                config.generations,
-                summary.best_fitness,
-                summary.average_fitness,
-                summary.best_distance,
-                summary.best_segments,
-                summary.best_brain_nodes
-            );
-        }
-        Ok(())
-    },
+            if let Some(socket) = socket {
+                send_event(
+                    socket,
+                    &json!({
+                        "protocol_version": 1,
+                        "kind": "generation_complete",
+                        "generation": summary.generation,
+                        "generations": config.generations,
+                        "fraction": summary.generation as f64 / config.generations as f64,
+                        "best_fitness": summary.best_fitness,
+                        "average_fitness": summary.average_fitness,
+                        "median_fitness": summary.median_fitness,
+                        "worst_fitness": summary.worst_fitness,
+                        "best_distance": summary.best_distance,
+                        "best_metrics": summary.best_metrics,
+                        "best_segments": summary.best_segments,
+                        "best_joints": summary.best_joints,
+                        "best_brain_nodes": summary.best_brain_nodes,
+                        "best_brain_sensor_nodes": summary.best_brain_sensor_nodes,
+                        "best_brain_unique_sensors": summary.best_brain_unique_sensors,
+                        "best_brain_outputs": summary.best_brain_outputs,
+                        "champion_id": summary.champion_id,
+                        "champion_parent_ids": summary.champion_parent_ids,
+                        "champion_species_id": summary.champion_species_id,
+                        "diversity": summary.diversity,
+                        "analysis_species_count": summary.species.len(),
+                        "pareto_front_size": summary.pareto_front.len(),
+                        "map_elites_cells": summary.map_elites.len(),
+                        "evaluations_completed": summary.evaluations_completed,
+                        "execution": summary.execution,
+                        "effective_population": summary.effective_settings.population_size,
+                        "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
+                        "effective_structural_mutation_chance":
+                            summary.effective_settings.mutation.structural_mutation_chance,
+                        "effective_motor_strength_multiplier":
+                            summary.effective_settings.simulation.motor_strength_multiplier,
+                        "effective_duration_seconds":
+                            summary.effective_settings.simulation.duration_seconds,
+                        "effective_trials_per_creature":
+                            summary.effective_settings.trials_per_creature,
+                        "effective_trial_aggregation":
+                            summary.effective_settings.trial_aggregation,
+                        "effective_fitness_weights": summary.effective_settings.fitness.weights,
+                        "effective_world": summary.effective_settings.simulation.world,
+                        "active_timeline_events": summary.active_timeline_events,
+                        "triggered_timeline_events": summary.triggered_timeline_events,
+                        "champion_file": request
+                            .champion_output
+                            .map(|path| path.to_string_lossy().to_string()),
+                    }),
+                );
+            } else {
+                println!(
+                    "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  segments {}  brain {}",
+                    summary.generation,
+                    config.generations,
+                    summary.best_fitness,
+                    summary.average_fitness,
+                    summary.best_distance,
+                    summary.best_segments,
+                    summary.best_brain_nodes
+                );
+            }
+            Ok(())
+        },
         |checkpoint| {
             if let Some(path) = request.checkpoint_output {
                 write_checkpoint(path, checkpoint)?;
@@ -1420,25 +1421,25 @@ fn run_experiment(
         &experiment.evolution,
         checkpoint.as_ref(),
         |summary| {
-        if !json_output {
-            println!(
-                "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
-                summary.generation,
-                experiment.evolution.generations,
-                summary.best_fitness,
-                summary.average_fitness,
-                summary.best_distance,
-                summary.effective_settings.trials_per_creature,
-            );
-            if !summary.triggered_timeline_events.is_empty() {
+            if !json_output {
                 println!(
-                    "  timeline triggered: {}",
-                    summary.triggered_timeline_events.join(", ")
+                    "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
+                    summary.generation,
+                    experiment.evolution.generations,
+                    summary.best_fitness,
+                    summary.average_fitness,
+                    summary.best_distance,
+                    summary.effective_settings.trials_per_creature,
                 );
+                if !summary.triggered_timeline_events.is_empty() {
+                    println!(
+                        "  timeline triggered: {}",
+                        summary.triggered_timeline_events.join(", ")
+                    );
+                }
             }
-        }
-        Ok(())
-    },
+            Ok(())
+        },
         |checkpoint| {
             if let Some(path) = checkpoint_output {
                 write_checkpoint(path, checkpoint)?;
@@ -1588,7 +1589,6 @@ fn parse_gpu_ids(value: &str) -> Result<Vec<u32>, String> {
         .collect()
 }
 
-
 fn simulation_config(
     seconds: f32,
     dt: f32,
@@ -1639,8 +1639,10 @@ fn run_capabilities(json_output: bool) -> Result<(), String> {
         .unwrap_or(1);
     let cuda_devices = discover_cuda_devices().unwrap_or_default();
 
-    let mut backends = vec![serde_json::to_value(backend.capabilities())
-        .map_err(|err| format!("failed to serialize backend capabilities: {err}"))?];
+    let mut backends = vec![
+        serde_json::to_value(backend.capabilities())
+            .map_err(|err| format!("failed to serialize backend capabilities: {err}"))?,
+    ];
     if !cuda_devices.is_empty() {
         backends.push(json!({
             "name": "cuda-probe",
@@ -1670,13 +1672,14 @@ fn run_capabilities(json_output: bool) -> Result<(), String> {
         println!("backend             : {}", backend.name());
         println!("state streaming     : yes");
         println!("deterministic       : yes");
-        println!(
-            "CUDA devices         : {}",
-            cuda_devices.len()
-        );
+        println!("CUDA devices         : {}", cuda_devices.len());
         println!(
             "GPU probe backend    : {}",
-            if cuda_devices.is_empty() { "unavailable" } else { "available" }
+            if cuda_devices.is_empty() {
+                "unavailable"
+            } else {
+                "available"
+            }
         );
     }
 
