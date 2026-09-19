@@ -88,12 +88,14 @@ var _results_window: Window
 var _results_history_list: ItemList
 var _results_champion_list: ItemList
 var _results_lineage_list: ItemList
+var _results_lineage_detail: RichTextLabel
 var _results_species_list: ItemList
 var _results_detail: RichTextLabel
 var _results_analysis: RichTextLabel
 var _results_graph: Control
 var _results_best_line: Line2D
 var _results_average_line: Line2D
+var _results_median_line: Line2D
 var _results_diversity_graph: Control
 var _results_morphology_line: Line2D
 var _results_class_line: Line2D
@@ -887,10 +889,17 @@ func _build_results_window() -> void:
     _results_average_line.default_color = Color(1.0, 0.72, 0.32)
     _results_graph.add_child(_results_average_line)
 
+    _results_median_line = Line2D.new()
+    _results_median_line.width = 2.0
+    _results_median_line.default_color = Color(0.55, 1.0, 0.72)
+    _results_graph.add_child(_results_median_line)
+
     history_tab.add_child(_results_graph)
 
     var graph_key := Label.new()
-    graph_key.text = "Best fitness (blue)   Average fitness (orange)"
+    graph_key.text = (
+        "Best fitness (blue)   Average fitness (orange)   Median fitness (green)"
+    )
     graph_key.modulate = Color(0.72, 0.78, 0.88)
     history_tab.add_child(graph_key)
 
@@ -937,10 +946,46 @@ func _build_results_window() -> void:
 
     var lineage_tab := VBoxContainer.new()
     lineage_tab.name = "Lineage"
+    lineage_tab.add_theme_constant_override("separation", 8)
     tabs.add_child(lineage_tab)
+
+    var lineage_split := HSplitContainer.new()
+    lineage_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    lineage_tab.add_child(lineage_split)
+
     _results_lineage_list = ItemList.new()
+    _results_lineage_list.custom_minimum_size = Vector2(520, 260)
     _results_lineage_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-    lineage_tab.add_child(_results_lineage_list)
+    _results_lineage_list.item_selected.connect(_on_result_lineage_selected)
+    lineage_split.add_child(_results_lineage_list)
+
+    _results_lineage_detail = RichTextLabel.new()
+    _results_lineage_detail.bbcode_enabled = true
+    _results_lineage_detail.fit_content = false
+    _results_lineage_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _results_lineage_detail.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    lineage_split.add_child(_results_lineage_detail)
+
+    var lineage_buttons := HBoxContainer.new()
+    lineage_tab.add_child(lineage_buttons)
+
+    var load_lineage_button := Button.new()
+    load_lineage_button.text = "Load Selected Creature"
+    load_lineage_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    load_lineage_button.pressed.connect(_on_load_lineage_creature)
+    lineage_buttons.add_child(load_lineage_button)
+
+    var compare_lineage_button := Button.new()
+    compare_lineage_button.text = "Compare Selected vs Final"
+    compare_lineage_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    compare_lineage_button.pressed.connect(_on_compare_lineage_creature)
+    lineage_buttons.add_child(compare_lineage_button)
+
+    var fork_lineage_button := Button.new()
+    fork_lineage_button.text = "Fork Experiment From Selected..."
+    fork_lineage_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    fork_lineage_button.pressed.connect(_on_fork_lineage_creature)
+    lineage_buttons.add_child(fork_lineage_button)
 
     var classes_tab := VBoxContainer.new()
     classes_tab.name = "Classes"
@@ -1030,11 +1075,13 @@ func _refresh_results_window() -> void:
     _results_species_list.clear()
     _results_best_line.clear_points()
     _results_average_line.clear_points()
+    _results_median_line.clear_points()
     _results_morphology_line.clear_points()
     _results_class_line.clear_points()
 
     if _results_data.is_empty():
         _results_detail.text = "[color=#9aa7bd]No evolution results loaded.[/color]"
+        _results_lineage_detail.text = ""
         _results_analysis.text = ""
         return
 
@@ -1064,8 +1111,12 @@ func _refresh_results_window() -> void:
             if typeof(record_value) != TYPE_DICTIONARY:
                 continue
             var record: Dictionary = record_value
+            var record_mutations = record.get("mutations", [])
+            var record_mutation_count := 0
+            if typeof(record_mutations) == TYPE_ARRAY:
+                record_mutation_count = record_mutations.size()
             _results_lineage_list.add_item(
-                "G%d  #%s  parents [%s]  class %s  fit %.4f  seg %s  brain %s"
+                "G%d  #%s  parents [%s]  class %s  fit %.4f  seg %s  brain %s  mut %d"
                 % [
                     int(record.get("generation", 0)),
                     str(record.get("individual_id", 0)),
@@ -1074,6 +1125,7 @@ func _refresh_results_window() -> void:
                     float(record.get("fitness", 0.0)),
                     str(record.get("segments", 0)),
                     str(record.get("brain_nodes", 0)),
+                    record_mutation_count,
                 ]
             )
 
@@ -1095,6 +1147,9 @@ func _refresh_results_window() -> void:
     if not history.is_empty():
         _results_history_list.select(history.size() - 1)
         _show_result_generation(history.size() - 1)
+    if _results_lineage_list.item_count > 0:
+        _results_lineage_list.select(0)
+        _on_result_lineage_selected(0)
 
     _refresh_results_analysis()
     call_deferred("_refresh_results_graph")
@@ -1112,6 +1167,7 @@ func _refresh_results_graph() -> void:
 
     var best_values: Array[float] = []
     var average_values: Array[float] = []
+    var median_values: Array[float] = []
     var minimum := INF
     var maximum := -INF
 
@@ -1121,10 +1177,12 @@ func _refresh_results_graph() -> void:
         var summary: Dictionary = summary_value
         var best := float(summary.get("best_fitness", 0.0))
         var average := float(summary.get("average_fitness", 0.0))
+        var median_value := float(summary.get("median_fitness", average))
         best_values.append(best)
         average_values.append(average)
-        minimum = minf(minimum, minf(best, average))
-        maximum = maxf(maximum, maxf(best, average))
+        median_values.append(median_value)
+        minimum = minf(minimum, minf(best, minf(average, median_value)))
+        maximum = maxf(maximum, maxf(best, maxf(average, median_value)))
 
     if best_values.is_empty():
         return
@@ -1146,6 +1204,7 @@ func _refresh_results_graph() -> void:
 
     _results_best_line.clear_points()
     _results_average_line.clear_points()
+    _results_median_line.clear_points()
 
     for index in range(best_values.size()):
         var x := lerpf(left, right, float(index) / denominator)
@@ -1159,8 +1218,14 @@ func _refresh_results_graph() -> void:
             top,
             (average_values[index] - minimum) / (maximum - minimum)
         )
+        var median_y := lerpf(
+            bottom,
+            top,
+            (median_values[index] - minimum) / (maximum - minimum)
+        )
         _results_best_line.add_point(Vector2(x, best_y))
         _results_average_line.add_point(Vector2(x, average_y))
+        _results_median_line.add_point(Vector2(x, median_y))
 
 
 func _on_result_history_selected(index: int) -> void:
@@ -1211,7 +1276,7 @@ func _show_result_generation(index: int) -> void:
         + "[cell]Parents[/cell][cell]%s[/cell]"
         + "[cell]Analysis class[/cell][cell]%s[/cell]"
         + "[cell]Best fitness[/cell][cell][b]%.5f[/b][/cell]"
-        + "[cell]Average / worst[/cell][cell]%.5f / %.5f[/cell]"
+        + "[cell]Average / median / worst[/cell][cell]%.5f / %.5f / %.5f[/cell]"
         + "[cell]Distance[/cell][cell]%.4f m[/cell]"
         + "[cell]Speed[/cell][cell]%.4f m/s[/cell]"
         + "[cell]Upright[/cell][cell]%.3f[/cell]"
@@ -1232,6 +1297,10 @@ func _show_result_generation(index: int) -> void:
             str(summary.get("champion_species_id", 0)),
             float(summary.get("best_fitness", 0.0)),
             float(summary.get("average_fitness", 0.0)),
+            float(summary.get(
+                "median_fitness",
+                summary.get("average_fitness", 0.0)
+            )),
             float(summary.get("worst_fitness", 0.0)),
             float(metrics.get("distance", 0.0)),
             float(metrics.get("average_speed", 0.0)),
