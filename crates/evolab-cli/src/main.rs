@@ -1166,9 +1166,33 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         },
         trials_per_creature: request.trials,
         trial_aggregation,
+        accelerator: AcceleratorConfig {
+            mode: parse_accelerator_mode(request.accelerator)?,
+            gpu_ids: request.gpu_ids.clone(),
+            batch_size: request.gpu_batch_size,
+            max_parts: request.gpu_max_parts,
+            max_joints: request.gpu_max_joints,
+            cpu_fallback: request.cpu_fallback,
+            throughput_mode: parse_throughput_mode(request.throughput_mode)?,
+        },
         timeline,
     };
     config.validate()?;
+
+    let resume_checkpoint = if let Some(path) = request.resume_checkpoint {
+        Some(read_checkpoint(path)?)
+    } else {
+        None
+    };
+
+    if let Some(checkpoint) = resume_checkpoint.as_ref()
+        && checkpoint.config != config
+    {
+        return Err(
+            "resume checkpoint configuration does not match the requested evolution settings"
+                .into(),
+        );
+    }
 
     if let Some(socket) = socket {
         send_event(
@@ -1188,6 +1212,10 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "trials_per_creature": config.trials_per_creature,
                 "trial_aggregation": config.trial_aggregation,
                 "timeline": config.timeline,
+                "accelerator": config.accelerator,
+                "resuming_from_generation": resume_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.next_generation),
                 "world": config.simulation.world,
                 "world_geometry": config.simulation.world.geometry(),
             }),
@@ -1195,7 +1223,11 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     }
 
     let started = Instant::now();
-    let result = evolve_population(&ancestor, &config, |summary| {
+    let result = evolve_population_checkpointed(
+        &ancestor,
+        &config,
+        resume_checkpoint.as_ref(),
+        |summary| {
         if let Some(path) = request.champion_output {
             write_genome(path, &summary.champion)?;
         }
@@ -1229,6 +1261,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     "pareto_front_size": summary.pareto_front.len(),
                     "map_elites_cells": summary.map_elites.len(),
                     "evaluations_completed": summary.evaluations_completed,
+                    "execution": summary.execution,
                     "effective_population": summary.effective_settings.population_size,
                     "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
                     "effective_structural_mutation_chance":
@@ -1263,7 +1296,14 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             );
         }
         Ok(())
-    })?;
+    },
+        |checkpoint| {
+            if let Some(path) = request.checkpoint_output {
+                write_checkpoint(path, checkpoint)?;
+            }
+            Ok(())
+        },
+    )?;
 
     let elapsed = started.elapsed();
 
@@ -1299,6 +1339,12 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         "wall_seconds": elapsed.as_secs_f64(),
         "champion_file": request
             .champion_output
+            .map(|path| path.to_string_lossy().to_string()),
+        "results_file": request
+            .result_output
+            .map(|path| path.to_string_lossy().to_string()),
+        "checkpoint_file": request
+            .checkpoint_output
             .map(|path| path.to_string_lossy().to_string()),
     });
 
@@ -1343,6 +1389,8 @@ fn run_experiment(
     workers: Option<usize>,
     champion_output: Option<&PathBuf>,
     result_output: Option<&PathBuf>,
+    checkpoint_output: Option<&PathBuf>,
+    resume_checkpoint: Option<&PathBuf>,
     json_output: bool,
 ) -> Result<(), String> {
     let raw = fs::read_to_string(path)
@@ -1355,8 +1403,23 @@ fn run_experiment(
         experiment.evolution.worker_threads = worker_threads;
     }
 
+    let checkpoint = if let Some(path) = resume_checkpoint {
+        Some(read_checkpoint(path)?)
+    } else {
+        None
+    };
+    if let Some(checkpoint) = checkpoint.as_ref()
+        && checkpoint.config != experiment.evolution
+    {
+        return Err("resume checkpoint does not match the experiment configuration".into());
+    }
+
     let started = Instant::now();
-    let result = evolve_population(&experiment.ancestor, &experiment.evolution, |summary| {
+    let result = evolve_population_checkpointed(
+        &experiment.ancestor,
+        &experiment.evolution,
+        checkpoint.as_ref(),
+        |summary| {
         if !json_output {
             println!(
                 "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
@@ -1375,7 +1438,14 @@ fn run_experiment(
             }
         }
         Ok(())
-    })?;
+    },
+        |checkpoint| {
+            if let Some(path) = checkpoint_output {
+                write_checkpoint(path, checkpoint)?;
+            }
+            Ok(())
+        },
+    )?;
     let elapsed = started.elapsed();
 
     if let Some(output) = champion_output {
@@ -1421,6 +1491,47 @@ fn run_experiment(
     }
 
     Ok(())
+}
+
+fn read_checkpoint(path: &PathBuf) -> Result<EvolutionCheckpoint, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read checkpoint {}: {err}", path.display()))?;
+    let checkpoint: EvolutionCheckpoint = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid checkpoint JSON {}: {err}", path.display()))?;
+    checkpoint.validate()?;
+    Ok(checkpoint)
+}
+
+fn write_checkpoint(path: &PathBuf, checkpoint: &EvolutionCheckpoint) -> Result<(), String> {
+    checkpoint.validate()?;
+    let json = serde_json::to_string_pretty(checkpoint)
+        .map_err(|err| format!("failed to serialize checkpoint: {err}"))?;
+    let temp_path = path.with_extension("checkpoint.tmp");
+    fs::write(&temp_path, json)
+        .map_err(|err| format!("failed to write checkpoint {}: {err}", temp_path.display()))?;
+    fs::rename(&temp_path, path)
+        .map_err(|err| format!("failed to replace checkpoint {}: {err}", path.display()))
+}
+
+fn parse_accelerator_mode(value: &str) -> Result<AcceleratorMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cpu" => Ok(AcceleratorMode::Cpu),
+        "auto" => Ok(AcceleratorMode::Auto),
+        "cuda" => Ok(AcceleratorMode::Cuda),
+        other => Err(format!(
+            "invalid accelerator '{other}'; expected cpu, auto, or cuda"
+        )),
+    }
+}
+
+fn parse_throughput_mode(value: &str) -> Result<ThroughputMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "deterministic" => Ok(ThroughputMode::Deterministic),
+        "max" | "max_throughput" | "max-throughput" => Ok(ThroughputMode::MaxThroughput),
+        other => Err(format!(
+            "invalid throughput mode '{other}'; expected deterministic or max"
+        )),
+    }
 }
 
 fn write_results_file(
