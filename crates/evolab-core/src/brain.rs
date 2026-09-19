@@ -1,11 +1,13 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
-use crate::JointGene;
+use crate::{JointGene, SegmentGene};
 
 const MAX_EXPRESSION_DEPTH: usize = 16;
 const VALUE_LIMIT: f32 = 1000.0;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum SensorKind {
     Time,
     RootHeight,
@@ -19,6 +21,67 @@ pub enum SensorKind {
     RootRotationY,
     RootRotationZ,
     RootRotationW,
+    JointAngle(u32),
+    JointVelocity(u32),
+    SegmentGroundContact(u32),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JointSensorState {
+    pub child_id: u32,
+    pub angle_radians: f32,
+    pub velocity_radians_per_second: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SegmentSensorState {
+    pub segment_id: u32,
+    pub ground_contact: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BrainContext {
+    pub time_seconds: f32,
+    pub root_position: [f32; 3],
+    pub root_linear_velocity: [f32; 3],
+    pub root_angular_velocity: [f32; 3],
+    pub root_rotation_xyzw: [f32; 4],
+    pub joints: Vec<JointSensorState>,
+    pub segments: Vec<SegmentSensorState>,
+}
+
+impl BrainContext {
+    fn sensor(&self, sensor: SensorKind) -> f32 {
+        match sensor {
+            SensorKind::Time => self.time_seconds,
+            SensorKind::RootHeight => self.root_position[1],
+            SensorKind::RootVelocityX => self.root_linear_velocity[0],
+            SensorKind::RootVelocityY => self.root_linear_velocity[1],
+            SensorKind::RootVelocityZ => self.root_linear_velocity[2],
+            SensorKind::RootAngularVelocityX => self.root_angular_velocity[0],
+            SensorKind::RootAngularVelocityY => self.root_angular_velocity[1],
+            SensorKind::RootAngularVelocityZ => self.root_angular_velocity[2],
+            SensorKind::RootRotationX => self.root_rotation_xyzw[0],
+            SensorKind::RootRotationY => self.root_rotation_xyzw[1],
+            SensorKind::RootRotationZ => self.root_rotation_xyzw[2],
+            SensorKind::RootRotationW => self.root_rotation_xyzw[3],
+            SensorKind::JointAngle(child_id) => self
+                .joints
+                .iter()
+                .find(|state| state.child_id == child_id)
+                .map_or(0.0, |state| state.angle_radians),
+            SensorKind::JointVelocity(child_id) => self
+                .joints
+                .iter()
+                .find(|state| state.child_id == child_id)
+                .map_or(0.0, |state| state.velocity_radians_per_second),
+            SensorKind::SegmentGroundContact(segment_id) => self
+                .segments
+                .iter()
+                .find(|state| state.segment_id == segment_id)
+                .map_or(0.0, |state| state.ground_contact),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -38,40 +101,12 @@ pub enum Expression {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BrainContext {
-    pub time_seconds: f32,
-    pub root_position: [f32; 3],
-    pub root_linear_velocity: [f32; 3],
-    pub root_angular_velocity: [f32; 3],
-    pub root_rotation_xyzw: [f32; 4],
-}
-
-impl BrainContext {
-    fn sensor(self, sensor: SensorKind) -> f32 {
-        match sensor {
-            SensorKind::Time => self.time_seconds,
-            SensorKind::RootHeight => self.root_position[1],
-            SensorKind::RootVelocityX => self.root_linear_velocity[0],
-            SensorKind::RootVelocityY => self.root_linear_velocity[1],
-            SensorKind::RootVelocityZ => self.root_linear_velocity[2],
-            SensorKind::RootAngularVelocityX => self.root_angular_velocity[0],
-            SensorKind::RootAngularVelocityY => self.root_angular_velocity[1],
-            SensorKind::RootAngularVelocityZ => self.root_angular_velocity[2],
-            SensorKind::RootRotationX => self.root_rotation_xyzw[0],
-            SensorKind::RootRotationY => self.root_rotation_xyzw[1],
-            SensorKind::RootRotationZ => self.root_rotation_xyzw[2],
-            SensorKind::RootRotationW => self.root_rotation_xyzw[3],
-        }
-    }
-}
-
 impl Expression {
-    pub fn evaluate(&self, context: BrainContext) -> f32 {
+    pub fn evaluate(&self, context: &BrainContext) -> f32 {
         sanitize(self.evaluate_inner(context))
     }
 
-    fn evaluate_inner(&self, context: BrainContext) -> f32 {
+    fn evaluate_inner(&self, context: &BrainContext) -> f32 {
         match self {
             Self::Constant(value) => *value,
             Self::Sensor(sensor) => context.sensor(*sensor),
@@ -100,6 +135,35 @@ impl Expression {
         }
     }
 
+    pub fn sensor_node_count(&self) -> usize {
+        match self {
+            Self::Sensor(_) => 1,
+            Self::Constant(_) => 0,
+            Self::Add(left, right) | Self::Subtract(left, right) | Self::Multiply(left, right) => {
+                left.sensor_node_count() + right.sensor_node_count()
+            }
+            Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => value.sensor_node_count(),
+            Self::Clamp { value, .. } => value.sensor_node_count(),
+        }
+    }
+
+    pub fn collect_sensors(&self, sensors: &mut HashSet<SensorKind>) {
+        match self {
+            Self::Sensor(sensor) => {
+                sensors.insert(*sensor);
+            }
+            Self::Constant(_) => {}
+            Self::Add(left, right) | Self::Subtract(left, right) | Self::Multiply(left, right) => {
+                left.collect_sensors(sensors);
+                right.collect_sensors(sensors);
+            }
+            Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => {
+                value.collect_sensors(sensors);
+            }
+            Self::Clamp { value, .. } => value.collect_sensors(sensors),
+        }
+    }
+
     pub fn depth(&self) -> usize {
         match self {
             Self::Constant(_) | Self::Sensor(_) => 1,
@@ -108,6 +172,62 @@ impl Expression {
             }
             Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => 1 + value.depth(),
             Self::Clamp { value, .. } => 1 + value.depth(),
+        }
+    }
+
+    pub fn subtree_clone(&self, index: usize) -> Option<Expression> {
+        let mut cursor = 0;
+        self.subtree_clone_inner(index, &mut cursor)
+    }
+
+    fn subtree_clone_inner(&self, target: usize, cursor: &mut usize) -> Option<Expression> {
+        if *cursor == target {
+            return Some(self.clone());
+        }
+        *cursor += 1;
+
+        match self {
+            Self::Constant(_) | Self::Sensor(_) => None,
+            Self::Add(left, right) | Self::Subtract(left, right) | Self::Multiply(left, right) => {
+                left.subtree_clone_inner(target, cursor)
+                    .or_else(|| right.subtree_clone_inner(target, cursor))
+            }
+            Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => {
+                value.subtree_clone_inner(target, cursor)
+            }
+            Self::Clamp { value, .. } => value.subtree_clone_inner(target, cursor),
+        }
+    }
+
+    pub fn replace_subtree(&mut self, index: usize, replacement: Expression) -> bool {
+        let mut cursor = 0;
+        self.replace_subtree_inner(index, &replacement, &mut cursor)
+    }
+
+    fn replace_subtree_inner(
+        &mut self,
+        target: usize,
+        replacement: &Expression,
+        cursor: &mut usize,
+    ) -> bool {
+        if *cursor == target {
+            *self = replacement.clone();
+            return true;
+        }
+        *cursor += 1;
+
+        match self {
+            Self::Constant(_) | Self::Sensor(_) => false,
+            Self::Add(left, right) | Self::Subtract(left, right) | Self::Multiply(left, right) => {
+                left.replace_subtree_inner(target, replacement, cursor)
+                    || right.replace_subtree_inner(target, replacement, cursor)
+            }
+            Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => {
+                value.replace_subtree_inner(target, replacement, cursor)
+            }
+            Self::Clamp { value, .. } => {
+                value.replace_subtree_inner(target, replacement, cursor)
+            }
         }
     }
 
@@ -176,8 +296,25 @@ impl BrainGenome {
             .sum()
     }
 
-    pub fn validate(&self, joints: &[JointGene]) -> Result<(), String> {
-        let mut seen = std::collections::HashSet::new();
+    pub fn sensor_node_count(&self) -> usize {
+        self.outputs
+            .iter()
+            .map(|output| output.expression.sensor_node_count())
+            .sum()
+    }
+
+    pub fn unique_sensor_count(&self) -> usize {
+        let mut sensors = HashSet::new();
+        for output in &self.outputs {
+            output.expression.collect_sensors(&mut sensors);
+        }
+        sensors.len()
+    }
+
+    pub fn validate(&self, joints: &[JointGene], segments: &[SegmentGene]) -> Result<(), String> {
+        let joint_ids: HashSet<u32> = joints.iter().map(|joint| joint.child_id).collect();
+        let segment_ids: HashSet<u32> = segments.iter().map(|segment| segment.id).collect();
+        let mut seen = HashSet::new();
 
         for output in &self.outputs {
             if !seen.insert(output.joint_child_id) {
@@ -186,16 +323,35 @@ impl BrainGenome {
                     output.joint_child_id
                 ));
             }
-            if !joints
-                .iter()
-                .any(|joint| joint.child_id == output.joint_child_id)
-            {
+            if !joint_ids.contains(&output.joint_child_id) {
                 return Err(format!(
                     "brain output references missing joint child {}",
                     output.joint_child_id
                 ));
             }
             output.expression.validate()?;
+
+            let mut sensors = HashSet::new();
+            output.expression.collect_sensors(&mut sensors);
+            for sensor in sensors {
+                match sensor {
+                    SensorKind::JointAngle(child_id) | SensorKind::JointVelocity(child_id)
+                        if !joint_ids.contains(&child_id) =>
+                    {
+                        return Err(format!(
+                            "brain sensor references missing joint child {child_id}"
+                        ));
+                    }
+                    SensorKind::SegmentGroundContact(segment_id)
+                        if !segment_ids.contains(&segment_id) =>
+                    {
+                        return Err(format!(
+                            "brain sensor references missing segment {segment_id}"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
         }
 
         Ok(())
@@ -250,20 +406,36 @@ fn sanitize(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrainContext, BrainGenome, Expression, SensorKind};
+    use super::{BrainContext, BrainGenome, Expression, JointSensorState, SensorKind};
     use crate::CreatureGenome;
 
     #[test]
-    fn expression_tree_evaluates_sensors_and_math() {
+    fn expression_tree_evaluates_targeted_joint_sensor() {
         let expression = Expression::Add(
-            Box::new(Expression::Sensor(SensorKind::RootVelocityX)),
+            Box::new(Expression::Sensor(SensorKind::JointAngle(2))),
             Box::new(Expression::Constant(2.0)),
         );
-        let value = expression.evaluate(BrainContext {
-            root_linear_velocity: [3.0, 0.0, 0.0],
+        let value = expression.evaluate(&BrainContext {
+            joints: vec![JointSensorState {
+                child_id: 2,
+                angle_radians: 0.5,
+                velocity_radians_per_second: 0.0,
+            }],
             ..BrainContext::default()
         });
-        assert_eq!(value, 5.0);
+        assert_eq!(value, 2.5);
+    }
+
+    #[test]
+    fn subtree_can_be_cloned_and_replaced() {
+        let mut expression = Expression::Add(
+            Box::new(Expression::Constant(1.0)),
+            Box::new(Expression::Sin(Box::new(Expression::Constant(2.0)))),
+        );
+        let donor = expression.subtree_clone(2).unwrap();
+        assert_eq!(donor.node_count(), 2);
+        assert!(expression.replace_subtree(1, Expression::Constant(9.0)));
+        assert_eq!(expression.node_count(), 4);
     }
 
     #[test]
