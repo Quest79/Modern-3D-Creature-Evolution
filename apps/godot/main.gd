@@ -1601,7 +1601,18 @@ func _load_capabilities() -> void:
     )
 
 
-func _base_creature_args() -> PackedStringArray:
+func _base_creature_args(
+    world_override = null,
+    motor_strength_override := -1.0
+) -> PackedStringArray:
+    var world_json := _world_json()
+    if typeof(world_override) == TYPE_DICTIONARY and not world_override.is_empty():
+        world_json = JSON.stringify(world_override)
+
+    var motor_strength := float(_motor_strength_spin.value)
+    if motor_strength_override >= 0.0:
+        motor_strength = motor_strength_override
+
     return PackedStringArray([
         "creature-stream",
         "--event-port", str(_event_port),
@@ -1611,8 +1622,8 @@ func _base_creature_args() -> PackedStringArray:
         "--playback-speed", "%.2f" % _playback_speed,
         "--seed", str(int(_seed_spin.value)),
         "--max-segments", str(int(_max_segments_spin.value)),
-        "--world-json", _world_json(),
-        "--motor-strength", str(_motor_strength_spin.value),
+        "--world-json", world_json,
+        "--motor-strength", str(motor_strength),
     ])
 
 
@@ -1740,7 +1751,10 @@ func _on_watch_champion_pressed() -> void:
             return
 
     _prepare_creature_run()
-    var args := _base_creature_args()
+    var args := _base_creature_args(
+        _champion_world,
+        _champion_motor_strength
+    )
     args.append_array(PackedStringArray(["--genome", champion_path]))
 
     if _start_job("creature", args):
