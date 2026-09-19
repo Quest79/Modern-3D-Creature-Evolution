@@ -4,10 +4,11 @@ use rayon::{ThreadPoolBuilder, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChampionArchiveEntry, ConditionContext, CreatureGenome, DiversitySummary,
-    EffectiveEvolutionSettings, FitnessConfig, FitnessMetrics, FitnessResult, GenomeRng,
-    LineageRecord, MapEliteCell, MutationConfig, MutationRecord, ParetoEntry, SimulationConfig,
-    SpeciesSummary, TimelineConfig, TrialAggregation, crossover_brain_subtree, evaluate_fitness,
+    AcceleratorConfig, AcceleratorMode, ChampionArchiveEntry, ConditionContext, CreatureGenome,
+    DiversitySummary, EffectiveEvolutionSettings, ExecutionPerformance, FitnessConfig,
+    FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
+    MutationRecord, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
+    TrialAggregation, crossover_brain_subtree, discover_cuda_devices, evaluate_fitness,
     mutate_genome,
 };
 
@@ -26,6 +27,8 @@ pub struct EvolutionConfig {
     pub mutation: MutationConfig,
     pub trials_per_creature: usize,
     pub trial_aggregation: TrialAggregation,
+    #[serde(default)]
+    pub accelerator: AcceleratorConfig,
     #[serde(default)]
     pub timeline: TimelineConfig,
 }
@@ -49,6 +52,7 @@ impl Default for EvolutionConfig {
             mutation: MutationConfig::default(),
             trials_per_creature: 1,
             trial_aggregation: TrialAggregation::Mean,
+            accelerator: AcceleratorConfig::default(),
             timeline: TimelineConfig::default(),
         }
     }
@@ -81,6 +85,7 @@ impl EvolutionConfig {
         if !(1..=100).contains(&self.trials_per_creature) {
             return Err("trials_per_creature must be between 1 and 100".into());
         }
+        self.accelerator.validate()?;
         self.timeline.validate()?;
 
         Ok(())
@@ -129,6 +134,7 @@ pub struct GenerationSummary {
     pub best_brain_unique_sensors: usize,
     pub best_brain_outputs: usize,
     pub evaluations_completed: usize,
+    pub execution: ExecutionPerformance,
     pub effective_settings: EffectiveEvolutionSettings,
     pub active_timeline_events: Vec<String>,
     pub triggered_timeline_events: Vec<String>,
@@ -217,7 +223,8 @@ where
             ));
         }
 
-        let mut evaluated = evaluate_population(&pool, &population, &settings)?;
+        let (mut evaluated, execution) =
+            evaluate_population(&pool, &population, &settings, &config.accelerator)?;
         evaluations_completed += evaluated.len() * settings.trials_per_creature;
 
         evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
@@ -281,6 +288,7 @@ where
             best_brain_unique_sensors: best.genome.brain.unique_sensor_count(),
             best_brain_outputs: best.genome.brain.outputs.len(),
             evaluations_completed,
+            execution,
             effective_settings: settings.clone(),
             active_timeline_events,
             triggered_timeline_events: triggered,
@@ -374,15 +382,61 @@ fn evaluate_population(
     pool: &rayon::ThreadPool,
     population: &[Candidate],
     settings: &EffectiveEvolutionSettings,
-) -> Result<Vec<EvaluatedCreature>, String> {
+    accelerator: &AcceleratorConfig,
+) -> Result<(Vec<EvaluatedCreature>, ExecutionPerformance), String> {
+    let requested_mode = accelerator.mode;
+    let cuda_devices = match requested_mode {
+        AcceleratorMode::Cpu => Vec::new(),
+        AcceleratorMode::Auto | AcceleratorMode::Cuda => discover_cuda_devices().unwrap_or_default(),
+    };
+
+    if requested_mode == AcceleratorMode::Cuda
+        && cuda_devices.is_empty()
+        && !accelerator.cpu_fallback
+    {
+        return Err("CUDA evolution was requested but no CUDA device is available".into());
+    }
+
+    // The CUDA probe backend is real GPU compute, but full articulated-creature
+    // physics still uses the Rapier reference solver. Until the creature CUDA
+    // solver lands, accelerator modes explicitly fall back here rather than
+    // silently pretending the population ran on the GPU.
+    if requested_mode == AcceleratorMode::Cuda && !accelerator.cpu_fallback {
+        return Err(
+            "CUDA articulated-creature physics is not implemented yet; enable CPU fallback".into(),
+        );
+    }
+
+    let started = std::time::Instant::now();
     let results: Vec<Result<EvaluatedCreature, String>> = pool.install(|| {
         population
             .par_iter()
             .map(|candidate| evaluate_creature(candidate, settings))
             .collect()
     });
+    let evaluated: Vec<EvaluatedCreature> = results.into_iter().collect::<Result<_, _>>()?;
+    let wall_seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
+    let item_count = evaluated.len() * settings.trials_per_creature;
+    let physics_steps = item_count as u64 * settings.simulation.step_count() as u64;
+    let fallback_items = if requested_mode == AcceleratorMode::Cpu {
+        0
+    } else {
+        item_count
+    };
 
-    results.into_iter().collect()
+    let performance = ExecutionPerformance {
+        requested_mode,
+        actual_mode: AcceleratorMode::Cpu,
+        cpu_items: item_count,
+        gpu_items: 0,
+        fallback_items,
+        wall_seconds,
+        items_per_second: item_count as f64 / wall_seconds,
+        physics_steps_per_second: physics_steps as f64 / wall_seconds,
+        devices: Vec::new(),
+    };
+
+    Ok((evaluated, performance))
 }
 
 fn evaluate_creature(
