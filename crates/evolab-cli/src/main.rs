@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use evolab_core::{
-    BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, MutationConfig,
-    PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot, mutate_genome,
-    random_creature,
+    BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
+    MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot,
+    evolve_population, mutate_genome, random_creature,
 };
 use serde_json::{Value, json};
 
@@ -150,6 +150,54 @@ enum Command {
         max_segments: usize,
     },
 
+    /// Evolve a population for distance traveled.
+    Evolve {
+        /// Optional ancestor genome JSON. Defaults to the built-in three-segment creature.
+        #[arg(long)]
+        genome: Option<PathBuf>,
+
+        #[arg(long, default_value_t = 50)]
+        population: usize,
+
+        #[arg(long, default_value_t = 100)]
+        generations: usize,
+
+        #[arg(long, default_value_t = 7)]
+        tournament: usize,
+
+        #[arg(long, default_value_t = 2)]
+        elite: usize,
+
+        #[arg(long, default_value_t = 8)]
+        mutations: usize,
+
+        #[arg(long, default_value_t = 12)]
+        max_segments: usize,
+
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+
+        #[arg(long, default_value_t = 0)]
+        workers: usize,
+
+        #[arg(long, default_value_t = 5.0)]
+        seconds: f32,
+
+        #[arg(long, default_value_t = 1.0 / 120.0)]
+        dt: f32,
+
+        /// Optional local UDP port for generation progress/champion events.
+        #[arg(long)]
+        event_port: Option<u16>,
+
+        #[arg(long, default_value = "127.0.0.1")]
+        event_host: String,
+
+        /// Emit final evolution result as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// Report backend and machine capabilities.
     Capabilities {
         #[arg(long, default_value_t = false)]
@@ -228,6 +276,37 @@ fn run() -> Result<(), String> {
             mutations,
             max_segments,
         } => run_genome_generate(&output, seed, random_segments, mutations, max_segments),
+        Command::Evolve {
+            genome,
+            population,
+            generations,
+            tournament,
+            elite,
+            mutations,
+            max_segments,
+            seed,
+            workers,
+            seconds,
+            dt,
+            event_port,
+            event_host,
+            json,
+        } => run_evolve(EvolveRequest {
+            genome_path: genome.as_ref(),
+            population,
+            generations,
+            tournament,
+            elite,
+            mutations,
+            max_segments,
+            seed,
+            workers,
+            seconds,
+            dt,
+            event_port,
+            event_host: &event_host,
+            json_output: json,
+        }),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
@@ -594,6 +673,139 @@ fn run_genome_generate(
     fs::write(output, json)
         .map_err(|err| format!("failed to write genome {}: {err}", output.display()))?;
     println!("wrote {}", output.display());
+    Ok(())
+}
+
+struct EvolveRequest<'a> {
+    genome_path: Option<&'a PathBuf>,
+    population: usize,
+    generations: usize,
+    tournament: usize,
+    elite: usize,
+    mutations: usize,
+    max_segments: usize,
+    seed: u64,
+    workers: usize,
+    seconds: f32,
+    dt: f32,
+    event_port: Option<u16>,
+    event_host: &'a str,
+    json_output: bool,
+}
+
+fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
+    let ancestor = if let Some(path) = request.genome_path {
+        let raw = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
+        let genome: CreatureGenome = serde_json::from_str(&raw)
+            .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
+        genome.validate()?;
+        genome
+    } else {
+        CreatureGenome::three_segment_walker()
+    };
+
+    let config = EvolutionConfig {
+        population_size: request.population,
+        generations: request.generations,
+        tournament_size: request.tournament,
+        elite_count: request.elite,
+        mutations_per_child: request.mutations,
+        seed: request.seed,
+        worker_threads: request.workers,
+        simulation: SimulationConfig {
+            duration_seconds: request.seconds,
+            dt: request.dt,
+            ..SimulationConfig::default()
+        },
+        mutation: MutationConfig {
+            max_segments: request.max_segments.max(2),
+            ..MutationConfig::default()
+        },
+    };
+    config.validate()?;
+
+    let socket = make_event_socket(request.event_host, request.event_port)?;
+
+    if let Some(socket) = socket.as_ref() {
+        send_event(
+            socket,
+            &json!({
+                "protocol_version": 1,
+                "kind": "evolution_started",
+                "population": config.population_size,
+                "generations": config.generations,
+                "tournament": config.tournament_size,
+                "elite": config.elite_count,
+                "mutations_per_child": config.mutations_per_child,
+                "fitness": "horizontal_distance",
+            }),
+        );
+    }
+
+    let started = Instant::now();
+    let result = evolve_population(&ancestor, &config, |summary| {
+        if let Some(socket) = socket.as_ref() {
+            send_event(
+                socket,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "generation_complete",
+                    "generation": summary.generation,
+                    "generations": config.generations,
+                    "fraction": summary.generation as f64 / config.generations as f64,
+                    "best_fitness": summary.best_fitness,
+                    "average_fitness": summary.average_fitness,
+                    "worst_fitness": summary.worst_fitness,
+                    "best_distance": summary.best_distance,
+                    "best_segments": summary.best_segments,
+                    "best_joints": summary.best_joints,
+                    "evaluations_completed": summary.evaluations_completed,
+                    "champion": summary.champion,
+                }),
+            );
+        } else {
+            println!(
+                "generation {:>4}/{:<4}  best {:>8.4} m  avg {:>8.4} m  segments {}",
+                summary.generation,
+                config.generations,
+                summary.best_fitness,
+                summary.average_fitness,
+                summary.best_segments
+            );
+        }
+        Ok(())
+    })?;
+
+    let elapsed = started.elapsed();
+    let final_event = json!({
+        "protocol_version": 1,
+        "kind": "evolution_complete",
+        "champion_fitness": result.champion_fitness,
+        "champion_distance": result.champion_distance,
+        "generations_completed": result.generations_completed,
+        "evaluations_completed": result.evaluations_completed,
+        "wall_seconds": elapsed.as_secs_f64(),
+        "champion": result.champion,
+        "history": result.history,
+    });
+
+    if let Some(socket) = socket.as_ref() {
+        send_event(socket, &final_event);
+    }
+
+    if request.json_output {
+        println!("{final_event}");
+    } else if socket.is_none() {
+        println!(
+            "complete: champion {:.4} m after {} generations / {} evaluations in {:.3} s",
+            result.champion_fitness,
+            result.generations_completed,
+            result.evaluations_completed,
+            elapsed.as_secs_f64()
+        );
+    }
+
     Ok(())
 }
 
