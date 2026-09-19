@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ChampionArchiveEntry, ConditionContext, CreatureGenome, DiversitySummary,
     EffectiveEvolutionSettings, FitnessConfig, FitnessMetrics, FitnessResult, GenomeRng,
-    LineageRecord, MapEliteCell, MutationConfig, ParetoEntry, SimulationConfig, SpeciesSummary,
+    LineageRecord, MapEliteCell, MutationConfig, MutationRecord, ParetoEntry, SimulationConfig,
+    SpeciesSummary,
     TimelineConfig, TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
 };
 
@@ -108,6 +109,8 @@ pub struct EvaluatedCreature {
     pub genome: CreatureGenome,
     pub fitness: f32,
     pub metrics: FitnessMetrics,
+    pub trial_seeds: Vec<u64>,
+    pub mutations: Vec<MutationRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -115,6 +118,7 @@ pub struct GenerationSummary {
     pub generation: usize,
     pub best_fitness: f32,
     pub average_fitness: f32,
+    pub median_fitness: f32,
     pub worst_fitness: f32,
     pub best_distance: f32,
     pub best_metrics: FitnessMetrics,
@@ -157,6 +161,7 @@ struct Candidate {
     individual_id: u64,
     parent_ids: Vec<u64>,
     genome: CreatureGenome,
+    mutations: Vec<MutationRecord>,
 }
 
 pub fn evolve_population<F>(
@@ -225,6 +230,7 @@ where
             .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
         let average =
             evaluated.iter().map(|item| item.fitness).sum::<f32>() / evaluated.len() as f32;
+        let median_fitness = median(evaluated.iter().map(|item| item.fitness).collect());
 
         let context = ConditionContext {
             best_fitness: best.fitness,
@@ -255,6 +261,8 @@ where
             species_id: best.species_id,
             fitness: best.fitness,
             metrics: best.metrics,
+            trial_seeds: best.trial_seeds.clone(),
+            mutations: best.mutations.clone(),
             genome: best.genome.clone(),
         });
 
@@ -262,6 +270,7 @@ where
             generation,
             best_fitness: best.fitness,
             average_fitness: average,
+            median_fitness,
             worst_fitness: worst.fitness,
             best_distance: best.metrics.distance,
             best_metrics: best.metrics,
@@ -336,24 +345,25 @@ fn initial_population(
         individual_id: ancestor_id,
         parent_ids: Vec::new(),
         genome: ancestor.clone(),
+        mutations: Vec::new(),
     });
 
     while population.len() < settings.population_size {
         let seed = rng.next_seed();
-        let child = mutate_genome(
+        let mutation_result = mutate_genome(
             ancestor,
             seed,
             settings.mutations_per_child,
             &settings.mutation,
-        )?
-        .genome;
+        )?;
 
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
         population.push(Candidate {
             individual_id,
             parent_ids: vec![ancestor_id],
-            genome: child,
+            genome: mutation_result.genome,
+            mutations: mutation_result.mutations,
         });
     }
 
@@ -381,12 +391,14 @@ fn evaluate_creature(
 ) -> Result<EvaluatedCreature, String> {
     let genome = &candidate.genome;
     let mut trials = Vec::with_capacity(settings.trials_per_creature);
+    let mut trial_seeds = Vec::with_capacity(settings.trials_per_creature);
 
     for trial_index in 0..settings.trials_per_creature {
         let mut simulation = settings.simulation.clone();
         if trial_index > 0 {
             simulation.world.seed = trial_seed(simulation.world.seed, trial_index);
         }
+        trial_seeds.push(simulation.world.seed);
         trials.push(evaluate_fitness(genome, &simulation, &settings.fitness)?);
     }
 
@@ -399,6 +411,8 @@ fn evaluate_creature(
         genome: genome.clone(),
         fitness: result.score,
         metrics: result.metrics,
+        trial_seeds,
+        mutations: candidate.mutations.clone(),
     })
 }
 
@@ -535,6 +549,7 @@ fn breed_next_generation(
             individual_id,
             parent_ids: vec![elite.individual_id],
             genome: elite.genome.clone(),
+            mutations: Vec::new(),
         });
     }
 
@@ -554,20 +569,20 @@ fn breed_next_generation(
             parent.genome.clone()
         };
 
-        let child = mutate_genome(
+        let mutation_result = mutate_genome(
             &base,
             rng.next_seed(),
             next_settings.mutations_per_child,
             &next_settings.mutation,
-        )?
-        .genome;
+        )?;
 
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
         next.push(Candidate {
             individual_id,
             parent_ids,
-            genome: child,
+            genome: mutation_result.genome,
+            mutations: mutation_result.mutations,
         });
     }
 
@@ -706,6 +721,9 @@ fn build_lineage_records(generation: usize, evaluated: &[EvaluatedCreature]) -> 
             segments: item.genome.segments.len(),
             joints: item.genome.joints.len(),
             brain_nodes: item.genome.brain.node_count(),
+            trial_seeds: item.trial_seeds.clone(),
+            mutations: item.mutations.clone(),
+            genome: item.genome.clone(),
         })
         .collect()
 }
@@ -814,6 +832,8 @@ mod tests {
         assert_eq!(result.history.len(), 3);
         assert_eq!(result.champion_archive.len(), 3);
         assert_eq!(result.evaluations_completed, 18);
+        assert_eq!(result.history[0].lineage.len(), 6);
+        assert!(!result.history[0].lineage[0].trial_seeds.is_empty());
         assert!(result.champion.validate().is_ok());
     }
 
