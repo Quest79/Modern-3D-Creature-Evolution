@@ -272,7 +272,12 @@ func _process(delta: float) -> void:
                 _load_results_file(_evolution_results_path())
                 _current_genome_source = "latest evolution champion"
                 _build_creature_from_genome(_current_genome)
-                _set_status("Evolution process ended • latest champion/results recovered.")
+                _set_status(
+                    "Evolution process ended • latest champion/results recovered"
+                    + (" • checkpoint available to Resume"
+                        if FileAccess.file_exists(_evolution_checkpoint_path())
+                        else "")
+                )
                 _finish_job_controls()
             else:
                 _job_kind = ""
@@ -3000,10 +3005,13 @@ func _on_evolve_pressed() -> void:
 
     var champion_path := _evolution_champion_path()
     var results_path := _evolution_results_path()
+    var checkpoint_path := _evolution_checkpoint_path()
     if FileAccess.file_exists(champion_path):
         DirAccess.remove_absolute(champion_path)
     if FileAccess.file_exists(results_path):
         DirAccess.remove_absolute(results_path)
+    if FileAccess.file_exists(checkpoint_path):
+        DirAccess.remove_absolute(checkpoint_path)
 
     var args := PackedStringArray([
         "evolve",
@@ -3033,7 +3041,9 @@ func _on_evolve_pressed() -> void:
         "--champion-output", champion_path,
         "--result-output", results_path,
         "--experiment-name", _experiment_name,
+        "--checkpoint-output", checkpoint_path,
     ])
+    args.append_array(_accelerator_cli_args())
 
     if not _current_genome.is_empty():
         var parent_path := ProjectSettings.globalize_path("user://evolution_parent.json")
@@ -3044,6 +3054,73 @@ func _on_evolve_pressed() -> void:
 
     if _start_job("evolution", args):
         _set_status("Evolution running • weighted fitness enabled")
+
+
+func _on_resume_evolution_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    var checkpoint_path := _evolution_checkpoint_path()
+    if not FileAccess.file_exists(checkpoint_path):
+        _set_status("No evolution checkpoint exists to resume.")
+        _resume_evolution_button.disabled = true
+        return
+
+    if int(_tournament_spin.value) > int(_population_spin.value):
+        _set_status("Tournament size cannot exceed population.")
+        return
+    if int(_elite_spin.value) >= int(_population_spin.value):
+        _set_status("Elite kept must be smaller than population.")
+        return
+
+    _probe_mesh.visible = false
+    _progress_bar.value = 0
+    _metrics.text = "[color=#9aa7bd]Resuming evolution from checkpoint...[/color]"
+
+    var champion_path := _evolution_champion_path()
+    var results_path := _evolution_results_path()
+    var args := PackedStringArray([
+        "evolve",
+        "--population", str(int(_population_spin.value)),
+        "--generations", str(int(_generations_spin.value)),
+        "--tournament", str(int(_tournament_spin.value)),
+        "--elite", str(int(_elite_spin.value)),
+        "--crossover", str(_crossover_spin.value),
+        "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--structural-mutation-chance", str(_structural_mutation_spin.value),
+        "--max-segments", str(int(_max_segments_spin.value)),
+        "--seed", str(int(_seed_spin.value)),
+        "--workers", str(int(_workers_spin.value)),
+        "--seconds", str(_seconds_spin.value),
+        "--dt", str(_dt_spin.value),
+        "--motor-strength", str(_motor_strength_spin.value),
+        "--trials", str(int(_trials_spin.value)),
+        "--trial-aggregation", _trial_aggregation_value(),
+        "--timeline-json", _timeline_json(),
+        "--fitness-distance", str(_fitness_distance_spin.value),
+        "--fitness-speed", str(_fitness_speed_spin.value),
+        "--fitness-upright", str(_fitness_upright_spin.value),
+        "--fitness-stability", str(_fitness_stability_spin.value),
+        "--fitness-energy", str(_fitness_energy_spin.value),
+        "--world-json", _world_json(),
+        "--event-port", str(_event_port),
+        "--champion-output", champion_path,
+        "--result-output", results_path,
+        "--experiment-name", _experiment_name,
+        "--checkpoint-output", checkpoint_path,
+        "--resume-checkpoint", checkpoint_path,
+    ])
+    args.append_array(_accelerator_cli_args())
+
+    if not _current_genome.is_empty():
+        var parent_path := ProjectSettings.globalize_path("user://evolution_parent.json")
+        if not _write_genome_file(parent_path, _current_genome):
+            _set_status("Could not write evolution parent genome.")
+            return
+        args.append_array(PackedStringArray(["--genome", parent_path]))
+
+    if _start_job("evolution", args):
+        _set_status("Resuming evolution from the latest completed generation...")
 
 
 func _on_watch_champion_pressed() -> void:
@@ -3775,6 +3852,11 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "evolution_complete":
+            var completed_checkpoint := _evolution_checkpoint_path()
+            if FileAccess.file_exists(completed_checkpoint):
+                DirAccess.remove_absolute(completed_checkpoint)
+            _resume_evolution_button.disabled = true
+
             var champion_file := str(event.get("champion_file", ""))
             if champion_file != "":
                 _load_genome_file(champion_file)
