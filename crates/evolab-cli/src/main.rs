@@ -1,12 +1,15 @@
+use std::fs;
 use std::net::UdpSocket;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use evolab_core::{
-    BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, PhysicsBackend, ProbeSpec,
-    RapierCpuBackend, SimulationConfig, WorldSnapshot,
+    BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, MutationConfig,
+    PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot, mutate_genome,
+    random_creature,
 };
 use serde_json::{Value, json};
 
@@ -106,6 +109,45 @@ enum Command {
         /// Disable real-time pacing and stream as fast as the CPU can simulate.
         #[arg(long, default_value_t = false)]
         max_speed: bool,
+
+        /// Load an exact creature genome from JSON instead of generating one.
+        #[arg(long)]
+        genome: Option<PathBuf>,
+
+        /// Reproducible seed used for generation/mutation.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+
+        /// Number of mutation operations applied to the built-in seed creature.
+        #[arg(long, default_value_t = 0)]
+        mutations: usize,
+
+        /// Generate a random creature with this many segments. 0 uses the built-in seed creature.
+        #[arg(long, default_value_t = 0)]
+        random_segments: usize,
+
+        /// Hard structural limit used by generation/mutation.
+        #[arg(long, default_value_t = 12)]
+        max_segments: usize,
+    },
+
+    /// Write a generated/mutated creature genome to a JSON file.
+    GenomeGenerate {
+        #[arg(long)]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+
+        /// 0 starts from the built-in three-segment seed; >0 creates a random topology.
+        #[arg(long, default_value_t = 0)]
+        random_segments: usize,
+
+        #[arg(long, default_value_t = 0)]
+        mutations: usize,
+
+        #[arg(long, default_value_t = 12)]
+        max_segments: usize,
     },
 
     /// Report backend and machine capabilities.
@@ -161,7 +203,31 @@ fn run() -> Result<(), String> {
             dt,
             frame_hz,
             max_speed,
-        } => run_creature_stream(&event_host, event_port, seconds, dt, frame_hz, !max_speed),
+            genome,
+            seed,
+            mutations,
+            random_segments,
+            max_segments,
+        } => run_creature_stream(
+            &event_host,
+            event_port,
+            seconds,
+            dt,
+            frame_hz,
+            !max_speed,
+            genome.as_ref(),
+            seed,
+            mutations,
+            random_segments,
+            max_segments,
+        ),
+        Command::GenomeGenerate {
+            output,
+            seed,
+            random_segments,
+            mutations,
+            max_segments,
+        } => run_genome_generate(&output, seed, random_segments, mutations, max_segments),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
@@ -368,6 +434,11 @@ fn run_creature_stream(
     dt: f32,
     frame_hz: f32,
     realtime: bool,
+    genome_path: Option<&PathBuf>,
+    seed: u64,
+    mutations: usize,
+    random_segments: usize,
+    max_segments: usize,
 ) -> Result<(), String> {
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
@@ -383,7 +454,37 @@ fn run_creature_stream(
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "creature streaming requires an event port".to_string())?;
     let simulator = CreatureSimulator;
-    let genome = CreatureGenome::three_segment_walker();
+    let mutation_config = MutationConfig {
+        max_segments: max_segments.max(2),
+        ..MutationConfig::default()
+    };
+
+    let (genome, mutation_log, genome_source) = if let Some(path) = genome_path {
+        let raw = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
+        let genome: CreatureGenome = serde_json::from_str(&raw)
+            .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
+        genome.validate()?;
+        (genome, Vec::new(), format!("file:{}", path.display()))
+    } else if random_segments > 0 {
+        let result = random_creature(seed, random_segments, &mutation_config)?;
+        (result.genome, result.mutations, format!("random:{seed}"))
+    } else if mutations > 0 {
+        let result = mutate_genome(
+            &CreatureGenome::three_segment_walker(),
+            seed,
+            mutations,
+            &mutation_config,
+        )?;
+        (result.genome, result.mutations, format!("mutated:{seed}"))
+    } else {
+        (
+            CreatureGenome::three_segment_walker(),
+            Vec::new(),
+            "built-in".to_string(),
+        )
+    };
+
     let sample_every_steps = ((1.0 / frame_hz) / config.dt).round().max(1.0) as usize;
 
     send_event(
@@ -397,6 +498,8 @@ fn run_creature_stream(
             "frame_hz": frame_hz,
             "sample_every_steps": sample_every_steps,
             "realtime": realtime,
+            "genome_source": genome_source,
+            "mutation_log": mutation_log,
             "genome": genome,
         }),
     );
@@ -435,6 +538,41 @@ fn run_creature_stream(
         }),
     );
 
+    Ok(())
+}
+
+fn run_genome_generate(
+    output: &PathBuf,
+    seed: u64,
+    random_segments: usize,
+    mutations: usize,
+    max_segments: usize,
+) -> Result<(), String> {
+    let mutation_config = MutationConfig {
+        max_segments: max_segments.max(2),
+        ..MutationConfig::default()
+    };
+
+    let genome = if random_segments > 0 {
+        random_creature(seed, random_segments, &mutation_config)?.genome
+    } else if mutations > 0 {
+        mutate_genome(
+            &CreatureGenome::three_segment_walker(),
+            seed,
+            mutations,
+            &mutation_config,
+        )?
+        .genome
+    } else {
+        CreatureGenome::three_segment_walker()
+    };
+
+    genome.validate()?;
+    let json = serde_json::to_string_pretty(&genome)
+        .map_err(|err| format!("failed to serialize genome: {err}"))?;
+    fs::write(output, json)
+        .map_err(|err| format!("failed to write genome {}: {err}", output.display()))?;
+    println!("wrote {}", output.display());
     Ok(())
 }
 
