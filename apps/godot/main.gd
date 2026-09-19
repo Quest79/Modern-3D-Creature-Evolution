@@ -1300,6 +1300,37 @@ func _load_settings() -> void:
     )
     _gap_width = float(config.get_value("world", "gap_width", _gap_width))
     _pit_depth = float(config.get_value("world", "pit_depth", _pit_depth))
+    _motor_strength = float(
+        config.get_value("evolution", "motor_strength", _motor_strength)
+    )
+    _motor_strength = clampf(_motor_strength, 0.0, 20.0)
+    _trials_per_creature = int(
+        config.get_value("evolution", "trials_per_creature", _trials_per_creature)
+    )
+    _trials_per_creature = clampi(_trials_per_creature, 1, 100)
+    _trial_aggregation = str(
+        config.get_value("evolution", "trial_aggregation", _trial_aggregation)
+    )
+    if not _trial_aggregation in ["mean", "median", "worst", "best"]:
+        _trial_aggregation = "mean"
+    _structural_mutation_chance = float(
+        config.get_value(
+            "evolution",
+            "structural_mutation_chance",
+            _structural_mutation_chance
+        )
+    )
+    _structural_mutation_chance = clampf(_structural_mutation_chance, 0.0, 1.0)
+
+    var timeline_raw := str(config.get_value("timeline", "json", ""))
+    if not timeline_raw.is_empty():
+        var parsed_timeline = JSON.parse_string(timeline_raw)
+        if typeof(parsed_timeline) == TYPE_DICTIONARY:
+            var keyframes = parsed_timeline.get("keyframes", [])
+            if typeof(keyframes) == TYPE_ARRAY:
+                _timeline_entries = keyframes
+                _timeline_next_id = _timeline_entries.size() + 1
+
     _camera_move_speed = float(
         config.get_value("camera", "move_speed", _camera_move_speed)
     )
@@ -1344,6 +1375,15 @@ func _save_settings() -> void:
     config.set_value("world", "obstacle_size", _obstacle_size)
     config.set_value("world", "gap_width", _gap_width)
     config.set_value("world", "pit_depth", _pit_depth)
+    config.set_value("evolution", "motor_strength", _motor_strength)
+    config.set_value("evolution", "trials_per_creature", _trials_per_creature)
+    config.set_value("evolution", "trial_aggregation", _trial_aggregation)
+    config.set_value(
+        "evolution",
+        "structural_mutation_chance",
+        _structural_mutation_chance
+    )
+    config.set_value("timeline", "json", JSON.stringify(_timeline_config_dictionary()))
     config.set_value("camera", "move_speed", _camera_move_speed)
     config.set_value(
         "camera",
