@@ -459,7 +459,7 @@ fn run_creature_stream(
         ..MutationConfig::default()
     };
 
-    let (genome, mutation_log, genome_source) = if let Some(path) = genome_path {
+    let (base_genome, mut mutation_log, mut genome_source) = if let Some(path) = genome_path {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
         let genome: CreatureGenome = serde_json::from_str(&raw)
@@ -469,20 +469,26 @@ fn run_creature_stream(
     } else if random_segments > 0 {
         let result = random_creature(seed, random_segments, &mutation_config)?;
         (result.genome, result.mutations, format!("random:{seed}"))
-    } else if mutations > 0 {
-        let result = mutate_genome(
-            &CreatureGenome::three_segment_walker(),
-            seed,
-            mutations,
-            &mutation_config,
-        )?;
-        (result.genome, result.mutations, format!("mutated:{seed}"))
     } else {
         (
             CreatureGenome::three_segment_walker(),
             Vec::new(),
             "built-in".to_string(),
         )
+    };
+
+    let genome = if mutations > 0 {
+        let result = mutate_genome(
+            &base_genome,
+            seed ^ 0xD1B5_4A32_D192_ED03,
+            mutations,
+            &mutation_config,
+        )?;
+        mutation_log.extend(result.mutations);
+        genome_source = format!("{genome_source}+mutated:{mutations}");
+        result.genome
+    } else {
+        base_genome
     };
 
     let sample_every_steps = ((1.0 / frame_hz) / config.dt).round().max(1.0) as usize;
