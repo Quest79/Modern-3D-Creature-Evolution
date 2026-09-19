@@ -9,6 +9,7 @@ mod brain;
 mod config;
 mod creature;
 mod evolution;
+mod experiment;
 mod fitness;
 mod ga;
 mod rapier_cpu;
@@ -32,6 +33,7 @@ pub use evolution::{
     GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult,
     crossover_brain_subtree, mutate_genome, random_creature,
 };
+pub use experiment::{EXPERIMENT_FORMAT_VERSION, ExperimentFile};
 pub use fitness::{FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, evaluate_fitness};
 pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
