@@ -255,10 +255,7 @@ fn resize_segment(
     })
 }
 
-fn change_material(
-    genome: &mut CreatureGenome,
-    rng: &mut GenomeRng,
-) -> Option<MutationRecord> {
+fn change_material(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.segments.len());
     let segment = genome.segments.get_mut(index)?;
     segment.density = (segment.density * rng.range_f32(0.80, 1.25)).clamp(0.25, 4.0);
@@ -282,8 +279,7 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
     joint.motor_frequency_hz =
         (joint.motor_frequency_hz * rng.range_f32(0.75, 1.30)).clamp(0.15, 4.0);
     joint.motor_phase_radians += rng.signed(0.5);
-    joint.motor_max_torque =
-        (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
+    joint.motor_max_torque = (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMotor,
@@ -298,16 +294,13 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
     })
 }
 
-fn change_joint_limits(
-    genome: &mut CreatureGenome,
-    rng: &mut GenomeRng,
-) -> Option<MutationRecord> {
+fn change_joint_limits(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
     let center = (joint.limits_radians[0] + joint.limits_radians[1]) * 0.5 + rng.signed(0.12);
-    let half_width = ((joint.limits_radians[1] - joint.limits_radians[0]) * 0.5
-        * rng.range_f32(0.75, 1.25))
-    .clamp(0.15, 1.45);
+    let half_width =
+        ((joint.limits_radians[1] - joint.limits_radians[0]) * 0.5 * rng.range_f32(0.75, 1.25))
+            .clamp(0.15, 1.45);
 
     joint.limits_radians = [
         (center - half_width).clamp(-1.55, 1.40),
@@ -322,18 +315,12 @@ fn change_joint_limits(
         kind: MutationKind::ChangeJointLimits,
         description: format!(
             "changed joint {}→{} limits to [{:.2}, {:.2}] rad",
-            joint.parent_id,
-            joint.child_id,
-            joint.limits_radians[0],
-            joint.limits_radians[1]
+            joint.parent_id, joint.child_id, joint.limits_radians[0], joint.limits_radians[1]
         ),
     })
 }
 
-fn move_joint_anchor(
-    genome: &mut CreatureGenome,
-    rng: &mut GenomeRng,
-) -> Option<MutationRecord> {
+fn move_joint_anchor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
     let axis = rng.range_usize(3);
@@ -369,9 +356,12 @@ fn add_segment(
         + 1;
 
     let half_extents = [
-        rng.range_f32(0.12, 0.40).clamp(config.min_half_extent, config.max_half_extent),
-        rng.range_f32(0.18, 0.62).clamp(config.min_half_extent, config.max_half_extent),
-        rng.range_f32(0.12, 0.36).clamp(config.min_half_extent, config.max_half_extent),
+        rng.range_f32(0.12, 0.40)
+            .clamp(config.min_half_extent, config.max_half_extent),
+        rng.range_f32(0.18, 0.62)
+            .clamp(config.min_half_extent, config.max_half_extent),
+        rng.range_f32(0.12, 0.36)
+            .clamp(config.min_half_extent, config.max_half_extent),
     ];
 
     let direction_index = rng.range_usize(6);
@@ -430,10 +420,7 @@ fn add_segment(
     })
 }
 
-fn remove_leaf_segment(
-    genome: &mut CreatureGenome,
-    rng: &mut GenomeRng,
-) -> Option<MutationRecord> {
+fn remove_leaf_segment(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     if genome.segments.len() <= 1 {
         return None;
     }
@@ -491,8 +478,7 @@ mod tests {
     #[test]
     fn many_mutations_keep_genome_valid() {
         let source = CreatureGenome::three_segment_walker();
-        let result =
-            mutate_genome(&source, 987_654_321, 250, &MutationConfig::default()).unwrap();
+        let result = mutate_genome(&source, 987_654_321, 250, &MutationConfig::default()).unwrap();
         assert!(result.genome.validate().is_ok());
     }
 }
