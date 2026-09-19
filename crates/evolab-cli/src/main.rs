@@ -200,6 +200,10 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         mutations: usize,
 
+        /// Chance that a mutation operation attempts a structural body change.
+        #[arg(long, default_value_t = 0.30)]
+        structural_mutation_chance: f32,
+
         #[arg(long, default_value_t = 12)]
         max_segments: usize,
 
@@ -381,6 +385,7 @@ fn run() -> Result<(), String> {
             elite,
             crossover,
             mutations,
+            structural_mutation_chance,
             max_segments,
             seed,
             workers,
@@ -408,6 +413,7 @@ fn run() -> Result<(), String> {
             elite,
             crossover,
             mutations,
+            structural_mutation_chance,
             max_segments,
             seed,
             workers,
@@ -810,6 +816,7 @@ fn run_genome_generate(
     seed: u64,
     random_segments: usize,
     mutations: usize,
+    structural_mutation_chance: f32,
     max_segments: usize,
 ) -> Result<(), String> {
     let mutation_config = MutationConfig {
@@ -937,6 +944,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         },
         mutation: MutationConfig {
             max_segments: request.max_segments.max(2),
+            structural_mutation_chance: request.structural_mutation_chance,
             ..MutationConfig::default()
         },
         trials_per_creature: request.trials,
@@ -957,6 +965,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "elite": config.elite_count,
                 "crossover_chance": config.crossover_chance,
                 "mutations_per_child": config.mutations_per_child,
+                "structural_mutation_chance": config.mutation.structural_mutation_chance,
                 "fitness_weights": config.fitness.weights,
                 "motor_strength_multiplier": config.simulation.motor_strength_multiplier,
                 "trials_per_creature": config.trials_per_creature,
