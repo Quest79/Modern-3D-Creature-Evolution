@@ -8,9 +8,9 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 5 — World / Terrain Editor: implemented.**
+**Step 6 — Experiment Timeline / Scheduling: implemented.**
 
-Steps 1–5 are live. Creatures evolve morphology and expression-tree controllers under configurable weighted fitness inside configurable deterministic worlds.
+Steps 1–6 are live. Experiments can now schedule world, fitness, mutation, motor, population, duration, and repeated-trial changes across generations, with conditional events and portable .evo experiment files.
 
 Current foundation:
 
@@ -48,12 +48,17 @@ Current foundation:
 - saved world/terrain settings in the Godot GUI
 - exact Rust-generated world geometry rendered in the Godot preview
 - the same configured world used for evolution, creature playback, live probe runs, and benchmarks
+- generation timeline keyframes for world, fitness, population, mutation, motor strength, duration, and trials
+- conditional timeline events based on best fitness, average fitness, or best distance
+- repeated creature trials with mean / median / worst / best aggregation
+- saved human-readable .evo experiment files with load and fork support
+- headless `evolab run experiment.evo` execution
 
 The Rust backend remains the authoritative simulator. Godot renders streamed snapshots and provides creature, fitness, evolution, and
 world/terrain controls while Rust remains authoritative for physics and world
 geometry.
 
-See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), [docs/STEP-4.md](docs/STEP-4.md), and [docs/STEP-5.md](docs/STEP-5.md).
+See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), [docs/STEP-4.md](docs/STEP-4.md), [docs/STEP-5.md](docs/STEP-5.md), and [docs/STEP-6.md](docs/STEP-6.md).
 
 ## Windows quick start
 
@@ -73,4 +78,5 @@ cargo test --workspace
 cargo run --release -p evolab-cli -- probe --batch 1000 --workers 12
 cargo run --release -p evolab-cli -- capabilities
 cargo run --release -p evolab-cli -- genome-generate --output creature.json --seed 42 --random-segments 6 --mutations 12
+cargo run --release -p evolab-cli -- run FastWalker.evo --workers 24
 ```
