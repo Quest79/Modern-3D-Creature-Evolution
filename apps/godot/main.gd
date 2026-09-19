@@ -936,6 +936,392 @@ func _on_results_pressed() -> void:
     _results_window.popup_centered()
 
 
+func _refresh_results_window() -> void:
+    if _results_history_list == null:
+        return
+
+    _results_history_list.clear()
+    _results_champion_list.clear()
+    _results_lineage_list.clear()
+    _results_best_line.clear_points()
+    _results_average_line.clear_points()
+
+    if _results_data.is_empty():
+        _results_detail.text = "[color=#9aa7bd]No evolution results loaded.[/color]"
+        _results_analysis.text = ""
+        return
+
+    var result_value = _results_data.get("result", {})
+    if typeof(result_value) != TYPE_DICTIONARY:
+        return
+    var result: Dictionary = result_value
+    var history: Array = result.get("history", [])
+    var archive: Array = result.get("champion_archive", [])
+
+    for summary_value in history:
+        if typeof(summary_value) != TYPE_DICTIONARY:
+            continue
+        var summary: Dictionary = summary_value
+        _results_history_list.add_item(
+            "Gen %d   best %.4f   avg %.4f   distance %.3f m"
+            % [
+                int(summary.get("generation", 0)),
+                float(summary.get("best_fitness", 0.0)),
+                float(summary.get("average_fitness", 0.0)),
+                float(summary.get("best_distance", 0.0)),
+            ]
+        )
+
+        var lineage: Array = summary.get("lineage", [])
+        for record_value in lineage:
+            if typeof(record_value) != TYPE_DICTIONARY:
+                continue
+            var record: Dictionary = record_value
+            _results_lineage_list.add_item(
+                "G%d  #%s  parents [%s]  class %s  fit %.4f  seg %s  brain %s"
+                % [
+                    int(record.get("generation", 0)),
+                    str(record.get("individual_id", 0)),
+                    _format_parent_ids(record.get("parent_ids", [])),
+                    str(record.get("species_id", 0)),
+                    float(record.get("fitness", 0.0)),
+                    str(record.get("segments", 0)),
+                    str(record.get("brain_nodes", 0)),
+                ]
+            )
+
+    for entry_value in archive:
+        if typeof(entry_value) != TYPE_DICTIONARY:
+            continue
+        var entry: Dictionary = entry_value
+        _results_champion_list.add_item(
+            "Gen %d   #%s   fitness %.4f   distance %.3f m   parents [%s]"
+            % [
+                int(entry.get("generation", 0)),
+                str(entry.get("individual_id", 0)),
+                float(entry.get("fitness", 0.0)),
+                float(entry.get("metrics", {}).get("distance", 0.0)),
+                _format_parent_ids(entry.get("parent_ids", [])),
+            ]
+        )
+
+    if not history.is_empty():
+        _results_history_list.select(history.size() - 1)
+        _show_result_generation(history.size() - 1)
+
+    _refresh_results_analysis()
+    call_deferred("_refresh_results_graph")
+
+
+func _refresh_results_graph() -> void:
+    if _results_data.is_empty() or _results_graph == null:
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var history: Array = result.get("history", [])
+    if history.is_empty():
+        return
+
+    var best_values: Array[float] = []
+    var average_values: Array[float] = []
+    var minimum := INF
+    var maximum := -INF
+
+    for summary_value in history:
+        if typeof(summary_value) != TYPE_DICTIONARY:
+            continue
+        var summary: Dictionary = summary_value
+        var best := float(summary.get("best_fitness", 0.0))
+        var average := float(summary.get("average_fitness", 0.0))
+        best_values.append(best)
+        average_values.append(average)
+        minimum = minf(minimum, minf(best, average))
+        maximum = maxf(maximum, maxf(best, average))
+
+    if best_values.is_empty():
+        return
+
+    if absf(maximum - minimum) < 0.000001:
+        maximum = minimum + 1.0
+
+    var graph_size := _results_graph.size
+    if graph_size.x < 100.0:
+        graph_size.x = 900.0
+    if graph_size.y < 100.0:
+        graph_size.y = 190.0
+
+    var left := 12.0
+    var right := graph_size.x - 12.0
+    var top := 12.0
+    var bottom := graph_size.y - 12.0
+    var denominator := maxf(float(best_values.size() - 1), 1.0)
+
+    _results_best_line.clear_points()
+    _results_average_line.clear_points()
+
+    for index in range(best_values.size()):
+        var x := lerpf(left, right, float(index) / denominator)
+        var best_y := lerpf(
+            bottom,
+            top,
+            (best_values[index] - minimum) / (maximum - minimum)
+        )
+        var average_y := lerpf(
+            bottom,
+            top,
+            (average_values[index] - minimum) / (maximum - minimum)
+        )
+        _results_best_line.add_point(Vector2(x, best_y))
+        _results_average_line.add_point(Vector2(x, average_y))
+
+
+func _on_result_history_selected(index: int) -> void:
+    _show_result_generation(index)
+
+
+func _show_result_generation(index: int) -> void:
+    if _results_data.is_empty():
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var history: Array = result.get("history", [])
+    if index < 0 or index >= history.size():
+        return
+    if typeof(history[index]) != TYPE_DICTIONARY:
+        return
+
+    var summary: Dictionary = history[index]
+    var metrics: Dictionary = summary.get("best_metrics", {})
+    var diversity: Dictionary = summary.get("diversity", {})
+    var species: Array = summary.get("species", [])
+    var pareto: Array = summary.get("pareto_front", [])
+    var map_cells: Array = summary.get("map_elites", [])
+
+    _results_detail.text = (
+        "[b]Generation %d[/b]
+
+"
+        + "[table=2]"
+        + "[cell]Champion ID[/cell][cell]#%s[/cell]"
+        + "[cell]Parents[/cell][cell]%s[/cell]"
+        + "[cell]Analysis class[/cell][cell]%s[/cell]"
+        + "[cell]Best fitness[/cell][cell][b]%.5f[/b][/cell]"
+        + "[cell]Average / worst[/cell][cell]%.5f / %.5f[/cell]"
+        + "[cell]Distance[/cell][cell]%.4f m[/cell]"
+        + "[cell]Speed[/cell][cell]%.4f m/s[/cell]"
+        + "[cell]Upright[/cell][cell]%.3f[/cell]"
+        + "[cell]Stability[/cell][cell]%.3f[/cell]"
+        + "[cell]Energy[/cell][cell]%.4f[/cell]"
+        + "[cell]Fitness σ[/cell][cell]%.4f[/cell]"
+        + "[cell]Unique morphologies[/cell][cell]%s[/cell]"
+        + "[cell]Analysis classes[/cell][cell]%s[/cell]"
+        + "[cell]Pareto front[/cell][cell]%s creatures[/cell]"
+        + "[cell]MAP-Elites occupied[/cell][cell]%s cells[/cell]"
+        + "[cell]Segments mean ± σ[/cell][cell]%.2f ± %.2f[/cell]"
+        + "[cell]Brain nodes mean ± σ[/cell][cell]%.2f ± %.2f[/cell]"
+        + "[/table]"
+        % [
+            int(summary.get("generation", 0)),
+            str(summary.get("champion_id", 0)),
+            _format_parent_ids(summary.get("champion_parent_ids", [])),
+            str(summary.get("champion_species_id", 0)),
+            float(summary.get("best_fitness", 0.0)),
+            float(summary.get("average_fitness", 0.0)),
+            float(summary.get("worst_fitness", 0.0)),
+            float(metrics.get("distance", 0.0)),
+            float(metrics.get("average_speed", 0.0)),
+            float(metrics.get("upright", 0.0)),
+            float(metrics.get("stability", 0.0)),
+            float(metrics.get("energy", 0.0)),
+            float(diversity.get("fitness_stddev", 0.0)),
+            str(diversity.get("unique_morphologies", 0)),
+            str(species.size()),
+            str(pareto.size()),
+            str(map_cells.size()),
+            float(diversity.get("segment_count_mean", 0.0)),
+            float(diversity.get("segment_count_stddev", 0.0)),
+            float(diversity.get("brain_nodes_mean", 0.0)),
+            float(diversity.get("brain_nodes_stddev", 0.0)),
+        ]
+    )
+
+
+func _on_result_champion_selected(_index: int) -> void:
+    pass
+
+
+func _on_load_archived_champion() -> void:
+    var selected := _results_champion_list.get_selected_items()
+    if selected.is_empty() or _results_data.is_empty():
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var archive: Array = result.get("champion_archive", [])
+    var index := int(selected[0])
+    if index < 0 or index >= archive.size():
+        return
+    if typeof(archive[index]) != TYPE_DICTIONARY:
+        return
+
+    var entry: Dictionary = archive[index]
+    var genome_value = entry.get("genome", {})
+    if typeof(genome_value) != TYPE_DICTIONARY:
+        return
+
+    _current_genome = genome_value.duplicate(true)
+    _current_genome_source = "generation %d archived champion" % int(
+        entry.get("generation", 0)
+    )
+    _save_button.disabled = false
+    _probe_mesh.visible = false
+    _build_creature_from_genome(_current_genome)
+    _results_window.hide()
+    _set_status(
+        "Loaded generation %d champion (#%s)."
+        % [int(entry.get("generation", 0)), str(entry.get("individual_id", 0))]
+    )
+
+
+func _on_compare_archived_champion() -> void:
+    var selected := _results_champion_list.get_selected_items()
+    if selected.is_empty() or _results_data.is_empty():
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var archive: Array = result.get("champion_archive", [])
+    var index := int(selected[0])
+    if index < 0 or index >= archive.size():
+        return
+
+    var selected_entry: Dictionary = archive[index]
+    var final_fitness := float(result.get("champion_fitness", 0.0))
+    var final_metrics: Dictionary = result.get("champion_metrics", {})
+    var selected_metrics: Dictionary = selected_entry.get("metrics", {})
+
+    _results_analysis.text = (
+        "[b]Selected vs final champion[/b]
+
+"
+        + "[table=3]"
+        + "[cell][/cell][cell][b]Selected G%d[/b][/cell][cell][b]Final[/b][/cell]"
+        + "[cell]Fitness[/cell][cell]%.5f[/cell][cell]%.5f[/cell]"
+        + "[cell]Distance[/cell][cell]%.4f[/cell][cell]%.4f[/cell]"
+        + "[cell]Speed[/cell][cell]%.4f[/cell][cell]%.4f[/cell]"
+        + "[cell]Upright[/cell][cell]%.3f[/cell][cell]%.3f[/cell]"
+        + "[cell]Stability[/cell][cell]%.3f[/cell][cell]%.3f[/cell]"
+        + "[cell]Energy[/cell][cell]%.4f[/cell][cell]%.4f[/cell]"
+        + "[/table]
+
+"
+        + "[color=#9aa7bd]Analysis classes below are descriptive morphology/brain buckets, "
+        + "not yet evolutionary speciation.[/color]"
+        % [
+            int(selected_entry.get("generation", 0)),
+            float(selected_entry.get("fitness", 0.0)),
+            final_fitness,
+            float(selected_metrics.get("distance", 0.0)),
+            float(final_metrics.get("distance", 0.0)),
+            float(selected_metrics.get("average_speed", 0.0)),
+            float(final_metrics.get("average_speed", 0.0)),
+            float(selected_metrics.get("upright", 0.0)),
+            float(final_metrics.get("upright", 0.0)),
+            float(selected_metrics.get("stability", 0.0)),
+            float(final_metrics.get("stability", 0.0)),
+            float(selected_metrics.get("energy", 0.0)),
+            float(final_metrics.get("energy", 0.0)),
+        ]
+    )
+
+
+func _refresh_results_analysis() -> void:
+    if _results_data.is_empty():
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var history: Array = result.get("history", [])
+    if history.is_empty():
+        return
+
+    var final_summary: Dictionary = history.back()
+    var diversity: Dictionary = final_summary.get("diversity", {})
+    var pareto: Array = final_summary.get("pareto_front", [])
+    var map_cells: Array = final_summary.get("map_elites", [])
+    var species: Array = final_summary.get("species", [])
+
+    var best_species_text := "none"
+    if not species.is_empty() and typeof(species[0]) == TYPE_DICTIONARY:
+        var best_species: Dictionary = species[0]
+        for species_value in species:
+            if (
+                typeof(species_value) == TYPE_DICTIONARY
+                and float(species_value.get("best_fitness", -INF))
+                    > float(best_species.get("best_fitness", -INF))
+            ):
+                best_species = species_value
+        best_species_text = (
+            "%s (%s members, best %.4f)"
+            % [
+                str(best_species.get("species_id", 0)),
+                str(best_species.get("members", 0)),
+                float(best_species.get("best_fitness", 0.0)),
+            ]
+        )
+
+    _results_analysis.text = (
+        "[b]%s[/b]
+"
+        + "Generations: %s   Evaluations: %s   Wall time: %.3f s
+
+"
+        + "[b]Final-generation diversity[/b]
+"
+        + "[table=2]"
+        + "[cell]Fitness σ[/cell][cell]%.5f[/cell]"
+        + "[cell]Unique morphologies[/cell][cell]%s[/cell]"
+        + "[cell]Analysis classes[/cell][cell]%s[/cell]"
+        + "[cell]Best class[/cell][cell]%s[/cell]"
+        + "[cell]Segment mean ± σ[/cell][cell]%.2f ± %.2f[/cell]"
+        + "[cell]Brain-node mean ± σ[/cell][cell]%.2f ± %.2f[/cell]"
+        + "[cell]Distance/energy Pareto front[/cell][cell]%s[/cell]"
+        + "[cell]MAP-Elites occupied cells[/cell][cell]%s[/cell]"
+        + "[/table]
+
+"
+        + "[color=#9aa7bd]Analysis classes group creatures by segment count and "
+        + "brain-node bucket. They provide species-style browsing groundwork; "
+        + "selection is not yet using speciation. MAP-Elites here is analysis-only "
+        + "occupancy, not yet the evolution algorithm.[/color]"
+        % [
+            str(_results_data.get("experiment_name", "Evolution Results")),
+            str(result.get("generations_completed", 0)),
+            str(result.get("evaluations_completed", 0)),
+            float(_results_data.get("wall_seconds", 0.0)),
+            float(diversity.get("fitness_stddev", 0.0)),
+            str(diversity.get("unique_morphologies", 0)),
+            str(species.size()),
+            best_species_text,
+            float(diversity.get("segment_count_mean", 0.0)),
+            float(diversity.get("segment_count_stddev", 0.0)),
+            float(diversity.get("brain_nodes_mean", 0.0)),
+            float(diversity.get("brain_nodes_stddev", 0.0)),
+            str(pareto.size()),
+            str(map_cells.size()),
+        ]
+    )
+
+
+func _format_parent_ids(value) -> String:
+    if typeof(value) != TYPE_ARRAY:
+        return "-"
+    var ids: Array = value
+    if ids.is_empty():
+        return "-"
+    var parts: PackedStringArray = []
+    for id_value in ids:
+        parts.append(str(id_value))
+    return ", ".join(parts)
+
+
 func _build_settings_window() -> void:
     _settings_window = Window.new()
     _settings_window.title = "Settings"
