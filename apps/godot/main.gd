@@ -420,6 +420,7 @@ func _build_settings_window() -> void:
     margin.add_theme_constant_override("margin_right", 18)
     margin.add_theme_constant_override("margin_top", 18)
     margin.add_theme_constant_override("margin_bottom", 18)
+    margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
     _settings_window.add_child(margin)
 
     var column := VBoxContainer.new()
