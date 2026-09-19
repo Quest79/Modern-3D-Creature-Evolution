@@ -722,10 +722,7 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
     result
 }
 
-fn run_evolve_inner(
-    request: &EvolveRequest<'_>,
-    socket: Option<&UdpSocket>,
-) -> Result<(), String> {
+fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> Result<(), String> {
     let ancestor = if let Some(path) = request.genome_path {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
