@@ -58,7 +58,9 @@ pub enum MutationKind {
     MoveJointAnchor,
     ChangeBrainConstant,
     ReplaceBrainExpression,
+    ReplaceBrainSubtree,
     WrapBrainExpression,
+    WrapBrainSubtree,
     AddSegment,
     RemoveLeafSegment,
 }
@@ -351,11 +353,13 @@ fn mutate_brain(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
         return None;
     }
 
+    let joint_ids: Vec<u32> = genome.joints.iter().map(|joint| joint.child_id).collect();
+    let segment_ids: Vec<u32> = genome.segments.iter().map(|segment| segment.id).collect();
     let index = rng.range_usize(genome.brain.outputs.len());
     let output = genome.brain.outputs.get_mut(index)?;
     let child_id = output.joint_child_id;
 
-    match rng.range_usize(3) {
+    match rng.range_usize(4) {
         0 => {
             if perturb_one_constant(&mut output.expression, rng) {
                 Some(MutationRecord {
@@ -363,51 +367,118 @@ fn mutate_brain(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
                     description: format!("changed brain constant for joint child {child_id}"),
                 })
             } else {
-                output.expression = random_expression(rng, 3);
+                let replacement = random_expression(rng, 2, &joint_ids, &segment_ids);
+                let target = rng.range_usize(output.expression.node_count());
+                output.expression.replace_subtree(target, replacement);
                 Some(MutationRecord {
-                    kind: MutationKind::ReplaceBrainExpression,
-                    description: format!("replaced brain expression for joint child {child_id}"),
+                    kind: MutationKind::ReplaceBrainSubtree,
+                    description: format!(
+                        "replaced brain subtree {target} for joint child {child_id}"
+                    ),
                 })
             }
         }
         1 => {
-            output.expression = random_expression(rng, 3);
+            let target = rng.range_usize(output.expression.node_count());
+            let replacement = random_expression(rng, 2, &joint_ids, &segment_ids);
+            let original = output.expression.clone();
+            output.expression.replace_subtree(target, replacement);
+
+            if output.expression.validate().is_err() {
+                output.expression = original;
+                return None;
+            }
+
+            Some(MutationRecord {
+                kind: MutationKind::ReplaceBrainSubtree,
+                description: format!("replaced brain subtree {target} for joint child {child_id}"),
+            })
+        }
+        2 => {
+            let target = rng.range_usize(output.expression.node_count());
+            let selected = output.expression.subtree_clone(target)?;
+            let wrapped = match rng.range_usize(5) {
+                0 => Expression::Sin(Box::new(selected)),
+                1 => Expression::Cos(Box::new(selected)),
+                2 => Expression::Negate(Box::new(selected)),
+                3 => Expression::Add(
+                    Box::new(selected),
+                    Box::new(Expression::Constant(rng.signed(0.35))),
+                ),
+                _ => Expression::Multiply(
+                    Box::new(selected),
+                    Box::new(Expression::Constant(rng.range_f32(0.65, 1.35))),
+                ),
+            };
+
+            let original = output.expression.clone();
+            output.expression.replace_subtree(target, wrapped);
+            if output.expression.validate().is_err() {
+                output.expression = original;
+                return None;
+            }
+
+            Some(MutationRecord {
+                kind: MutationKind::WrapBrainSubtree,
+                description: format!("wrapped brain subtree {target} for joint child {child_id}"),
+            })
+        }
+        _ => {
+            output.expression = random_expression(rng, 3, &joint_ids, &segment_ids);
             Some(MutationRecord {
                 kind: MutationKind::ReplaceBrainExpression,
                 description: format!("replaced brain expression for joint child {child_id}"),
             })
         }
-        _ => {
-            if output.expression.depth() >= 14 {
-                output.expression = random_expression(rng, 3);
-                return Some(MutationRecord {
-                    kind: MutationKind::ReplaceBrainExpression,
-                    description: format!(
-                        "replaced deep brain expression for joint child {child_id}"
-                    ),
-                });
-            }
-
-            let old = std::mem::replace(&mut output.expression, Expression::Constant(0.0));
-            output.expression = match rng.range_usize(5) {
-                0 => Expression::Sin(Box::new(old)),
-                1 => Expression::Cos(Box::new(old)),
-                2 => Expression::Negate(Box::new(old)),
-                3 => Expression::Add(
-                    Box::new(old),
-                    Box::new(Expression::Constant(rng.signed(0.35))),
-                ),
-                _ => Expression::Multiply(
-                    Box::new(old),
-                    Box::new(Expression::Constant(rng.range_f32(0.65, 1.35))),
-                ),
-            };
-            Some(MutationRecord {
-                kind: MutationKind::WrapBrainExpression,
-                description: format!("wrapped brain expression for joint child {child_id}"),
-            })
-        }
     }
+}
+
+pub fn crossover_brain_subtree(
+    primary: &CreatureGenome,
+    donor: &CreatureGenome,
+    rng: &mut GenomeRng,
+) -> CreatureGenome {
+    let mut child = primary.clone();
+    child.brain.sync_with_joints(&child.joints);
+
+    let compatible_outputs: Vec<usize> = child
+        .brain
+        .outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, output)| {
+            donor
+                .brain
+                .output_for_joint(output.joint_child_id)
+                .map(|_| index)
+        })
+        .collect();
+
+    if compatible_outputs.is_empty() {
+        return child;
+    }
+
+    let output_index = compatible_outputs[rng.range_usize(compatible_outputs.len())];
+    let child_id = child.brain.outputs[output_index].joint_child_id;
+    let Some(donor_expression) = donor.brain.output_for_joint(child_id) else {
+        return child;
+    };
+
+    let donor_subtree_index = rng.range_usize(donor_expression.node_count());
+    let Some(donor_subtree) = donor_expression.subtree_clone(donor_subtree_index) else {
+        return child;
+    };
+
+    let recipient_expression = &mut child.brain.outputs[output_index].expression;
+    let recipient_subtree_index = rng.range_usize(recipient_expression.node_count());
+    let original = recipient_expression.clone();
+    recipient_expression.replace_subtree(recipient_subtree_index, donor_subtree);
+
+    if recipient_expression.validate().is_err() || child.validate().is_err() {
+        child.brain.outputs[output_index].expression = original;
+    }
+
+    child
 }
 
 fn perturb_one_constant(expression: &mut Expression, rng: &mut GenomeRng) -> bool {
@@ -434,46 +505,66 @@ fn perturb_one_constant(expression: &mut Expression, rng: &mut GenomeRng) -> boo
     }
 }
 
-fn random_expression(rng: &mut GenomeRng, depth: usize) -> Expression {
+fn random_expression(
+    rng: &mut GenomeRng,
+    depth: usize,
+    joint_ids: &[u32],
+    segment_ids: &[u32],
+) -> Expression {
     if depth == 0 || rng.chance(0.30) {
-        return random_terminal(rng);
+        return random_terminal(rng, joint_ids, segment_ids);
     }
 
     match rng.range_usize(8) {
         0 => Expression::Add(
-            Box::new(random_expression(rng, depth - 1)),
-            Box::new(random_expression(rng, depth - 1)),
+            Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
+            Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
         ),
         1 => Expression::Subtract(
-            Box::new(random_expression(rng, depth - 1)),
-            Box::new(random_expression(rng, depth - 1)),
+            Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
+            Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
         ),
         2 => Expression::Multiply(
-            Box::new(random_expression(rng, depth - 1)),
-            Box::new(random_expression(rng, depth - 1)),
+            Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
+            Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
         ),
-        3 => Expression::Negate(Box::new(random_expression(rng, depth - 1))),
-        4 => Expression::Sin(Box::new(random_expression(rng, depth - 1))),
-        5 => Expression::Cos(Box::new(random_expression(rng, depth - 1))),
+        3 => Expression::Negate(Box::new(random_expression(
+            rng,
+            depth - 1,
+            joint_ids,
+            segment_ids,
+        ))),
+        4 => Expression::Sin(Box::new(random_expression(
+            rng,
+            depth - 1,
+            joint_ids,
+            segment_ids,
+        ))),
+        5 => Expression::Cos(Box::new(random_expression(
+            rng,
+            depth - 1,
+            joint_ids,
+            segment_ids,
+        ))),
         6 => Expression::Clamp {
-            value: Box::new(random_expression(rng, depth - 1)),
+            value: Box::new(random_expression(rng, depth - 1, joint_ids, segment_ids)),
             min: -1.25,
             max: 1.25,
         },
-        _ => random_terminal(rng),
+        _ => random_terminal(rng, joint_ids, segment_ids),
     }
 }
 
-fn random_terminal(rng: &mut GenomeRng) -> Expression {
+fn random_terminal(rng: &mut GenomeRng, joint_ids: &[u32], segment_ids: &[u32]) -> Expression {
     if rng.chance(0.35) {
         Expression::Constant(rng.range_f32(-1.5, 1.5))
     } else {
-        Expression::Sensor(random_sensor(rng))
+        Expression::Sensor(random_sensor(rng, joint_ids, segment_ids))
     }
 }
 
-fn random_sensor(rng: &mut GenomeRng) -> SensorKind {
-    match rng.range_usize(12) {
+fn random_sensor(rng: &mut GenomeRng, joint_ids: &[u32], segment_ids: &[u32]) -> SensorKind {
+    match rng.range_usize(15) {
         0 => SensorKind::Time,
         1 => SensorKind::RootHeight,
         2 => SensorKind::RootVelocityX,
@@ -485,7 +576,17 @@ fn random_sensor(rng: &mut GenomeRng) -> SensorKind {
         8 => SensorKind::RootRotationX,
         9 => SensorKind::RootRotationY,
         10 => SensorKind::RootRotationZ,
-        _ => SensorKind::RootRotationW,
+        11 => SensorKind::RootRotationW,
+        12 if !joint_ids.is_empty() => {
+            SensorKind::JointAngle(joint_ids[rng.range_usize(joint_ids.len())])
+        }
+        13 if !joint_ids.is_empty() => {
+            SensorKind::JointVelocity(joint_ids[rng.range_usize(joint_ids.len())])
+        }
+        14 if !segment_ids.is_empty() => SensorKind::SegmentGroundContact(
+            segment_ids[rng.range_usize(segment_ids.len())],
+        ),
+        _ => SensorKind::Time,
     }
 }
 
