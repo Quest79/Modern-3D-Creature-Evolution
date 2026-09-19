@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    CudaDeviceInfo, DevicePerformance, ProbeSpec, SimulationConfig, schedule_gpu_work,
-};
+use crate::{CudaDeviceInfo, DevicePerformance, ProbeSpec, SimulationConfig, schedule_gpu_work};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CudaProbeBatchReport {
@@ -123,25 +121,17 @@ mod platform {
     type CuInit = unsafe extern "system" fn(u32) -> CuResult;
     type CuDeviceGetCount = unsafe extern "system" fn(*mut i32) -> CuResult;
     type CuDeviceGet = unsafe extern "system" fn(*mut CuDevice, i32) -> CuResult;
-    type CuDeviceGetName =
-        unsafe extern "system" fn(*mut c_char, i32, CuDevice) -> CuResult;
-    type CuDeviceTotalMem =
-        unsafe extern "system" fn(*mut usize, CuDevice) -> CuResult;
-    type CuDeviceGetAttribute =
-        unsafe extern "system" fn(*mut i32, i32, CuDevice) -> CuResult;
-    type CuCtxCreate =
-        unsafe extern "system" fn(*mut CuContext, u32, CuDevice) -> CuResult;
+    type CuDeviceGetName = unsafe extern "system" fn(*mut c_char, i32, CuDevice) -> CuResult;
+    type CuDeviceTotalMem = unsafe extern "system" fn(*mut usize, CuDevice) -> CuResult;
+    type CuDeviceGetAttribute = unsafe extern "system" fn(*mut i32, i32, CuDevice) -> CuResult;
+    type CuCtxCreate = unsafe extern "system" fn(*mut CuContext, u32, CuDevice) -> CuResult;
     type CuCtxDestroy = unsafe extern "system" fn(CuContext) -> CuResult;
     type CuCtxSynchronize = unsafe extern "system" fn() -> CuResult;
-    type CuMemGetInfo =
-        unsafe extern "system" fn(*mut usize, *mut usize) -> CuResult;
-    type CuMemAlloc =
-        unsafe extern "system" fn(*mut CuDevicePtr, usize) -> CuResult;
+    type CuMemGetInfo = unsafe extern "system" fn(*mut usize, *mut usize) -> CuResult;
+    type CuMemAlloc = unsafe extern "system" fn(*mut CuDevicePtr, usize) -> CuResult;
     type CuMemFree = unsafe extern "system" fn(CuDevicePtr) -> CuResult;
-    type CuMemcpyDtoH =
-        unsafe extern "system" fn(*mut c_void, CuDevicePtr, usize) -> CuResult;
-    type CuModuleLoadData =
-        unsafe extern "system" fn(*mut CuModule, *const c_void) -> CuResult;
+    type CuMemcpyDtoH = unsafe extern "system" fn(*mut c_void, CuDevicePtr, usize) -> CuResult;
+    type CuModuleLoadData = unsafe extern "system" fn(*mut CuModule, *const c_void) -> CuResult;
     type CuModuleUnload = unsafe extern "system" fn(CuModule) -> CuResult;
     type CuModuleGetFunction =
         unsafe extern "system" fn(*mut CuFunction, CuModule, *const c_char) -> CuResult;
@@ -214,9 +204,7 @@ mod platform {
                 library: *mut c_void,
                 name: &'static [u8],
             ) -> Result<*mut c_void, String> {
-                let pointer = unsafe {
-                    GetProcAddress(library, name.as_ptr().cast::<c_char>())
-                };
+                let pointer = unsafe { GetProcAddress(library, name.as_ptr().cast::<c_char>()) };
                 if pointer.is_null() {
                     let display = String::from_utf8_lossy(&name[..name.len() - 1]);
                     Err(format!("CUDA driver symbol {display} is unavailable"))
@@ -371,10 +359,7 @@ mod platform {
                 unsafe { (api.ctx_create)(&mut context, 0, device) },
                 "cuCtxCreate",
             )?;
-            let context_guard = ContextGuard {
-                api: &api,
-                context,
-            };
+            let context_guard = ContextGuard { api: &api, context };
             let mut free_memory = 0usize;
             let mut context_total = 0usize;
             check(
@@ -475,10 +460,7 @@ mod platform {
             unsafe { (api.ctx_create)(&mut context, 0, device) },
             "cuCtxCreate",
         )?;
-        let _context_guard = ContextGuard {
-            api: &api,
-            context,
-        };
+        let _context_guard = ContextGuard { api: &api, context };
 
         let ptx = CString::new(PROBE_PTX).expect("embedded PTX contains no NUL");
         let mut module = null_mut();
@@ -486,17 +468,12 @@ mod platform {
             unsafe { (api.module_load_data)(&mut module, ptx.as_ptr().cast()) },
             "cuModuleLoadData",
         )?;
-        let _module_guard = ModuleGuard {
-            api: &api,
-            module,
-        };
+        let _module_guard = ModuleGuard { api: &api, module };
 
         let kernel_name = CString::new("simulate_probes").expect("static kernel name");
         let mut function = null_mut();
         check(
-            unsafe {
-                (api.module_get_function)(&mut function, module, kernel_name.as_ptr())
-            },
+            unsafe { (api.module_get_function)(&mut function, module, kernel_name.as_ptr()) },
             "cuModuleGetFunction",
         )?;
 
@@ -569,33 +546,18 @@ mod platform {
             },
             "cuLaunchKernel",
         )?;
-        check(
-            unsafe { (api.ctx_synchronize)() },
-            "cuCtxSynchronize",
-        )?;
+        check(unsafe { (api.ctx_synchronize)() }, "cuCtxSynchronize")?;
 
         let wall_seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
 
         let mut host_y = vec![0.0_f32; assignment.count];
         let mut host_vy = vec![0.0_f32; assignment.count];
         check(
-            unsafe {
-                (api.memcpy_dtoh)(
-                    host_y.as_mut_ptr().cast::<c_void>(),
-                    out_y,
-                    byte_len,
-                )
-            },
+            unsafe { (api.memcpy_dtoh)(host_y.as_mut_ptr().cast::<c_void>(), out_y, byte_len) },
             "cuMemcpyDtoH(out_y)",
         )?;
         check(
-            unsafe {
-                (api.memcpy_dtoh)(
-                    host_vy.as_mut_ptr().cast::<c_void>(),
-                    out_vy,
-                    byte_len,
-                )
-            },
+            unsafe { (api.memcpy_dtoh)(host_vy.as_mut_ptr().cast::<c_void>(), out_vy, byte_len) },
             "cuMemcpyDtoH(out_vy)",
         )?;
 
