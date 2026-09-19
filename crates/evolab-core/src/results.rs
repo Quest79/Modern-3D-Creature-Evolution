@@ -123,7 +123,28 @@ impl EvolutionResultsFile {
 #[cfg(test)]
 mod tests {
     use super::EvolutionResultsFile;
-    use crate::{CreatureGenome, EvolutionConfig, evolve_population};
+    use crate::{CreatureGenome, EvolutionConfig, GenerationSummary, evolve_population};
+
+    fn assert_close(left: f64, right: f64) {
+        let tolerance = 1e-12 * left.abs().max(right.abs()).max(1.0);
+        assert!(
+            (left - right).abs() <= tolerance,
+            "floating telemetry changed too much: {left} != {right}"
+        );
+    }
+
+    fn clear_runtime_timing(history: &mut [GenerationSummary]) {
+        for summary in history {
+            summary.execution.wall_seconds = 0.0;
+            summary.execution.items_per_second = 0.0;
+            summary.execution.physics_steps_per_second = 0.0;
+            for device in &mut summary.execution.devices {
+                device.wall_seconds = 0.0;
+                device.items_per_second = 0.0;
+                device.physics_steps_per_second = 0.0;
+            }
+        }
+    }
 
     #[test]
     fn results_file_round_trips_json() {
@@ -146,6 +167,40 @@ mod tests {
 
         let raw = serde_json::to_string(&file).unwrap();
         let restored: EvolutionResultsFile = serde_json::from_str(&raw).unwrap();
-        assert_eq!(file, restored);
+
+        assert_eq!(file.result.history.len(), restored.result.history.len());
+        for (expected, actual) in file.result.history.iter().zip(&restored.result.history) {
+            assert_close(expected.execution.wall_seconds, actual.execution.wall_seconds);
+            assert_close(
+                expected.execution.items_per_second,
+                actual.execution.items_per_second,
+            );
+            assert_close(
+                expected.execution.physics_steps_per_second,
+                actual.execution.physics_steps_per_second,
+            );
+            assert_eq!(expected.execution.devices.len(), actual.execution.devices.len());
+            for (expected_device, actual_device) in
+                expected.execution.devices.iter().zip(&actual.execution.devices)
+            {
+                assert_eq!(expected_device.device_id, actual_device.device_id);
+                assert_eq!(expected_device.items, actual_device.items);
+                assert_close(expected_device.wall_seconds, actual_device.wall_seconds);
+                assert_close(
+                    expected_device.items_per_second,
+                    actual_device.items_per_second,
+                );
+                assert_close(
+                    expected_device.physics_steps_per_second,
+                    actual_device.physics_steps_per_second,
+                );
+            }
+        }
+
+        let mut expected = file;
+        let mut actual = restored;
+        clear_runtime_timing(&mut expected.result.history);
+        clear_runtime_timing(&mut actual.result.history);
+        assert_eq!(expected, actual);
     }
 }
