@@ -78,6 +78,14 @@ var _job_kind := ""
 var _dead_process_since_ms := -1
 var _last_state_time := 0.0
 
+var _replay_frames: Array = []
+var _replay_active := false
+var _replay_source_complete := false
+var _replay_started := false
+var _replay_kind := ""
+var _replay_clock := 0.0
+var _replay_final_time := 0.0
+
 
 func _ready() -> void:
     _load_settings()
@@ -117,6 +125,8 @@ func _process(delta: float) -> void:
         if typeof(parsed) == TYPE_DICTIONARY:
             _handle_event(parsed)
 
+    _update_replay(delta)
+
     if _job_pid > 0:
         if OS.is_process_running(_job_pid):
             _dead_process_since_ms = -1
@@ -127,18 +137,29 @@ func _process(delta: float) -> void:
         elif Time.get_ticks_msec() - _dead_process_since_ms >= 300:
             var ended_kind := _job_kind
             _job_pid = 0
-            _job_kind = ""
             _dead_process_since_ms = -1
 
-            if ended_kind == "evolution" and _load_genome_file(_evolution_champion_path()):
+            if (
+                (ended_kind == "live" or ended_kind == "creature")
+                and _replay_active
+                and _replay_source_complete
+            ):
+                # The Rust producer is expected to exit before slow-motion
+                # playback finishes. Keep the viewer alive until its buffer is
+                # consumed.
+                pass
+            elif ended_kind == "evolution" and _load_genome_file(_evolution_champion_path()):
+                _job_kind = ""
                 _has_evolution_champion = true
                 _current_genome_source = "latest evolution champion"
                 _build_creature_from_genome(_current_genome)
                 _set_status("Evolution process ended • latest champion recovered.")
+                _finish_job_controls()
             else:
+                _job_kind = ""
+                _reset_replay()
                 _set_status("Simulator process ended unexpectedly.")
-
-            _finish_job_controls()
+                _finish_job_controls()
 
 
 func _exit_tree() -> void:
@@ -1015,6 +1036,9 @@ func _on_batch_pressed() -> void:
 
 
 func _start_job(kind: String, args: PackedStringArray) -> bool:
+    if kind == "live" or kind == "creature":
+        _begin_replay(kind)
+
     _job_kind = kind
     _dead_process_since_ms = -1
     _job_pid = OS.create_process(_backend_path(), args, false)
@@ -1042,6 +1066,7 @@ func _stop_current_job() -> void:
     _job_pid = 0
     _job_kind = ""
     _dead_process_since_ms = -1
+    _reset_replay()
     _finish_job_controls()
 
 
@@ -1169,6 +1194,7 @@ func _handle_event(event: Dictionary) -> void:
             _finish_job_controls()
 
         "stream_started":
+            _begin_replay("live")
             _progress_bar.value = 0
             _last_state_time = 0.0
             _set_status(
@@ -1180,20 +1206,18 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "world_state":
-            _show_world_state(event.get("state", {}))
+            _queue_replay_state(event.get("state", {}))
 
         "stream_complete":
-            _progress_bar.value = 100
+            _replay_source_complete = true
+            _replay_final_time = float(event.get("simulated_seconds", 0.0))
             _set_status(
-                "Single-box simulation complete • %s s"
-                % _format_float(event.get("simulated_seconds", 0.0), 3)
+                "Single-box replay buffered • playing at %sx"
+                % _format_float(_playback_speed, 2)
             )
-            _job_pid = 0
-            _job_kind = ""
-            _dead_process_since_ms = -1
-            _finish_job_controls()
 
         "creature_stream_started":
+            _begin_replay("creature")
             _progress_bar.value = 0
             _last_state_time = 0.0
             _probe_mesh.visible = false
@@ -1221,18 +1245,251 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "creature_state":
-            _show_creature_state(event.get("state", {}))
+            _queue_replay_state(event.get("state", {}))
 
         "creature_stream_complete":
-            _progress_bar.value = 100
+            _replay_source_complete = true
+            _replay_final_time = float(event.get("simulated_seconds", 0.0))
             _set_status(
-                "Creature simulation complete • %s s • genome ready to save/mutate"
-                % _format_float(event.get("simulated_seconds", 0.0), 3)
+                "Creature replay buffered • playing at %sx"
+                % _format_float(_playback_speed, 2)
             )
-            _job_pid = 0
-            _job_kind = ""
-            _dead_process_since_ms = -1
-            _finish_job_controls()
+
+
+func _begin_replay(kind: String) -> void:
+    _replay_frames.clear()
+    _replay_active = true
+    _replay_source_complete = false
+    _replay_started = false
+    _replay_kind = kind
+    _replay_clock = 0.0
+    _replay_final_time = 0.0
+
+
+func _reset_replay() -> void:
+    _replay_frames.clear()
+    _replay_active = false
+    _replay_source_complete = false
+    _replay_started = false
+    _replay_kind = ""
+    _replay_clock = 0.0
+    _replay_final_time = 0.0
+
+
+func _queue_replay_state(state_value) -> void:
+    if not _replay_active or typeof(state_value) != TYPE_DICTIONARY:
+        return
+
+    _replay_frames.append(state_value)
+
+    if _replay_frames.size() == 1:
+        _apply_replay_state(state_value)
+
+
+func _update_replay(delta: float) -> void:
+    if not _replay_active or _replay_frames.is_empty():
+        return
+
+    if not _replay_started:
+        if _replay_frames.size() < 2:
+            if _replay_source_complete:
+                _apply_replay_state(_replay_frames[0])
+                _finish_replay()
+            return
+        _replay_started = true
+        _replay_clock = float(_replay_frames[0].get("simulated_seconds", 0.0))
+
+    _replay_clock += delta * _playback_speed
+
+    while (
+        _replay_frames.size() >= 2
+        and float(_replay_frames[1].get("simulated_seconds", 0.0)) <= _replay_clock
+    ):
+        _replay_frames.pop_front()
+
+    if _replay_frames.size() >= 2:
+        var first: Dictionary = _replay_frames[0]
+        var second: Dictionary = _replay_frames[1]
+        var first_time := float(first.get("simulated_seconds", 0.0))
+        var second_time := float(second.get("simulated_seconds", first_time))
+        var span := second_time - first_time
+        var weight := 0.0
+        if span > 0.000001:
+            weight = clampf((_replay_clock - first_time) / span, 0.0, 1.0)
+
+        if _replay_kind == "creature":
+            _show_creature_state(_interpolate_creature_state(first, second, weight))
+        else:
+            _show_world_state(_interpolate_world_state(first, second, weight))
+        return
+
+    _apply_replay_state(_replay_frames[0])
+
+    if _replay_source_complete:
+        var final_time := float(
+            _replay_frames[0].get("simulated_seconds", _replay_final_time)
+        )
+        if _replay_clock >= final_time:
+            _finish_replay()
+
+
+func _apply_replay_state(state: Dictionary) -> void:
+    if _replay_kind == "creature":
+        _show_creature_state(state)
+    else:
+        _show_world_state(state)
+
+
+func _finish_replay() -> void:
+    var completed_kind := _replay_kind
+    var completed_time := _replay_final_time
+    _reset_replay()
+    _job_pid = 0
+    _job_kind = ""
+    _dead_process_since_ms = -1
+    _progress_bar.value = 100
+
+    if completed_kind == "creature":
+        _set_status(
+            "Creature replay complete • %s s • genome ready to save/mutate"
+            % _format_float(completed_time, 3)
+        )
+    else:
+        _set_status(
+            "Single-box replay complete • %s s"
+            % _format_float(completed_time, 3)
+        )
+
+    _finish_job_controls()
+
+
+func _interpolate_world_state(
+    first: Dictionary,
+    second: Dictionary,
+    weight: float
+) -> Dictionary:
+    var state := first.duplicate(true)
+    state["simulated_seconds"] = lerpf(
+        float(first.get("simulated_seconds", 0.0)),
+        float(second.get("simulated_seconds", 0.0)),
+        weight
+    )
+    state["step"] = int(round(lerpf(
+        float(first.get("step", 0)),
+        float(second.get("step", 0)),
+        weight
+    )))
+    state["position"] = _lerp_vector_array(
+        first.get("position", [0.0, 0.0, 0.0]),
+        second.get("position", [0.0, 0.0, 0.0]),
+        weight
+    )
+    state["linear_velocity"] = _lerp_vector_array(
+        first.get("linear_velocity", [0.0, 0.0, 0.0]),
+        second.get("linear_velocity", [0.0, 0.0, 0.0]),
+        weight
+    )
+    state["angular_velocity"] = _lerp_vector_array(
+        first.get("angular_velocity", [0.0, 0.0, 0.0]),
+        second.get("angular_velocity", [0.0, 0.0, 0.0]),
+        weight
+    )
+    state["rotation_xyzw"] = _slerp_quaternion_array(
+        first.get("rotation_xyzw", [0.0, 0.0, 0.0, 1.0]),
+        second.get("rotation_xyzw", [0.0, 0.0, 0.0, 1.0]),
+        weight
+    )
+    return state
+
+
+func _interpolate_creature_state(
+    first: Dictionary,
+    second: Dictionary,
+    weight: float
+) -> Dictionary:
+    var state := first.duplicate(true)
+    state["simulated_seconds"] = lerpf(
+        float(first.get("simulated_seconds", 0.0)),
+        float(second.get("simulated_seconds", 0.0)),
+        weight
+    )
+    state["step"] = int(round(lerpf(
+        float(first.get("step", 0)),
+        float(second.get("step", 0)),
+        weight
+    )))
+
+    var first_bodies: Array = first.get("bodies", [])
+    var second_bodies: Array = second.get("bodies", [])
+    var body_count := mini(first_bodies.size(), second_bodies.size())
+    var bodies: Array = []
+
+    for index in range(body_count):
+        if (
+            typeof(first_bodies[index]) != TYPE_DICTIONARY
+            or typeof(second_bodies[index]) != TYPE_DICTIONARY
+        ):
+            continue
+
+        var first_body: Dictionary = first_bodies[index]
+        var second_body: Dictionary = second_bodies[index]
+        var body := first_body.duplicate(true)
+
+        body["position"] = _lerp_vector_array(
+            first_body.get("position", [0.0, 0.0, 0.0]),
+            second_body.get("position", [0.0, 0.0, 0.0]),
+            weight
+        )
+        body["linear_velocity"] = _lerp_vector_array(
+            first_body.get("linear_velocity", [0.0, 0.0, 0.0]),
+            second_body.get("linear_velocity", [0.0, 0.0, 0.0]),
+            weight
+        )
+        body["angular_velocity"] = _lerp_vector_array(
+            first_body.get("angular_velocity", [0.0, 0.0, 0.0]),
+            second_body.get("angular_velocity", [0.0, 0.0, 0.0]),
+            weight
+        )
+        body["rotation_xyzw"] = _slerp_quaternion_array(
+            first_body.get("rotation_xyzw", [0.0, 0.0, 0.0, 1.0]),
+            second_body.get("rotation_xyzw", [0.0, 0.0, 0.0, 1.0]),
+            weight
+        )
+        bodies.append(body)
+
+    state["bodies"] = bodies
+    return state
+
+
+func _lerp_vector_array(first_value, second_value, weight: float) -> Array:
+    var first := _vector3_from_array(first_value)
+    var second := _vector3_from_array(second_value)
+    var value := first.lerp(second, weight)
+    return [value.x, value.y, value.z]
+
+
+func _slerp_quaternion_array(first_value, second_value, weight: float) -> Array:
+    var first := _quaternion_from_array(first_value)
+    var second := _quaternion_from_array(second_value)
+    var value := first.slerp(second, weight).normalized()
+    return [value.x, value.y, value.z, value.w]
+
+
+func _vector3_from_array(value) -> Vector3:
+    if typeof(value) == TYPE_ARRAY and value.size() >= 3:
+        return Vector3(float(value[0]), float(value[1]), float(value[2]))
+    return Vector3.ZERO
+
+
+func _quaternion_from_array(value) -> Quaternion:
+    if typeof(value) == TYPE_ARRAY and value.size() >= 4:
+        return Quaternion(
+            float(value[0]),
+            float(value[1]),
+            float(value[2]),
+            float(value[3])
+        ).normalized()
+    return Quaternion.IDENTITY
 
 
 func _build_creature_from_genome(genome_value) -> void:
