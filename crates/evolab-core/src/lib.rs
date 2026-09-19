@@ -30,9 +30,7 @@ pub use evolution::{
     GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult,
     crossover_brain_subtree, mutate_genome, random_creature,
 };
-pub use fitness::{
-    FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, evaluate_fitness,
-};
+pub use fitness::{FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, evaluate_fitness};
 pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
 };
