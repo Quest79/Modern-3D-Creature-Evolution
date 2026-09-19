@@ -1006,6 +1006,20 @@ func _on_results_pressed() -> void:
     _results_window.popup_centered()
 
 
+func _on_load_results_pressed() -> void:
+    if _job_pid > 0:
+        return
+    _results_load_dialog.popup_centered_ratio(0.72)
+
+
+func _on_results_load_file_selected(path: String) -> void:
+    if _load_results_file(path):
+        _set_status("Loaded evolution results: %s" % path)
+        _results_window.popup_centered()
+    else:
+        _set_status("Could not load evolution results: %s" % path)
+
+
 func _refresh_results_window() -> void:
     if _results_history_list == null:
         return
@@ -1013,8 +1027,11 @@ func _refresh_results_window() -> void:
     _results_history_list.clear()
     _results_champion_list.clear()
     _results_lineage_list.clear()
+    _results_species_list.clear()
     _results_best_line.clear_points()
     _results_average_line.clear_points()
+    _results_morphology_line.clear_points()
+    _results_class_line.clear_points()
 
     if _results_data.is_empty():
         _results_detail.text = "[color=#9aa7bd]No evolution results loaded.[/color]"
@@ -1081,6 +1098,7 @@ func _refresh_results_window() -> void:
 
     _refresh_results_analysis()
     call_deferred("_refresh_results_graph")
+    call_deferred("_refresh_diversity_graph")
 
 
 func _refresh_results_graph() -> void:
@@ -1167,6 +1185,23 @@ func _show_result_generation(index: int) -> void:
     var pareto: Array = summary.get("pareto_front", [])
     var map_cells: Array = summary.get("map_elites", [])
 
+    _results_species_list.clear()
+    for species_value in species:
+        if typeof(species_value) != TYPE_DICTIONARY:
+            continue
+        var species_entry: Dictionary = species_value
+        _results_species_list.add_item(
+            "Class %s   seg %s   brain bucket %s   members %s   best %.4f   avg %.4f"
+            % [
+                str(species_entry.get("species_id", 0)),
+                str(species_entry.get("segment_count", 0)),
+                str(species_entry.get("brain_node_bucket", 0)),
+                str(species_entry.get("members", 0)),
+                float(species_entry.get("best_fitness", 0.0)),
+                float(species_entry.get("average_fitness", 0.0)),
+            ]
+        )
+
     _results_detail.text = (
         "[b]Generation %d[/b]
 
@@ -1214,6 +1249,62 @@ func _show_result_generation(index: int) -> void:
             float(diversity.get("brain_nodes_stddev", 0.0)),
         ]
     )
+
+
+func _refresh_diversity_graph() -> void:
+    if _results_data.is_empty() or _results_diversity_graph == null:
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var history: Array = result.get("history", [])
+    if history.is_empty():
+        return
+
+    var morphology_values: Array[float] = []
+    var class_values: Array[float] = []
+    var maximum := 1.0
+
+    for summary_value in history:
+        if typeof(summary_value) != TYPE_DICTIONARY:
+            continue
+        var summary: Dictionary = summary_value
+        var diversity: Dictionary = summary.get("diversity", {})
+        var morphology_count := float(
+            diversity.get("unique_morphologies", 0)
+        )
+        var class_count := float(diversity.get("analysis_species_count", 0))
+        morphology_values.append(morphology_count)
+        class_values.append(class_count)
+        maximum = maxf(maximum, maxf(morphology_count, class_count))
+
+    if morphology_values.is_empty():
+        return
+
+    var graph_size := _results_diversity_graph.size
+    if graph_size.x < 100.0:
+        graph_size.x = 900.0
+    if graph_size.y < 100.0:
+        graph_size.y = 180.0
+
+    var left := 12.0
+    var right := graph_size.x - 12.0
+    var top := 12.0
+    var bottom := graph_size.y - 12.0
+    var denominator := maxf(float(morphology_values.size() - 1), 1.0)
+
+    _results_morphology_line.clear_points()
+    _results_class_line.clear_points()
+
+    for index in range(morphology_values.size()):
+        var x := lerpf(left, right, float(index) / denominator)
+        var morphology_y := lerpf(
+            bottom,
+            top,
+            morphology_values[index] / maximum
+        )
+        var class_y := lerpf(bottom, top, class_values[index] / maximum)
+        _results_morphology_line.add_point(Vector2(x, morphology_y))
+        _results_class_line.add_point(Vector2(x, class_y))
 
 
 func _on_result_champion_selected(_index: int) -> void:
@@ -2143,6 +2234,15 @@ func _build_file_dialogs() -> void:
     _experiment_load_dialog.filters = PackedStringArray(["*.evo ; EvoLab Experiment"])
     _experiment_load_dialog.file_selected.connect(_on_experiment_load_file_selected)
     add_child(_experiment_load_dialog)
+
+    _results_load_dialog = FileDialog.new()
+    _results_load_dialog.access = FileDialog.ACCESS_FILESYSTEM
+    _results_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+    _results_load_dialog.filters = PackedStringArray([
+        "*.evoresults ; EvoLab Evolution Results"
+    ])
+    _results_load_dialog.file_selected.connect(_on_results_load_file_selected)
+    add_child(_results_load_dialog)
 
 
 func _add_number_row(
