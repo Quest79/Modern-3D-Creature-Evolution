@@ -2,8 +2,8 @@ use rayon::{ThreadPoolBuilder, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CreatureGenome, CreatureSimulator, GenomeRng, MutationConfig, SimulationConfig,
-    crossover_brain_subtree, mutate_genome,
+    CreatureGenome, FitnessConfig, FitnessMetrics, GenomeRng, MutationConfig, SimulationConfig,
+    crossover_brain_subtree, evaluate_fitness, mutate_genome,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -17,6 +17,7 @@ pub struct EvolutionConfig {
     pub seed: u64,
     pub worker_threads: usize,
     pub simulation: SimulationConfig,
+    pub fitness: FitnessConfig,
     pub mutation: MutationConfig,
 }
 
@@ -35,6 +36,7 @@ impl Default for EvolutionConfig {
                 duration_seconds: 5.0,
                 ..SimulationConfig::default()
             },
+            fitness: FitnessConfig::default(),
             mutation: MutationConfig::default(),
         }
     }
@@ -43,6 +45,7 @@ impl Default for EvolutionConfig {
 impl EvolutionConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.simulation.validate()?;
+        self.fitness.validate()?;
         self.mutation.validate()?;
 
         if self.population_size < 2 {
@@ -72,7 +75,7 @@ impl EvolutionConfig {
 pub struct EvaluatedCreature {
     pub genome: CreatureGenome,
     pub fitness: f32,
-    pub distance_traveled: f32,
+    pub metrics: FitnessMetrics,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -82,6 +85,7 @@ pub struct GenerationSummary {
     pub average_fitness: f32,
     pub worst_fitness: f32,
     pub best_distance: f32,
+    pub best_metrics: FitnessMetrics,
     pub best_segments: usize,
     pub best_joints: usize,
     pub best_brain_nodes: usize,
@@ -97,6 +101,7 @@ pub struct EvolutionResult {
     pub champion: CreatureGenome,
     pub champion_fitness: f32,
     pub champion_distance: f32,
+    pub champion_metrics: FitnessMetrics,
     pub generations_completed: usize,
     pub evaluations_completed: usize,
     pub history: Vec<GenerationSummary>,
@@ -130,7 +135,8 @@ where
     let mut global_champion: Option<EvaluatedCreature> = None;
 
     for generation in 1..=config.generations {
-        let mut evaluated = evaluate_population(&pool, &population, &config.simulation)?;
+        let mut evaluated =
+            evaluate_population(&pool, &population, &config.simulation, &config.fitness)?;
         evaluations_completed += evaluated.len();
 
         evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
@@ -156,7 +162,8 @@ where
             best_fitness: best.fitness,
             average_fitness: average,
             worst_fitness: worst.fitness,
-            best_distance: best.distance_traveled,
+            best_distance: best.metrics.distance,
+            best_metrics: best.metrics,
             best_segments: best.genome.segments.len(),
             best_joints: best.genome.joints.len(),
             best_brain_nodes: best.genome.brain.node_count(),
@@ -180,7 +187,8 @@ where
     Ok(EvolutionResult {
         champion: champion.genome,
         champion_fitness: champion.fitness,
-        champion_distance: champion.distance_traveled,
+        champion_distance: champion.metrics.distance,
+        champion_metrics: champion.metrics,
         generations_completed: config.generations,
         evaluations_completed,
         history,
@@ -209,11 +217,12 @@ fn evaluate_population(
     pool: &rayon::ThreadPool,
     population: &[CreatureGenome],
     simulation: &SimulationConfig,
+    fitness: &FitnessConfig,
 ) -> Result<Vec<EvaluatedCreature>, String> {
     let results: Vec<Result<EvaluatedCreature, String>> = pool.install(|| {
         population
             .par_iter()
-            .map(|genome| evaluate_creature(genome, simulation))
+            .map(|genome| evaluate_creature(genome, simulation, fitness))
             .collect()
     });
 
@@ -223,20 +232,14 @@ fn evaluate_population(
 fn evaluate_creature(
     genome: &CreatureGenome,
     simulation: &SimulationConfig,
+    fitness: &FitnessConfig,
 ) -> Result<EvaluatedCreature, String> {
-    let simulator = CreatureSimulator;
-    let mut ignore = |_snapshot: &crate::CreatureSnapshot| Ok(());
-    let report = simulator.run_streaming(simulation, genome, usize::MAX, &mut ignore)?;
-
-    let start = genome.segments[0].initial_position;
-    let dx = report.final_root_position[0] - start[0];
-    let dz = report.final_root_position[2] - start[2];
-    let distance = (dx * dx + dz * dz).sqrt();
+    let result = evaluate_fitness(genome, simulation, fitness)?;
 
     Ok(EvaluatedCreature {
         genome: genome.clone(),
-        fitness: distance,
-        distance_traveled: distance,
+        fitness: result.score,
+        metrics: result.metrics,
     })
 }
 
