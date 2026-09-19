@@ -55,6 +55,8 @@ The editor also exposes:
 - pit depth
 
 Obstacle placement and size variation are deterministic for a given world seed.
+The same seed also changes the secondary procedural hill shape while keeping the
+terrain anchored at the creature start position.
 
 Gaps remove ground collision tiles. Pits replace the normal floor with a lower
 floor. Walls and blocks are static collision boxes.
