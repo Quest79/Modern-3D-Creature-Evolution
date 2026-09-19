@@ -112,6 +112,11 @@ var _camera_speed_spin: SpinBox
 var _mouse_sensitivity_spin: SpinBox
 var _playback_speed_spin: SpinBox
 var _hud_resize_handle: ColorRect
+var _walkthrough_window: Window
+var _walkthrough_text: RichTextLabel
+var _walkthrough_back_button: Button
+var _walkthrough_next_button: Button
+var _walkthrough_run_button: Button
 
 var _probe_mesh: MeshInstance3D
 var _camera: Camera3D
@@ -177,6 +182,8 @@ var _hud_dragging := false
 var _mouse_looking := false
 var _camera_yaw := 0.0
 var _camera_pitch := 0.0
+var _walkthrough_step := 0
+var _walkthrough_completed := false
 
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
@@ -210,6 +217,7 @@ func _ready() -> void:
     _build_settings_window()
     _build_results_window()
     _build_file_dialogs()
+    _build_walkthrough_window()
     get_viewport().size_changed.connect(_update_layout)
     _update_layout()
 
@@ -226,6 +234,7 @@ func _ready() -> void:
     _load_capabilities()
     _refresh_world_preview()
     _set_status("Ready • backend connected on localhost:%d" % _event_port)
+    call_deferred("_maybe_show_first_run_walkthrough")
 
 
 func _process(delta: float) -> void:
@@ -420,26 +429,82 @@ func _build_ui() -> void:
 
     column.add_child(HSeparator.new())
 
-    var editor_heading := Label.new()
-    editor_heading.text = "Creature generation"
-    _section_headings.append(editor_heading)
-    column.add_child(editor_heading)
+    var quick_section := _add_collapsible_section(column, "Quick Test / Main Controls", true)
 
-    _seed_spin = _add_number_row(column, "Seed", 1, 999999999, 1, 1)
-    _mutation_spin = _add_number_row(column, "Mutation operations", 0, 500, 12, 1)
-    _random_segments_spin = _add_number_row(column, "Random creature segments", 2, 40, 5, 1)
-    _max_segments_spin = _add_number_row(column, "Maximum segments", 2, 40, 12, 1)
+    var guide_button := Button.new()
+    guide_button.text = "▶ Guided First Test"
+    guide_button.tooltip_text = "Walk through a safe first creature simulation and explain what each part does."
+    guide_button.pressed.connect(_show_walkthrough)
+    quick_section.add_child(guide_button)
+
+    var quick_test_row := HBoxContainer.new()
+    quick_test_row.add_theme_constant_override("separation", 6)
+    quick_section.add_child(quick_test_row)
+
+    _seed_creature_button = Button.new()
+    _seed_creature_button.text = "Run Seed Creature"
+    _seed_creature_button.tooltip_text = "Run the known three-segment creature in the current world."
+    _seed_creature_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _seed_creature_button.pressed.connect(_on_seed_creature_pressed)
+    quick_test_row.add_child(_seed_creature_button)
+
+    _live_button = Button.new()
+    _live_button.text = "Single Box"
+    _live_button.tooltip_text = "Run the simplest physics sanity check."
+    _live_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _live_button.pressed.connect(_on_live_pressed)
+    quick_test_row.add_child(_live_button)
+
+    _batch_button = Button.new()
+    _batch_button.text = "Benchmark"
+    _batch_button.tooltip_text = "Run many independent simulations and measure throughput."
+    _batch_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _batch_button.pressed.connect(_on_batch_pressed)
+    quick_test_row.add_child(_batch_button)
+
+    var quick_evolution_row := HBoxContainer.new()
+    quick_evolution_row.add_theme_constant_override("separation", 6)
+    quick_section.add_child(quick_evolution_row)
+
+    _evolve_button = Button.new()
+    _evolve_button.text = "🧬 Start Evolution"
+    _evolve_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _evolve_button.pressed.connect(_on_evolve_pressed)
+    quick_evolution_row.add_child(_evolve_button)
+
+    _resume_evolution_button = Button.new()
+    _resume_evolution_button.text = "Resume"
+    _resume_evolution_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _resume_evolution_button.disabled = not FileAccess.file_exists(
+        _evolution_checkpoint_path()
+    )
+    _resume_evolution_button.pressed.connect(_on_resume_evolution_pressed)
+    quick_evolution_row.add_child(_resume_evolution_button)
+
+    _watch_champion_button = Button.new()
+    _watch_champion_button.text = "Watch Champion"
+    _watch_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _watch_champion_button.disabled = true
+    _watch_champion_button.pressed.connect(_on_watch_champion_pressed)
+    quick_evolution_row.add_child(_watch_champion_button)
+
+    _stop_button = Button.new()
+    _stop_button.text = "■ Stop Current Run"
+    _stop_button.custom_minimum_size = Vector2(0, 32)
+    _stop_button.disabled = true
+    _stop_button.pressed.connect(_on_stop_pressed)
+    quick_section.add_child(_stop_button)
+
+    var creature_section := _add_collapsible_section(column, "Creature Generation & Files", false)
+
+    _seed_spin = _add_number_row(creature_section, "Seed", 1, 999999999, 1, 1)
+    _mutation_spin = _add_number_row(creature_section, "Mutation operations", 0, 500, 12, 1)
+    _random_segments_spin = _add_number_row(creature_section, "Random creature segments", 2, 40, 5, 1)
+    _max_segments_spin = _add_number_row(creature_section, "Maximum segments", 2, 40, 12, 1)
 
     var creature_row := HBoxContainer.new()
     creature_row.add_theme_constant_override("separation", 6)
-    column.add_child(creature_row)
-
-    _seed_creature_button = Button.new()
-    _seed_creature_button.text = "Seed"
-    _seed_creature_button.tooltip_text = "Run the known three-segment seed creature."
-    _seed_creature_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    _seed_creature_button.pressed.connect(_on_seed_creature_pressed)
-    creature_row.add_child(_seed_creature_button)
+    creature_section.add_child(creature_row)
 
     _mutate_button = Button.new()
     _mutate_button.text = "Mutate Current"
@@ -457,7 +522,7 @@ func _build_ui() -> void:
 
     var file_row := HBoxContainer.new()
     file_row.add_theme_constant_override("separation", 6)
-    column.add_child(file_row)
+    creature_section.add_child(file_row)
 
     _save_button = Button.new()
     _save_button.text = "Save Genome..."
@@ -474,7 +539,7 @@ func _build_ui() -> void:
 
     var experiment_row := HBoxContainer.new()
     experiment_row.add_theme_constant_override("separation", 6)
-    column.add_child(experiment_row)
+    creature_section.add_child(experiment_row)
 
     _save_experiment_button = Button.new()
     _save_experiment_button.text = "Save Experiment..."
@@ -494,20 +559,15 @@ func _build_ui() -> void:
     _fork_experiment_button.pressed.connect(_on_fork_experiment_pressed)
     experiment_row.add_child(_fork_experiment_button)
 
-    column.add_child(HSeparator.new())
+    var evolution_section := _add_collapsible_section(column, "Evolution Settings", false)
 
-    var evolution_heading := Label.new()
-    evolution_heading.text = "Evolution"
-    _section_headings.append(evolution_heading)
-    column.add_child(evolution_heading)
-
-    _population_spin = _add_number_row(column, "Population", 2, 10000, 50, 1)
-    _generations_spin = _add_number_row(column, "Generations", 1, 10000, 100, 1)
-    _tournament_spin = _add_number_row(column, "Tournament size", 1, 1000, 7, 1)
-    _elite_spin = _add_number_row(column, "Elite kept", 1, 999, 2, 1)
-    _crossover_spin = _add_number_row(column, "Brain crossover", 0.0, 1.0, 0.5, 0.05)
+    _population_spin = _add_number_row(evolution_section, "Population", 2, 10000, 50, 1)
+    _generations_spin = _add_number_row(evolution_section, "Generations", 1, 10000, 100, 1)
+    _tournament_spin = _add_number_row(evolution_section, "Tournament size", 1, 1000, 7, 1)
+    _elite_spin = _add_number_row(evolution_section, "Elite kept", 1, 999, 2, 1)
+    _crossover_spin = _add_number_row(evolution_section, "Brain crossover", 0.0, 1.0, 0.5, 0.05)
     _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
-    _evolution_mutations_spin = _add_number_row(column, "Mutations / child", 1, 500, 8, 1)
+    _evolution_mutations_spin = _add_number_row(evolution_section, "Mutations / child", 1, 500, 8, 1)
     _structural_mutation_spin = _add_number_row(
         column,
         "Structural mutation chance",
@@ -525,7 +585,7 @@ func _build_ui() -> void:
     )
 
     var aggregation_row := HBoxContainer.new()
-    column.add_child(aggregation_row)
+    evolution_section.add_child(aggregation_row)
     var aggregation_label := Label.new()
     aggregation_label.text = "Trial aggregation"
     aggregation_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -545,25 +605,22 @@ func _build_ui() -> void:
     _motor_strength_spin.value_changed.connect(_on_schedule_base_changed)
     _trials_spin.value_changed.connect(_on_schedule_base_changed)
 
-    var fitness_heading := Label.new()
-    fitness_heading.text = "Fitness weights"
-    _section_headings.append(fitness_heading)
-    column.add_child(fitness_heading)
+    var fitness_section := _add_collapsible_section(column, "Fitness Weights", false)
 
     _fitness_distance_spin = _add_number_row(
-        column, "Distance", -100.0, 100.0, _fitness_distance_weight, 0.05
+        fitness_section, "Distance", -100.0, 100.0, _fitness_distance_weight, 0.05
     )
     _fitness_speed_spin = _add_number_row(
-        column, "Average speed", -100.0, 100.0, _fitness_speed_weight, 0.05
+        fitness_section, "Average speed", -100.0, 100.0, _fitness_speed_weight, 0.05
     )
     _fitness_upright_spin = _add_number_row(
-        column, "Upright", -100.0, 100.0, _fitness_upright_weight, 0.05
+        fitness_section, "Upright", -100.0, 100.0, _fitness_upright_weight, 0.05
     )
     _fitness_stability_spin = _add_number_row(
-        column, "Stability", -100.0, 100.0, _fitness_stability_weight, 0.05
+        fitness_section, "Stability", -100.0, 100.0, _fitness_stability_weight, 0.05
     )
     _fitness_energy_spin = _add_number_row(
-        column, "Energy / effort", -100.0, 100.0, _fitness_energy_weight, 0.01
+        fitness_section, "Energy / effort", -100.0, 100.0, _fitness_energy_weight, 0.01
     )
     _fitness_energy_spin.tooltip_text = "Use a negative weight to penalize actuator effort."
 
@@ -576,15 +633,12 @@ func _build_ui() -> void:
     ]:
         spin.value_changed.connect(_on_fitness_weights_changed)
 
-    column.add_child(HSeparator.new())
+    fitness_section.add_child(HSeparator.new())
 
-    var world_heading := Label.new()
-    world_heading.text = "World / terrain"
-    _section_headings.append(world_heading)
-    column.add_child(world_heading)
+    var world_section := _add_collapsible_section(column, "World / Terrain", false)
 
     var terrain_row := HBoxContainer.new()
-    column.add_child(terrain_row)
+    world_section.add_child(terrain_row)
     var terrain_label := Label.new()
     terrain_label.text = "Terrain"
     terrain_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -598,32 +652,32 @@ func _build_ui() -> void:
     _terrain_option.item_selected.connect(_on_terrain_selected)
     terrain_row.add_child(_terrain_option)
 
-    _world_seed_spin = _add_number_row(column, "World seed", 0, 999999999, _world_seed, 1)
-    _gravity_x_spin = _add_number_row(column, "Gravity X", -30.0, 30.0, _gravity_x, 0.1)
-    _gravity_y_spin = _add_number_row(column, "Gravity Y", -30.0, 30.0, _gravity_y, 0.1)
-    _gravity_z_spin = _add_number_row(column, "Gravity Z", -30.0, 30.0, _gravity_z, 0.1)
+    _world_seed_spin = _add_number_row(world_section, "World seed", 0, 999999999, _world_seed, 1)
+    _gravity_x_spin = _add_number_row(world_section, "Gravity X", -30.0, 30.0, _gravity_x, 0.1)
+    _gravity_y_spin = _add_number_row(world_section, "Gravity Y", -30.0, 30.0, _gravity_y, 0.1)
+    _gravity_z_spin = _add_number_row(world_section, "Gravity Z", -30.0, 30.0, _gravity_z, 0.1)
     _ground_friction_spin = _add_number_row(
-        column, "Ground friction", 0.0, 5.0, _ground_friction, 0.05
+        world_section, "Ground friction", 0.0, 5.0, _ground_friction, 0.05
     )
-    _slope_spin = _add_number_row(column, "Slope angle (deg)", -35.0, 35.0, _slope_degrees, 0.5)
-    _hill_height_spin = _add_number_row(column, "Hill height", 0.0, 10.0, _hill_height, 0.05)
+    _slope_spin = _add_number_row(world_section, "Slope angle (deg)", -35.0, 35.0, _slope_degrees, 0.5)
+    _hill_height_spin = _add_number_row(world_section, "Hill height", 0.0, 10.0, _hill_height, 0.05)
     _hill_wavelength_spin = _add_number_row(
-        column, "Hill wavelength", 1.0, 100.0, _hill_wavelength, 0.25
+        world_section, "Hill wavelength", 1.0, 100.0, _hill_wavelength, 0.25
     )
     _stair_height_spin = _add_number_row(
-        column, "Stair height", 0.01, 5.0, _stair_height, 0.05
+        world_section, "Stair height", 0.01, 5.0, _stair_height, 0.05
     )
     _stair_depth_spin = _add_number_row(
-        column, "Stair depth", 0.1, 20.0, _stair_depth, 0.05
+        world_section, "Stair depth", 0.1, 20.0, _stair_depth, 0.05
     )
 
     var obstacle_label := Label.new()
     obstacle_label.text = "Obstacle types"
-    column.add_child(obstacle_label)
+    world_section.add_child(obstacle_label)
 
     var obstacle_row_a := HBoxContainer.new()
     obstacle_row_a.add_theme_constant_override("separation", 10)
-    column.add_child(obstacle_row_a)
+    world_section.add_child(obstacle_row_a)
     _walls_check = CheckBox.new()
     _walls_check.text = "Walls"
     _walls_check.button_pressed = _walls_enabled
@@ -635,7 +689,7 @@ func _build_ui() -> void:
 
     var obstacle_row_b := HBoxContainer.new()
     obstacle_row_b.add_theme_constant_override("separation", 10)
-    column.add_child(obstacle_row_b)
+    world_section.add_child(obstacle_row_b)
     _gaps_check = CheckBox.new()
     _gaps_check.text = "Gaps"
     _gaps_check.button_pressed = _gaps_enabled
@@ -646,19 +700,19 @@ func _build_ui() -> void:
     obstacle_row_b.add_child(_pits_check)
 
     _obstacle_count_spin = _add_number_row(
-        column, "Obstacle count", 0, 100, _obstacle_count, 1
+        world_section, "Obstacle count", 0, 100, _obstacle_count, 1
     )
     _obstacle_spacing_spin = _add_number_row(
-        column, "Obstacle spacing", 1.0, 50.0, _obstacle_spacing, 0.25
+        world_section, "Obstacle spacing", 1.0, 50.0, _obstacle_spacing, 0.25
     )
     _obstacle_size_spin = _add_number_row(
-        column, "Obstacle size", 0.1, 10.0, _obstacle_size, 0.05
+        world_section, "Obstacle size", 0.1, 10.0, _obstacle_size, 0.05
     )
     _gap_width_spin = _add_number_row(
-        column, "Gap width", 0.1, 10.0, _gap_width, 0.05
+        world_section, "Gap width", 0.1, 10.0, _gap_width, 0.05
     )
     _pit_depth_spin = _add_number_row(
-        column, "Pit depth", 0.1, 20.0, _pit_depth, 0.05
+        world_section, "Pit depth", 0.1, 20.0, _pit_depth, 0.05
     )
 
     for world_spin in [
@@ -683,12 +737,9 @@ func _build_ui() -> void:
     for world_check in [_walls_check, _blocks_check, _gaps_check, _pits_check]:
         world_check.toggled.connect(_on_world_toggle_changed)
 
-    column.add_child(HSeparator.new())
+    world_section.add_child(HSeparator.new())
 
-    var timeline_heading := Label.new()
-    timeline_heading.text = "Experiment timeline"
-    _section_headings.append(timeline_heading)
-    column.add_child(timeline_heading)
+    var timeline_section := _add_collapsible_section(column, "Experiment Timeline", false)
 
     var timeline_help := Label.new()
     timeline_help.text = (
@@ -697,14 +748,14 @@ func _build_ui() -> void:
     )
     timeline_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     timeline_help.modulate = Color(0.70, 0.76, 0.86)
-    column.add_child(timeline_help)
+    timeline_section.add_child(timeline_help)
 
     _timeline_generation_spin = _add_number_row(
-        column, "Keyframe generation", 1, 10000, 1, 1
+        timeline_section, "Keyframe generation", 1, 10000, 1, 1
     )
 
     var condition_row := HBoxContainer.new()
-    column.add_child(condition_row)
+    timeline_section.add_child(condition_row)
     var condition_label := Label.new()
     condition_label.text = "Activation"
     condition_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -722,18 +773,18 @@ func _build_ui() -> void:
     condition_row.add_child(_timeline_condition_option)
 
     _timeline_condition_value_spin = _add_number_row(
-        column, "Condition threshold", -100000.0, 100000.0, 1.0, 0.1
+        timeline_section, "Condition threshold", -100000.0, 100000.0, 1.0, 0.1
     )
     _timeline_condition_value_spin.editable = false
 
     _timeline_list = ItemList.new()
     _timeline_list.custom_minimum_size = Vector2(0, 115)
     _timeline_list.select_mode = ItemList.SELECT_SINGLE
-    column.add_child(_timeline_list)
+    timeline_section.add_child(_timeline_list)
 
     var timeline_buttons := HBoxContainer.new()
     timeline_buttons.add_theme_constant_override("separation", 6)
-    column.add_child(timeline_buttons)
+    timeline_section.add_child(timeline_buttons)
 
     _add_timeline_button = Button.new()
     _add_timeline_button.text = "Add Snapshot"
@@ -755,43 +806,12 @@ func _build_ui() -> void:
 
     _refresh_timeline_list()
 
-    var evolution_row := HBoxContainer.new()
-    evolution_row.add_theme_constant_override("separation", 6)
-    column.add_child(evolution_row)
+    var sim_section := _add_collapsible_section(column, "Simulation / Benchmark Details", false)
 
-    _evolve_button = Button.new()
-    _evolve_button.text = "🧬 Start Evolution"
-    _evolve_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    _evolve_button.pressed.connect(_on_evolve_pressed)
-    evolution_row.add_child(_evolve_button)
-
-    _resume_evolution_button = Button.new()
-    _resume_evolution_button.text = "Resume"
-    _resume_evolution_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    _resume_evolution_button.disabled = not FileAccess.file_exists(
-        _evolution_checkpoint_path()
-    )
-    _resume_evolution_button.pressed.connect(_on_resume_evolution_pressed)
-    evolution_row.add_child(_resume_evolution_button)
-
-    _watch_champion_button = Button.new()
-    _watch_champion_button.text = "Watch Champion"
-    _watch_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    _watch_champion_button.disabled = true
-    _watch_champion_button.pressed.connect(_on_watch_champion_pressed)
-    evolution_row.add_child(_watch_champion_button)
-
-    column.add_child(HSeparator.new())
-
-    var sim_heading := Label.new()
-    sim_heading.text = "Simulation / benchmark"
-    _section_headings.append(sim_heading)
-    column.add_child(sim_heading)
-
-    _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 8.0, 0.1)
-    _dt_spin = _add_number_row(column, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
+    _seconds_spin = _add_number_row(sim_section, "Seconds / simulation", 0.1, 120.0, 8.0, 0.1)
+    _dt_spin = _add_number_row(sim_section, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
     _playback_speed_spin = _add_number_row(
-        column,
+        sim_section,
         "Playback speed",
         0.01,
         2.0,
@@ -801,11 +821,11 @@ func _build_ui() -> void:
     _playback_speed_spin.suffix = "x"
     _playback_speed_spin.tooltip_text = "Live viewer speed. 0.01x = 100× slower, 2.00x = 2× faster."
     _playback_speed_spin.value_changed.connect(_on_playback_speed_changed)
-    _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
-    _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
+    _batch_spin = _add_number_row(sim_section, "Parallel simulations", 1, 1000000, 1000, 1)
+    _workers_spin = _add_number_row(sim_section, "CPU workers (0 = auto)", 0, 256, 0, 1)
 
     var accelerator_row := HBoxContainer.new()
-    column.add_child(accelerator_row)
+    sim_section.add_child(accelerator_row)
     var accelerator_label := Label.new()
     accelerator_label.text = "Execution backend"
     accelerator_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -820,7 +840,7 @@ func _build_ui() -> void:
     accelerator_row.add_child(_accelerator_option)
 
     var gpu_ids_row := HBoxContainer.new()
-    column.add_child(gpu_ids_row)
+    sim_section.add_child(gpu_ids_row)
     var gpu_ids_label := Label.new()
     gpu_ids_label.text = "CUDA GPU IDs"
     gpu_ids_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -833,13 +853,13 @@ func _build_ui() -> void:
     gpu_ids_row.add_child(_gpu_ids_edit)
 
     _gpu_batch_spin = _add_number_row(
-        column, "GPU batch size", 1, 1000000, _gpu_batch_size, 1
+        sim_section, "GPU batch size", 1, 1000000, _gpu_batch_size, 1
     )
     _gpu_max_parts_spin = _add_number_row(
-        column, "GPU max parts", 1, 1024, _gpu_max_parts, 1
+        sim_section, "GPU max parts", 1, 1024, _gpu_max_parts, 1
     )
     _gpu_max_joints_spin = _add_number_row(
-        column, "GPU max joints", 1, 2048, _gpu_max_joints, 1
+        sim_section, "GPU max joints", 1, 2048, _gpu_max_joints, 1
     )
     for accelerator_spin in [_gpu_batch_spin, _gpu_max_parts_spin, _gpu_max_joints_spin]:
         accelerator_spin.value_changed.connect(_on_accelerator_number_changed)
@@ -848,10 +868,10 @@ func _build_ui() -> void:
     _cpu_fallback_check.text = "Allow CPU fallback for unsupported accelerator work"
     _cpu_fallback_check.button_pressed = _cpu_fallback
     _cpu_fallback_check.toggled.connect(_on_cpu_fallback_toggled)
-    column.add_child(_cpu_fallback_check)
+    sim_section.add_child(_cpu_fallback_check)
 
     var throughput_row := HBoxContainer.new()
-    column.add_child(throughput_row)
+    sim_section.add_child(throughput_row)
     var throughput_label := Label.new()
     throughput_label.text = "Throughput policy"
     throughput_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -864,55 +884,34 @@ func _build_ui() -> void:
     _throughput_option.item_selected.connect(_on_throughput_selected)
     throughput_row.add_child(_throughput_option)
 
-    var utility_row := HBoxContainer.new()
-    utility_row.add_theme_constant_override("separation", 6)
-    column.add_child(utility_row)
-
-    _live_button = Button.new()
-    _live_button.text = "Single Box"
-    _live_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    _live_button.pressed.connect(_on_live_pressed)
-    utility_row.add_child(_live_button)
-
-    _batch_button = Button.new()
-    _batch_button.text = "Benchmark"
-    _batch_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    _batch_button.pressed.connect(_on_batch_pressed)
-    utility_row.add_child(_batch_button)
-
-    _stop_button = Button.new()
-    _stop_button.text = "■ Stop"
-    _stop_button.custom_minimum_size = Vector2(0, 32)
-    _stop_button.disabled = true
-    _stop_button.pressed.connect(_on_stop_pressed)
-    column.add_child(_stop_button)
+    var status_section := _add_collapsible_section(column, "Status / Results", true)
 
     _status_label = Label.new()
     _status_label.text = "Starting..."
     _status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-    column.add_child(_status_label)
+    status_section.add_child(_status_label)
 
     _progress_bar = ProgressBar.new()
     _progress_bar.min_value = 0
     _progress_bar.max_value = 100
     _progress_bar.value = 0
     _progress_bar.show_percentage = true
-    column.add_child(_progress_bar)
+    status_section.add_child(_progress_bar)
 
-    column.add_child(HSeparator.new())
+    status_section.add_child(HSeparator.new())
 
     _metrics = RichTextLabel.new()
     _metrics.bbcode_enabled = true
     _metrics.fit_content = false
     _metrics.custom_minimum_size = Vector2(0, 155)
     _metrics.text = "[color=#9aa7bd]Generate, mutate, load, or watch a creature.[/color]"
-    column.add_child(_metrics)
+    status_section.add_child(_metrics)
 
     _capabilities_label = Label.new()
     _capabilities_label.text = "Backend capabilities: loading..."
     _capabilities_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     _capabilities_label.modulate = Color(0.64, 0.7, 0.8)
-    column.add_child(_capabilities_label)
+    status_section.add_child(_capabilities_label)
 
     _apply_font_size()
 
@@ -1996,6 +1995,171 @@ func _format_parent_ids(value) -> String:
     return ", ".join(parts)
 
 
+func _build_walkthrough_window() -> void:
+    _walkthrough_window = Window.new()
+    _walkthrough_window.title = "Guided First Test"
+    _walkthrough_window.size = Vector2i(620, 470)
+    _walkthrough_window.min_size = Vector2i(520, 400)
+    _walkthrough_window.visible = false
+    _walkthrough_window.theme = _ui_theme
+    _walkthrough_window.close_requested.connect(_walkthrough_window.hide)
+    add_child(_walkthrough_window)
+
+    var margin := MarginContainer.new()
+    margin.add_theme_constant_override("margin_left", 22)
+    margin.add_theme_constant_override("margin_right", 22)
+    margin.add_theme_constant_override("margin_top", 20)
+    margin.add_theme_constant_override("margin_bottom", 18)
+    margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    _walkthrough_window.add_child(margin)
+
+    var column := VBoxContainer.new()
+    column.add_theme_constant_override("separation", 12)
+    margin.add_child(column)
+
+    var title := Label.new()
+    title.text = "First Test Walkthrough"
+    title.add_theme_font_size_override("font_size", _font_size + 5)
+    column.add_child(title)
+
+    _walkthrough_text = RichTextLabel.new()
+    _walkthrough_text.bbcode_enabled = true
+    _walkthrough_text.fit_content = false
+    _walkthrough_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    column.add_child(_walkthrough_text)
+
+    _walkthrough_run_button = Button.new()
+    _walkthrough_run_button.text = "▶ Run This First Test"
+    _walkthrough_run_button.pressed.connect(_on_walkthrough_run_test)
+    column.add_child(_walkthrough_run_button)
+
+    var buttons := HBoxContainer.new()
+    buttons.add_theme_constant_override("separation", 8)
+    column.add_child(buttons)
+
+    _walkthrough_back_button = Button.new()
+    _walkthrough_back_button.text = "Back"
+    _walkthrough_back_button.pressed.connect(_on_walkthrough_back)
+    buttons.add_child(_walkthrough_back_button)
+
+    var spacer := Control.new()
+    spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    buttons.add_child(spacer)
+
+    _walkthrough_next_button = Button.new()
+    _walkthrough_next_button.text = "Next"
+    _walkthrough_next_button.pressed.connect(_on_walkthrough_next)
+    buttons.add_child(_walkthrough_next_button)
+
+    _refresh_walkthrough()
+
+
+func _maybe_show_first_run_walkthrough() -> void:
+    if not _walkthrough_completed:
+        _show_walkthrough()
+
+
+func _show_walkthrough() -> void:
+    _walkthrough_step = 0
+    _refresh_walkthrough()
+    _walkthrough_window.popup_centered()
+
+
+func _refresh_walkthrough() -> void:
+    if _walkthrough_text == null:
+        return
+
+    match _walkthrough_step:
+        0:
+            _walkthrough_text.text = (
+                "[b]What this app is doing[/b]\n\n"
+                + "The left HUD controls the experiment. The 3D area shows the exact world and "
+                + "the creature being simulated. The floor should always be visible.\n\n"
+                + "For the first run we will use the built-in three-segment seed creature so "
+                + "there are no random-generation variables to confuse the test."
+            )
+        1:
+            _walkthrough_text.text = (
+                "[b]The safe first-test settings[/b]\n\n"
+                + "The guide will set: [b]Seed 1[/b], [b]Flat terrain[/b], "
+                + "[b]8 seconds[/b], [b]1.00x playback[/b], and [b]CPU[/b].\n\n"
+                + "CPU is chosen only for this sanity check because every supported machine has it. "
+                + "After this works, Benchmark can be used to compare CPU/CUDA throughput."
+            )
+        2:
+            _walkthrough_text.text = (
+                "[b]Run the first creature test[/b]\n\n"
+                + "Click [b]Run This First Test[/b] below. The app will apply the simple settings "
+                + "and start the known seed creature.\n\n"
+                + "Expected result: you should see the floor, a multi-part creature, and smooth motion "
+                + "in the 3D view. The progress/status area will update while it runs."
+            )
+        3:
+            _walkthrough_text.text = (
+                "[b]While it runs[/b]\n\n"
+                + "Watch the 3D view first. The floor is the world collision surface. The colored boxes "
+                + "are creature body segments connected by joints.\n\n"
+                + "Right-drag looks around. W/S move along the camera aim and A/D strafe. "
+                + "Playback speed changes how quickly you watch the buffered simulation, not the physics rules."
+            )
+        _:
+            _walkthrough_text.text = (
+                "[b]Reading the result[/b]\n\n"
+                + "Open [b]Status / Results[/b] in the HUD. It shows progress and metrics from the run. "
+                + "The [b]Quick Test / Main Controls[/b] section is where you can rerun the seed creature, "
+                + "try the Single Box physics check, run a Benchmark, or start Evolution.\n\n"
+                + "The detailed sections stay collapsed until you need to change advanced settings."
+            )
+
+    _walkthrough_back_button.disabled = _walkthrough_step == 0
+    _walkthrough_run_button.visible = _walkthrough_step == 2
+    _walkthrough_next_button.text = "Finish" if _walkthrough_step >= 4 else "Next"
+
+
+func _on_walkthrough_back() -> void:
+    _walkthrough_step = maxi(0, _walkthrough_step - 1)
+    _refresh_walkthrough()
+
+
+func _on_walkthrough_next() -> void:
+    if _walkthrough_step >= 4:
+        _walkthrough_completed = true
+        _save_settings()
+        _walkthrough_window.hide()
+        return
+    _walkthrough_step += 1
+    _refresh_walkthrough()
+
+
+func _on_walkthrough_run_test() -> void:
+    if _job_pid > 0:
+        _set_status("Stop the current run before starting the guided first test.")
+        return
+
+    _seed_spin.value = 1
+    _seconds_spin.value = 8.0
+    _playback_speed_spin.value = 1.0
+    _playback_speed = 1.0
+    _terrain_kind = "flat"
+    _terrain_option.select(0)
+    _walls_check.button_pressed = false
+    _blocks_check.button_pressed = false
+    _gaps_check.button_pressed = false
+    _pits_check.button_pressed = false
+    _walls_enabled = false
+    _blocks_enabled = false
+    _gaps_enabled = false
+    _pits_enabled = false
+    _accelerator_mode = "cpu"
+    _accelerator_option.select(0)
+    _save_settings()
+    _refresh_world_preview()
+
+    _walkthrough_step = 3
+    _refresh_walkthrough()
+    _on_seed_creature_pressed()
+
+
 func _build_settings_window() -> void:
     _settings_window = Window.new()
     _settings_window.title = "Settings"
@@ -2540,6 +2704,9 @@ func _load_settings() -> void:
 
     _font_size = int(config.get_value("ui", "font_size", _font_size))
     _font_size = clampi(_font_size, 10, 32)
+    _walkthrough_completed = bool(
+        config.get_value("ui", "walkthrough_completed", _walkthrough_completed)
+    )
     _hud_width = float(config.get_value("ui", "hud_width", _hud_width))
     _hud_width = clampf(_hud_width, MIN_HUD_WIDTH, MAX_HUD_WIDTH)
     _playback_speed = float(
@@ -2670,6 +2837,7 @@ func _save_settings() -> void:
     var config := ConfigFile.new()
     config.set_value("ui", "font_size", _font_size)
     config.set_value("ui", "hud_width", _hud_width)
+    config.set_value("ui", "walkthrough_completed", _walkthrough_completed)
     config.set_value("viewer", "playback_speed", _playback_speed)
     config.set_value("fitness", "distance", _fitness_distance_weight)
     config.set_value("fitness", "average_speed", _fitness_speed_weight)
@@ -2877,6 +3045,34 @@ func _build_file_dialogs() -> void:
     ])
     _results_load_dialog.file_selected.connect(_on_results_load_file_selected)
     add_child(_results_load_dialog)
+
+
+func _add_collapsible_section(
+    parent: VBoxContainer,
+    title: String,
+    expanded: bool
+) -> VBoxContainer:
+    var wrapper := VBoxContainer.new()
+    wrapper.add_theme_constant_override("separation", 4)
+    parent.add_child(wrapper)
+
+    var header := Button.new()
+    header.alignment = HORIZONTAL_ALIGNMENT_LEFT
+    header.focus_mode = Control.FOCUS_NONE
+    header.text = ("▼ " if expanded else "▶ ") + title
+    wrapper.add_child(header)
+
+    var content := VBoxContainer.new()
+    content.add_theme_constant_override("separation", 6)
+    content.visible = expanded
+    wrapper.add_child(content)
+
+    header.pressed.connect(
+        func():
+            content.visible = not content.visible
+            header.text = ("▼ " if content.visible else "▶ ") + title
+    )
+    return content
 
 
 func _add_number_row(
