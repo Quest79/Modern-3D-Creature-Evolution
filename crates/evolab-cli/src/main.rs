@@ -1033,7 +1033,6 @@ fn simulation_config(
     Ok(config)
 }
 
-
 fn run_world_geometry(world_json: Option<&str>) -> Result<(), String> {
     let world = if let Some(raw) = world_json {
         serde_json::from_str::<WorldConfig>(raw)
@@ -1054,7 +1053,6 @@ fn run_world_geometry(world_json: Option<&str>) -> Result<(), String> {
     );
     Ok(())
 }
-
 
 fn run_capabilities(json_output: bool) -> Result<(), String> {
     let backend = RapierCpuBackend;
