@@ -2,9 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    BrainGenome, CreatureGenome, Expression, JointGene, SegmentGene, SensorKind,
-};
+use crate::{BrainGenome, CreatureGenome, Expression, JointGene, SegmentGene, SensorKind};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MutationConfig {
@@ -288,12 +286,9 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
 
-    joint.motor_stiffness =
-        (joint.motor_stiffness * rng.range_f32(0.75, 1.30)).clamp(4.0, 100.0);
-    joint.motor_damping =
-        (joint.motor_damping * rng.range_f32(0.75, 1.30)).clamp(0.5, 20.0);
-    joint.motor_max_torque =
-        (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
+    joint.motor_stiffness = (joint.motor_stiffness * rng.range_f32(0.75, 1.30)).clamp(4.0, 100.0);
+    joint.motor_damping = (joint.motor_damping * rng.range_f32(0.75, 1.30)).clamp(0.5, 20.0);
+    joint.motor_max_torque = (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMotor,
@@ -387,7 +382,9 @@ fn mutate_brain(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
                 output.expression = random_expression(rng, 3);
                 return Some(MutationRecord {
                     kind: MutationKind::ReplaceBrainExpression,
-                    description: format!("replaced deep brain expression for joint child {child_id}"),
+                    description: format!(
+                        "replaced deep brain expression for joint child {child_id}"
+                    ),
                 });
             }
 
