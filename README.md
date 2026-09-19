@@ -8,9 +8,9 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 3 — Evolvable Brains: in progress.**
+**Step 4 — Configurable Fitness: in progress.**
 
-Steps 1–2 are live. Creatures now evolve both morphology and an expression-tree controller.
+Steps 1–3 are live. Creatures now evolve morphology and expression-tree controllers under configurable weighted fitness.
 
 Current foundation:
 
@@ -39,11 +39,13 @@ Current foundation:
 - add/subtract/multiply/negate/sine/cosine/clamp brain nodes
 - brain constant/expression/wrapper mutation
 - joint outputs driven by the evolved brain every physics step
+- configurable weighted fitness for distance, speed, uprightness, stability, and actuator effort
+- champion fitness metric breakdown in the Godot GUI
 
 The Rust backend remains the authoritative simulator. Godot renders streamed
 snapshots and now acts as a simple creature-generation/mutation editor.
 
-See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), and [docs/STEP-3.md](docs/STEP-3.md).
+See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), and [docs/STEP-4.md](docs/STEP-4.md).
 
 ## Windows quick start
 
