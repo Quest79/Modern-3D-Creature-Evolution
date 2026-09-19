@@ -12,6 +12,7 @@ mod evolution;
 mod fitness;
 mod ga;
 mod rapier_cpu;
+mod timeline;
 mod world;
 
 pub use backend::{
@@ -36,4 +37,8 @@ pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
 };
 pub use rapier_cpu::RapierCpuBackend;
+pub use timeline::{
+    ConditionContext, EffectiveEvolutionSettings, TimelineChanges, TimelineCondition,
+    TimelineConfig, TimelineKeyframe, TrialAggregation,
+};
 pub use world::{TerrainKind, WorldBox, WorldBoxKind, WorldConfig};
