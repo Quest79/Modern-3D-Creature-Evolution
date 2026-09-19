@@ -292,16 +292,16 @@ fn run() -> Result<(), String> {
             json: json_output,
             event_port,
             event_host,
-        } => run_batch(
+        } => run_batch(BatchRequest {
             batch,
             workers,
             seconds,
             dt,
-            world_json.as_deref(),
+            world_json: world_json.as_deref(),
             json_output,
-            &event_host,
+            event_host: &event_host,
             event_port,
-        ),
+        }),
         Command::Stream {
             event_port,
             event_host,
@@ -311,16 +311,16 @@ fn run() -> Result<(), String> {
             max_speed,
             playback_speed,
             world_json,
-        } => run_stream(
-            &event_host,
+        } => run_stream(StreamRequest {
+            event_host: &event_host,
             event_port,
             seconds,
             dt,
             frame_hz,
-            !max_speed,
+            realtime: !max_speed,
             playback_speed,
-            world_json.as_deref(),
-        ),
+            world_json: world_json.as_deref(),
+        }),
         Command::CreatureStream {
             event_port,
             event_host,
@@ -409,16 +409,29 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn run_batch(
+struct BatchRequest<'a> {
     batch: usize,
     workers: usize,
     seconds: f32,
     dt: f32,
-    world_json: Option<&str>,
+    world_json: Option<&'a str>,
     json_output: bool,
-    event_host: &str,
+    event_host: &'a str,
     event_port: Option<u16>,
-) -> Result<(), String> {
+}
+
+fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
+    let BatchRequest {
+        batch,
+        workers,
+        seconds,
+        dt,
+        world_json,
+        json_output,
+        event_host,
+        event_port,
+    } = request;
+
     if batch == 0 {
         return Err("batch size must be greater than 0".into());
     }
@@ -522,16 +535,29 @@ fn run_batch(
     Ok(())
 }
 
-fn run_stream(
-    event_host: &str,
+struct StreamRequest<'a> {
+    event_host: &'a str,
     event_port: u16,
     seconds: f32,
     dt: f32,
     frame_hz: f32,
     realtime: bool,
     playback_speed: f32,
-    world_json: Option<&str>,
-) -> Result<(), String> {
+    world_json: Option<&'a str>,
+}
+
+fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
+    let StreamRequest {
+        event_host,
+        event_port,
+        seconds,
+        dt,
+        frame_hz,
+        realtime,
+        playback_speed,
+        world_json,
+    } = request;
+
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
     }
