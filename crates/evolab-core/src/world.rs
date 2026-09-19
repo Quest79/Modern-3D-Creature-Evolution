@@ -228,7 +228,7 @@ impl WorldConfig {
                 let base = (k * x).sin();
                 let detail = 0.35 * ((1.7 * k * x + phase).sin() - phase.sin());
                 self.hill_height * (base + detail) / 1.7
-            },
+            }
             TerrainKind::Stairs => {
                 if x <= 0.0 {
                     0.0
@@ -247,8 +247,7 @@ impl WorldConfig {
                 let k = TAU / self.hill_wavelength;
                 let phase = self.hill_seed_phase();
                 let derivative = self.hill_height
-                    * (k * (k * x).cos()
-                        + 0.35 * 1.7 * k * (1.7 * k * x + phase).cos())
+                    * (k * (k * x).cos() + 0.35 * 1.7 * k * (1.7 * k * x + phase).cos())
                     / 1.7;
                 derivative.atan()
             }
