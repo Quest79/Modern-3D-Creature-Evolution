@@ -336,7 +336,7 @@ func _build_ui() -> void:
     header_row.add_child(_settings_button)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 4 • Configurable Fitness"
+    subtitle.text = "Step 5 • World / Terrain Editor"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
@@ -439,6 +439,113 @@ func _build_ui() -> void:
         _fitness_energy_spin,
     ]:
         spin.value_changed.connect(_on_fitness_weights_changed)
+
+    column.add_child(HSeparator.new())
+
+    var world_heading := Label.new()
+    world_heading.text = "World / terrain"
+    _section_headings.append(world_heading)
+    column.add_child(world_heading)
+
+    var terrain_row := HBoxContainer.new()
+    column.add_child(terrain_row)
+    var terrain_label := Label.new()
+    terrain_label.text = "Terrain"
+    terrain_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    terrain_row.add_child(terrain_label)
+    _terrain_option = OptionButton.new()
+    _terrain_option.custom_minimum_size = Vector2(145, 29)
+    for terrain_name in ["Flat", "Slope", "Hills", "Stairs"]:
+        _terrain_option.add_item(terrain_name)
+    var terrain_index := ["flat", "slope", "hills", "stairs"].find(_terrain_kind)
+    _terrain_option.select(maxi(terrain_index, 0))
+    _terrain_option.item_selected.connect(_on_terrain_selected)
+    terrain_row.add_child(_terrain_option)
+
+    _world_seed_spin = _add_number_row(column, "World seed", 0, 999999999, _world_seed, 1)
+    _gravity_x_spin = _add_number_row(column, "Gravity X", -30.0, 30.0, _gravity_x, 0.1)
+    _gravity_y_spin = _add_number_row(column, "Gravity Y", -30.0, 30.0, _gravity_y, 0.1)
+    _gravity_z_spin = _add_number_row(column, "Gravity Z", -30.0, 30.0, _gravity_z, 0.1)
+    _ground_friction_spin = _add_number_row(
+        column, "Ground friction", 0.0, 5.0, _ground_friction, 0.05
+    )
+    _slope_spin = _add_number_row(column, "Slope angle (deg)", -35.0, 35.0, _slope_degrees, 0.5)
+    _hill_height_spin = _add_number_row(column, "Hill height", 0.0, 10.0, _hill_height, 0.05)
+    _hill_wavelength_spin = _add_number_row(
+        column, "Hill wavelength", 1.0, 100.0, _hill_wavelength, 0.25
+    )
+    _stair_height_spin = _add_number_row(
+        column, "Stair height", 0.01, 5.0, _stair_height, 0.05
+    )
+    _stair_depth_spin = _add_number_row(
+        column, "Stair depth", 0.1, 20.0, _stair_depth, 0.05
+    )
+
+    var obstacle_label := Label.new()
+    obstacle_label.text = "Obstacle types"
+    column.add_child(obstacle_label)
+
+    var obstacle_row_a := HBoxContainer.new()
+    obstacle_row_a.add_theme_constant_override("separation", 10)
+    column.add_child(obstacle_row_a)
+    _walls_check = CheckBox.new()
+    _walls_check.text = "Walls"
+    _walls_check.button_pressed = _walls_enabled
+    obstacle_row_a.add_child(_walls_check)
+    _blocks_check = CheckBox.new()
+    _blocks_check.text = "Blocks"
+    _blocks_check.button_pressed = _blocks_enabled
+    obstacle_row_a.add_child(_blocks_check)
+
+    var obstacle_row_b := HBoxContainer.new()
+    obstacle_row_b.add_theme_constant_override("separation", 10)
+    column.add_child(obstacle_row_b)
+    _gaps_check = CheckBox.new()
+    _gaps_check.text = "Gaps"
+    _gaps_check.button_pressed = _gaps_enabled
+    obstacle_row_b.add_child(_gaps_check)
+    _pits_check = CheckBox.new()
+    _pits_check.text = "Pits"
+    _pits_check.button_pressed = _pits_enabled
+    obstacle_row_b.add_child(_pits_check)
+
+    _obstacle_count_spin = _add_number_row(
+        column, "Obstacle count", 0, 100, _obstacle_count, 1
+    )
+    _obstacle_spacing_spin = _add_number_row(
+        column, "Obstacle spacing", 1.0, 50.0, _obstacle_spacing, 0.25
+    )
+    _obstacle_size_spin = _add_number_row(
+        column, "Obstacle size", 0.1, 10.0, _obstacle_size, 0.05
+    )
+    _gap_width_spin = _add_number_row(
+        column, "Gap width", 0.1, 10.0, _gap_width, 0.05
+    )
+    _pit_depth_spin = _add_number_row(
+        column, "Pit depth", 0.1, 20.0, _pit_depth, 0.05
+    )
+
+    for world_spin in [
+        _world_seed_spin,
+        _gravity_x_spin,
+        _gravity_y_spin,
+        _gravity_z_spin,
+        _ground_friction_spin,
+        _slope_spin,
+        _hill_height_spin,
+        _hill_wavelength_spin,
+        _stair_height_spin,
+        _stair_depth_spin,
+        _obstacle_count_spin,
+        _obstacle_spacing_spin,
+        _obstacle_size_spin,
+        _gap_width_spin,
+        _pit_depth_spin,
+    ]:
+        world_spin.value_changed.connect(_on_world_numeric_changed)
+
+    for world_check in [_walls_check, _blocks_check, _gaps_check, _pits_check]:
+        world_check.toggled.connect(_on_world_toggle_changed)
 
     var evolution_row := HBoxContainer.new()
     evolution_row.add_theme_constant_override("separation", 6)
