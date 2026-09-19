@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CreatureGenome, JointGene, SegmentGene};
+use crate::{
+    BrainGenome, BrainOutputGene, CreatureGenome, Expression, JointGene, SegmentGene, SensorKind,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MutationConfig {
@@ -56,6 +58,9 @@ pub enum MutationKind {
     ChangeMotor,
     ChangeJointLimits,
     MoveJointAnchor,
+    ChangeBrainConstant,
+    ReplaceBrainExpression,
+    WrapBrainExpression,
     AddSegment,
     RemoveLeafSegment,
 }
@@ -139,6 +144,7 @@ pub fn mutate_genome(
 
     let mut rng = GenomeRng::new(seed);
     let mut genome = source.clone();
+    genome.brain.sync_with_joints(&genome.joints);
     let mut mutations = Vec::with_capacity(mutation_count);
 
     for _ in 0..mutation_count {
@@ -156,6 +162,7 @@ pub fn mutate_genome(
         }
     }
 
+    genome.brain.sync_with_joints(&genome.joints);
     genome.name = format!("{} • mutated {}", source.name, seed);
     genome.validate()?;
 
@@ -181,6 +188,7 @@ pub fn random_creature(
             friction: 0.9,
         }],
         joints: Vec::new(),
+        brain: BrainGenome::default(),
     };
 
     let mut rng = GenomeRng::new(seed);
@@ -203,6 +211,7 @@ pub fn random_creature(
         }
     }
 
+    genome.brain.sync_with_joints(&genome.joints);
     genome.validate()?;
     Ok(MutationResult { genome, mutations })
 }
@@ -212,12 +221,13 @@ fn mutate_numeric(
     rng: &mut GenomeRng,
     config: &MutationConfig,
 ) -> Option<MutationRecord> {
-    match rng.range_usize(5) {
+    match rng.range_usize(7) {
         0 => resize_segment(genome, rng, config),
         1 => change_material(genome, rng),
         2 => change_motor(genome, rng),
         3 => change_joint_limits(genome, rng),
-        _ => move_joint_anchor(genome, rng),
+        4 => move_joint_anchor(genome, rng),
+        _ => mutate_brain(genome, rng),
     }
 }
 
@@ -278,21 +288,21 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
 
-    joint.motor_amplitude_radians =
-        (joint.motor_amplitude_radians + rng.signed(0.25)).clamp(0.05, 1.4);
-    joint.motor_frequency_hz =
-        (joint.motor_frequency_hz * rng.range_f32(0.75, 1.30)).clamp(0.15, 4.0);
-    joint.motor_phase_radians += rng.signed(0.5);
-    joint.motor_max_torque = (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
+    joint.motor_stiffness =
+        (joint.motor_stiffness * rng.range_f32(0.75, 1.30)).clamp(4.0, 100.0);
+    joint.motor_damping =
+        (joint.motor_damping * rng.range_f32(0.75, 1.30)).clamp(0.5, 20.0);
+    joint.motor_max_torque =
+        (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMotor,
         description: format!(
-            "changed motor {}→{}: amplitude {:.2}, frequency {:.2} Hz, torque {:.1}",
+            "changed actuator {}→{}: stiffness {:.1}, damping {:.1}, torque {:.1}",
             joint.parent_id,
             joint.child_id,
-            joint.motor_amplitude_radians,
-            joint.motor_frequency_hz,
+            joint.motor_stiffness,
+            joint.motor_damping,
             joint.motor_max_torque
         ),
     })
@@ -338,6 +348,147 @@ fn move_joint_anchor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option
             joint.parent_id, joint.child_id, axis
         ),
     })
+}
+
+fn mutate_brain(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
+    genome.brain.sync_with_joints(&genome.joints);
+    if genome.brain.outputs.is_empty() {
+        return None;
+    }
+
+    let index = rng.range_usize(genome.brain.outputs.len());
+    let output = genome.brain.outputs.get_mut(index)?;
+    let child_id = output.joint_child_id;
+
+    match rng.range_usize(3) {
+        0 => {
+            if perturb_one_constant(&mut output.expression, rng) {
+                Some(MutationRecord {
+                    kind: MutationKind::ChangeBrainConstant,
+                    description: format!("changed brain constant for joint child {child_id}"),
+                })
+            } else {
+                output.expression = random_expression(rng, 3);
+                Some(MutationRecord {
+                    kind: MutationKind::ReplaceBrainExpression,
+                    description: format!("replaced brain expression for joint child {child_id}"),
+                })
+            }
+        }
+        1 => {
+            output.expression = random_expression(rng, 3);
+            Some(MutationRecord {
+                kind: MutationKind::ReplaceBrainExpression,
+                description: format!("replaced brain expression for joint child {child_id}"),
+            })
+        }
+        _ => {
+            if output.expression.depth() >= 14 {
+                output.expression = random_expression(rng, 3);
+                return Some(MutationRecord {
+                    kind: MutationKind::ReplaceBrainExpression,
+                    description: format!("replaced deep brain expression for joint child {child_id}"),
+                });
+            }
+
+            let old = std::mem::replace(&mut output.expression, Expression::Constant(0.0));
+            output.expression = match rng.range_usize(5) {
+                0 => Expression::Sin(Box::new(old)),
+                1 => Expression::Cos(Box::new(old)),
+                2 => Expression::Negate(Box::new(old)),
+                3 => Expression::Add(
+                    Box::new(old),
+                    Box::new(Expression::Constant(rng.signed(0.35))),
+                ),
+                _ => Expression::Multiply(
+                    Box::new(old),
+                    Box::new(Expression::Constant(rng.range_f32(0.65, 1.35))),
+                ),
+            };
+            Some(MutationRecord {
+                kind: MutationKind::WrapBrainExpression,
+                description: format!("wrapped brain expression for joint child {child_id}"),
+            })
+        }
+    }
+}
+
+fn perturb_one_constant(expression: &mut Expression, rng: &mut GenomeRng) -> bool {
+    match expression {
+        Expression::Constant(value) => {
+            *value = (*value + rng.signed(0.35)).clamp(-12.0, 12.0);
+            true
+        }
+        Expression::Add(left, right)
+        | Expression::Subtract(left, right)
+        | Expression::Multiply(left, right) => {
+            if rng.chance(0.5) {
+                perturb_one_constant(left, rng) || perturb_one_constant(right, rng)
+            } else {
+                perturb_one_constant(right, rng) || perturb_one_constant(left, rng)
+            }
+        }
+        Expression::Negate(value)
+        | Expression::Sin(value)
+        | Expression::Cos(value)
+        | Expression::Clamp { value, .. } => perturb_one_constant(value, rng),
+        Expression::Sensor(_) => false,
+    }
+}
+
+fn random_expression(rng: &mut GenomeRng, depth: usize) -> Expression {
+    if depth == 0 || rng.chance(0.30) {
+        return random_terminal(rng);
+    }
+
+    match rng.range_usize(8) {
+        0 => Expression::Add(
+            Box::new(random_expression(rng, depth - 1)),
+            Box::new(random_expression(rng, depth - 1)),
+        ),
+        1 => Expression::Subtract(
+            Box::new(random_expression(rng, depth - 1)),
+            Box::new(random_expression(rng, depth - 1)),
+        ),
+        2 => Expression::Multiply(
+            Box::new(random_expression(rng, depth - 1)),
+            Box::new(random_expression(rng, depth - 1)),
+        ),
+        3 => Expression::Negate(Box::new(random_expression(rng, depth - 1))),
+        4 => Expression::Sin(Box::new(random_expression(rng, depth - 1))),
+        5 => Expression::Cos(Box::new(random_expression(rng, depth - 1))),
+        6 => Expression::Clamp {
+            value: Box::new(random_expression(rng, depth - 1)),
+            min: -1.25,
+            max: 1.25,
+        },
+        _ => random_terminal(rng),
+    }
+}
+
+fn random_terminal(rng: &mut GenomeRng) -> Expression {
+    if rng.chance(0.35) {
+        Expression::Constant(rng.range_f32(-1.5, 1.5))
+    } else {
+        Expression::Sensor(random_sensor(rng))
+    }
+}
+
+fn random_sensor(rng: &mut GenomeRng) -> SensorKind {
+    match rng.range_usize(12) {
+        0 => SensorKind::Time,
+        1 => SensorKind::RootHeight,
+        2 => SensorKind::RootVelocityX,
+        3 => SensorKind::RootVelocityY,
+        4 => SensorKind::RootVelocityZ,
+        5 => SensorKind::RootAngularVelocityX,
+        6 => SensorKind::RootAngularVelocityY,
+        7 => SensorKind::RootAngularVelocityZ,
+        8 => SensorKind::RootRotationX,
+        9 => SensorKind::RootRotationY,
+        10 => SensorKind::RootRotationZ,
+        _ => SensorKind::RootRotationW,
+    }
 }
 
 fn add_segment(
@@ -419,6 +570,7 @@ fn add_segment(
         motor_damping: rng.range_f32(2.5, 7.0),
         motor_max_torque: rng.range_f32(8.0, 30.0),
     });
+    genome.brain.sync_with_joints(&genome.joints);
 
     Some(MutationRecord {
         kind: MutationKind::AddSegment,
@@ -449,6 +601,7 @@ fn remove_leaf_segment(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Opti
     genome
         .joints
         .retain(|joint| joint.parent_id != id && joint.child_id != id);
+    genome.brain.sync_with_joints(&genome.joints);
 
     Some(MutationRecord {
         kind: MutationKind::RemoveLeafSegment,
