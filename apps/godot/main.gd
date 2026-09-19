@@ -246,9 +246,10 @@ func _process(delta: float) -> void:
             elif ended_kind == "evolution" and _load_genome_file(_evolution_champion_path()):
                 _job_kind = ""
                 _has_evolution_champion = true
+                _load_results_file(_evolution_results_path())
                 _current_genome_source = "latest evolution champion"
                 _build_creature_from_genome(_current_genome)
-                _set_status("Evolution process ended • latest champion recovered.")
+                _set_status("Evolution process ended • latest champion/results recovered.")
                 _finish_job_controls()
             else:
                 _job_kind = ""
@@ -1841,12 +1842,17 @@ func _on_evolve_pressed() -> void:
     _probe_mesh.visible = false
     _progress_bar.value = 0
     _has_evolution_champion = false
+    _results_data.clear()
+    _results_button.disabled = true
     _watch_champion_button.disabled = true
     _metrics.text = "[color=#9aa7bd]Creating and evaluating generation 1...[/color]"
 
     var champion_path := _evolution_champion_path()
+    var results_path := _evolution_results_path()
     if FileAccess.file_exists(champion_path):
         DirAccess.remove_absolute(champion_path)
+    if FileAccess.file_exists(results_path):
+        DirAccess.remove_absolute(results_path)
 
     var args := PackedStringArray([
         "evolve",
@@ -1874,6 +1880,8 @@ func _on_evolve_pressed() -> void:
         "--world-json", _world_json(),
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
+        "--result-output", results_path,
+        "--experiment-name", _experiment_name,
     ])
 
     if not _current_genome.is_empty():
@@ -2292,6 +2300,29 @@ func _evolution_champion_path() -> String:
     return ProjectSettings.globalize_path("user://evolution_champion.json")
 
 
+func _evolution_results_path() -> String:
+    return ProjectSettings.globalize_path("user://evolution_results.evoresults")
+
+
+func _load_results_file(path: String) -> bool:
+    if not FileAccess.file_exists(path):
+        return false
+
+    var file := FileAccess.open(path, FileAccess.READ)
+    if file == null:
+        return false
+
+    var parsed = JSON.parse_string(file.get_as_text())
+    file.close()
+    if typeof(parsed) != TYPE_DICTIONARY:
+        return false
+
+    _results_data = parsed
+    _results_button.disabled = false
+    _refresh_results_window()
+    return true
+
+
 func _load_genome_file(path: String) -> bool:
     if not FileAccess.file_exists(path):
         return false
@@ -2530,6 +2561,10 @@ func _handle_event(event: Dictionary) -> void:
             var champion_file := str(event.get("champion_file", ""))
             if champion_file != "":
                 _load_genome_file(champion_file)
+
+            var results_file := str(event.get("results_file", ""))
+            if results_file != "":
+                _load_results_file(results_file)
 
             _current_genome_source = "evolution champion"
             _build_creature_from_genome(_current_genome)
