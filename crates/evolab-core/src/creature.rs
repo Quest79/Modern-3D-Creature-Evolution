@@ -416,10 +416,10 @@ impl CreatureSimulator {
 
             let local_axis = Vector::new(gene.axis[0], gene.axis[1], gene.axis[2]).normalize();
             let relative_rotation = parent.rotation().inverse() * child.rotation();
-            let angle = relative_rotation.scaled_axis().dot(&local_axis);
+            let angle = relative_rotation.to_scaled_axis().dot(local_axis);
             let world_axis = parent.rotation() * local_axis;
             let relative_angular_velocity = child.angvel() - parent.angvel();
-            let velocity = relative_angular_velocity.dot(&world_axis);
+            let velocity = relative_angular_velocity.dot(world_axis);
 
             joints.push(JointSensorState {
                 child_id: gene.child_id,
@@ -437,11 +437,13 @@ impl CreatureSimulator {
                 .get(*handle)
                 .ok_or_else(|| format!("body {} disappeared", segment.id))?;
 
-            let rotation = body.rotation().to_rotation_matrix();
-            let matrix = rotation.matrix();
-            let projected_half_height = matrix[(1, 0)].abs() * segment.half_extents[0]
-                + matrix[(1, 1)].abs() * segment.half_extents[1]
-                + matrix[(1, 2)].abs() * segment.half_extents[2];
+            let rotation = body.rotation();
+            let axis_x = *rotation * Vector::X;
+            let axis_y = *rotation * Vector::Y;
+            let axis_z = *rotation * Vector::Z;
+            let projected_half_height = axis_x.y.abs() * segment.half_extents[0]
+                + axis_y.y.abs() * segment.half_extents[1]
+                + axis_z.y.abs() * segment.half_extents[2];
             let bottom_y = body.translation().y - projected_half_height;
             let ground_contact = if bottom_y <= ground_top_y + 0.02 {
                 1.0
