@@ -2300,13 +2300,26 @@ func _handle_event(event: Dictionary) -> void:
                 _build_creature_from_genome(_current_genome)
 
             var best_metrics: Dictionary = event.get("best_metrics", {})
+            var effective_world_value = event.get("effective_world", {})
+            if typeof(effective_world_value) == TYPE_DICTIONARY:
+                _render_world_config(effective_world_value)
+
+            var triggered_events: Array = event.get(
+                "triggered_timeline_events",
+                []
+            )
+            var timeline_suffix := ""
+            if not triggered_events.is_empty():
+                timeline_suffix = " • triggered: %s" % ", ".join(triggered_events)
+
             _set_status(
-                "Generation %d / %d • best score %.4f • average %.4f"
+                "Generation %d / %d • best %.4f • average %.4f%s"
                 % [
                     generation,
                     generations,
                     float(event.get("best_fitness", 0.0)),
                     float(event.get("average_fitness", 0.0)),
+                    timeline_suffix,
                 ]
             )
             _metrics.text = (
@@ -2326,6 +2339,16 @@ func _handle_event(event: Dictionary) -> void:
                         str(event.get("best_brain_sensor_nodes", 0)),
                     ]
                 + "[cell]Brain outputs[/cell][cell]%s[/cell]" % str(event.get("best_brain_outputs", 0))
+                + "[cell]Population[/cell][cell]%s[/cell]" % str(event.get("effective_population", 0))
+                + "[cell]Trials / creature[/cell][cell]%s (%s)[/cell]"
+                    % [
+                        str(event.get("effective_trials_per_creature", 1)),
+                        str(event.get("effective_trial_aggregation", "mean")),
+                    ]
+                + "[cell]Trial duration[/cell][cell]%.2f s[/cell]"
+                    % float(event.get("effective_duration_seconds", 0.0))
+                + "[cell]Motor strength[/cell][cell]%.2fx[/cell]"
+                    % float(event.get("effective_motor_strength_multiplier", 1.0))
                 + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
                 + "[/table]"
             )
@@ -2338,6 +2361,24 @@ func _handle_event(event: Dictionary) -> void:
             _current_genome_source = "evolution champion"
             _build_creature_from_genome(_current_genome)
             _has_evolution_champion = not _current_genome.is_empty()
+
+            var final_settings_value = event.get("final_settings", {})
+            if typeof(final_settings_value) == TYPE_DICTIONARY:
+                var final_settings: Dictionary = final_settings_value
+                var final_simulation_value = final_settings.get("simulation", {})
+                if typeof(final_simulation_value) == TYPE_DICTIONARY:
+                    var final_simulation: Dictionary = final_simulation_value
+                    var final_world_value = final_simulation.get("world", {})
+                    if typeof(final_world_value) == TYPE_DICTIONARY:
+                        _champion_world = final_world_value.duplicate(true)
+                        _render_world_config(_champion_world)
+                    _champion_motor_strength = float(
+                        final_simulation.get(
+                            "motor_strength_multiplier",
+                            _motor_strength_spin.value
+                        )
+                    )
+
             _progress_bar.value = 100
             var champion_metrics: Dictionary = event.get("champion_metrics", {})
             _set_status(
