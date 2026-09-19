@@ -1521,6 +1521,21 @@ func _build_file_dialogs() -> void:
     _load_dialog.file_selected.connect(_on_load_file_selected)
     add_child(_load_dialog)
 
+    _experiment_save_dialog = FileDialog.new()
+    _experiment_save_dialog.access = FileDialog.ACCESS_FILESYSTEM
+    _experiment_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+    _experiment_save_dialog.filters = PackedStringArray(["*.evo ; EvoLab Experiment"])
+    _experiment_save_dialog.current_file = "experiment.evo"
+    _experiment_save_dialog.file_selected.connect(_on_experiment_save_file_selected)
+    add_child(_experiment_save_dialog)
+
+    _experiment_load_dialog = FileDialog.new()
+    _experiment_load_dialog.access = FileDialog.ACCESS_FILESYSTEM
+    _experiment_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+    _experiment_load_dialog.filters = PackedStringArray(["*.evo ; EvoLab Experiment"])
+    _experiment_load_dialog.file_selected.connect(_on_experiment_load_file_selected)
+    add_child(_experiment_load_dialog)
+
 
 func _add_number_row(
     parent: VBoxContainer,
