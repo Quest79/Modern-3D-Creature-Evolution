@@ -5,6 +5,7 @@
 
 mod backend;
 mod batch;
+mod brain;
 mod config;
 mod creature;
 mod evolution;
@@ -15,6 +16,9 @@ pub use backend::{
     BackendCapabilities, PhysicsBackend, ProbeSpec, SimulationReport, WorldSnapshot,
 };
 pub use batch::BatchRunner;
+pub use brain::{
+    BrainContext, BrainGenome, BrainOutputGene, Expression, SensorKind, legacy_expression,
+};
 pub use config::SimulationConfig;
 pub use creature::{
     CreatureBodySnapshot, CreatureGenome, CreatureReport, CreatureSimulator, CreatureSnapshot,
