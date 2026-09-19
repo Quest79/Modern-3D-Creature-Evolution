@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     BrainContext, BrainGenome, JointSensorState, SegmentSensorState, SimulationConfig,
-    legacy_expression,
+    WorldConfig, legacy_expression,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -220,14 +220,26 @@ impl CreatureSimulator {
         let mut rigid_bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
-        let ground = ColliderBuilder::cuboid(
-            config.ground_half_extents[0],
-            config.ground_half_extents[1],
-            config.ground_half_extents[2],
-        )
-        .friction(1.0)
-        .build();
-        colliders.insert(ground);
+        for shape in config.world.geometry() {
+            let collider = ColliderBuilder::cuboid(
+                shape.half_extents[0],
+                shape.half_extents[1],
+                shape.half_extents[2],
+            )
+            .translation(Vector::new(
+                shape.center[0],
+                shape.center[1],
+                shape.center[2],
+            ))
+            .rotation(Vector::new(
+                shape.rotation_radians[0],
+                shape.rotation_radians[1],
+                shape.rotation_radians[2],
+            ))
+            .friction(shape.friction)
+            .build();
+            colliders.insert(collider);
+        }
 
         let mut handles: HashMap<u32, RigidBodyHandle> = HashMap::new();
         for segment in &genome.segments {
@@ -292,7 +304,11 @@ impl CreatureSimulator {
             motor_handles.push((handle, joint_gene.clone()));
         }
 
-        let gravity = Vector::new(config.gravity[0], config.gravity[1], config.gravity[2]);
+        let gravity = Vector::new(
+            config.world.gravity[0],
+            config.world.gravity[1],
+            config.world.gravity[2],
+        );
         let integration_parameters = IntegrationParameters {
             dt: config.dt,
             ..IntegrationParameters::default()
@@ -324,7 +340,7 @@ impl CreatureSimulator {
                 &rigid_bodies,
                 root_body_handle,
                 time_seconds,
-                config.ground_half_extents[1],
+                &config.world,
             )?;
 
             for (joint_handle, gene) in &motor_handles {
@@ -406,7 +422,7 @@ impl CreatureSimulator {
         rigid_bodies: &RigidBodySet,
         root_body_handle: RigidBodyHandle,
         time_seconds: f32,
-        ground_top_y: f32,
+        world: &WorldConfig,
     ) -> Result<BrainContext, String> {
         let root = rigid_bodies
             .get(root_body_handle)
@@ -462,10 +478,10 @@ impl CreatureSimulator {
                 + axis_y.y.abs() * segment.half_extents[1]
                 + axis_z.y.abs() * segment.half_extents[2];
             let bottom_y = body.translation().y - projected_half_height;
-            let ground_contact = if bottom_y <= ground_top_y + 0.02 {
-                1.0
-            } else {
-                0.0
+            let position = body.translation();
+            let ground_contact = match world.surface_height_at(position.x, position.z) {
+                Some(surface_y) if bottom_y <= surface_y + 0.03 => 1.0,
+                _ => 0.0,
             };
 
             segments.push(SegmentSensorState {
