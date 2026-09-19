@@ -345,6 +345,10 @@ func _build_3d_preview() -> void:
     _probe_mesh.material_override = probe_material
     add_child(_probe_mesh)
 
+    # Always show a ground plane immediately. The Rust backend replaces this
+    # fallback with authoritative world geometry as soon as it is available.
+    _build_world_fallback(_world_config_dictionary())
+
     _camera = Camera3D.new()
     _camera.position = Vector3(9.2, 5.8, 9.2)
     add_child(_camera)
@@ -2363,11 +2367,16 @@ func _refresh_world_preview() -> void:
 
 
 func _render_world_config(world_config: Dictionary) -> void:
-    if not _backend_exists():
+    var world_json := JSON.stringify(world_config)
+    if world_json == _rendered_world_json and not _world_meshes.is_empty():
         return
 
-    var world_json := JSON.stringify(world_config)
-    if world_json == _rendered_world_json:
+    # Never leave the viewer as an empty void if the backend is missing,
+    # starting, or returns invalid geometry.
+    if _world_meshes.is_empty():
+        _build_world_fallback(world_config)
+
+    if not _backend_exists():
         return
 
     var output: Array = []
@@ -2389,8 +2398,36 @@ func _render_world_config(world_config: Dictionary) -> void:
     if typeof(parsed) != TYPE_DICTIONARY:
         return
 
-    _build_world_from_geometry(parsed.get("geometry", []))
+    var geometry_value = parsed.get("geometry", [])
+    if typeof(geometry_value) != TYPE_ARRAY or geometry_value.is_empty():
+        return
+
+    _build_world_from_geometry(geometry_value)
     _rendered_world_json = world_json
+
+
+func _build_world_fallback(world_config: Dictionary) -> void:
+    var half_value = world_config.get("ground_half_extents", [50.0, 0.1, 12.0])
+    var half := [50.0, 0.1, 12.0]
+    if typeof(half_value) == TYPE_ARRAY and half_value.size() >= 3:
+        half = [
+            float(half_value[0]),
+            float(half_value[1]),
+            float(half_value[2]),
+        ]
+
+    var angle := 0.0
+    if str(world_config.get("terrain", "flat")) == "slope":
+        angle = deg_to_rad(float(world_config.get("slope_degrees", 0.0)))
+
+    _build_world_from_geometry([
+        {
+            "kind": "ground",
+            "center": [0.0, -float(half[1]), 0.0],
+            "half_extents": half,
+            "rotation_radians": [0.0, 0.0, angle],
+        }
+    ])
 
 
 func _build_world_from_geometry(geometry_value) -> void:
@@ -2442,7 +2479,8 @@ func _build_world_from_geometry(geometry_value) -> void:
             "pit_floor":
                 material.albedo_color = Color(0.10, 0.12, 0.15)
             _:
-                material.albedo_color = Color(0.15, 0.18, 0.22)
+                # Ground needs clear contrast from the near-black sky/background.
+                material.albedo_color = Color(0.24, 0.28, 0.34)
         material.roughness = 0.8
         instance.material_override = material
         add_child(instance)
@@ -2689,11 +2727,18 @@ func _update_layout() -> void:
         MIN_HUD_WIDTH,
         minf(MAX_HUD_WIDTH, viewport_size.x - 240.0)
     )
-    _visible_hud_width = clampf(_hud_width, MIN_HUD_WIDTH, max_for_window)
+    var requested_width := clampf(_hud_width, MIN_HUD_WIDTH, max_for_window)
 
     if is_instance_valid(_hud_panel):
+        # Container children can force the panel wider than the requested size.
+        # Use that real minimum so the resize handle stays on the actual edge.
+        var content_min_width := _hud_panel.get_combined_minimum_size().x
+        _visible_hud_width = maxf(requested_width, content_min_width)
         _hud_panel.position = Vector2.ZERO
         _hud_panel.size = Vector2(_visible_hud_width, viewport_size.y)
+        _visible_hud_width = _hud_panel.size.x
+    else:
+        _visible_hud_width = requested_width
 
     if is_instance_valid(_hud_resize_handle):
         _hud_resize_handle.position = Vector2(
