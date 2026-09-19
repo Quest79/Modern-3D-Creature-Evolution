@@ -222,7 +222,13 @@ impl WorldConfig {
         match self.terrain {
             TerrainKind::Flat => 0.0,
             TerrainKind::Slope => self.slope_degrees.to_radians().tan() * x,
-            TerrainKind::Hills => self.hill_height * (TAU * x / self.hill_wavelength).sin(),
+            TerrainKind::Hills => {
+                let k = TAU / self.hill_wavelength;
+                let phase = self.hill_seed_phase();
+                let base = (k * x).sin();
+                let detail = 0.35 * ((1.7 * k * x + phase).sin() - phase.sin());
+                self.hill_height * (base + detail) / 1.7
+            },
             TerrainKind::Stairs => {
                 if x <= 0.0 {
                     0.0
@@ -238,9 +244,12 @@ impl WorldConfig {
             TerrainKind::Flat | TerrainKind::Stairs => 0.0,
             TerrainKind::Slope => self.slope_degrees.to_radians(),
             TerrainKind::Hills => {
+                let k = TAU / self.hill_wavelength;
+                let phase = self.hill_seed_phase();
                 let derivative = self.hill_height
-                    * (TAU / self.hill_wavelength)
-                    * (TAU * x / self.hill_wavelength).cos();
+                    * (k * (k * x).cos()
+                        + 0.35 * 1.7 * k * (1.7 * k * x + phase).cos())
+                    / 1.7;
                 derivative.atan()
             }
         }
@@ -288,6 +297,17 @@ impl WorldConfig {
 
             x += tile_width;
         }
+    }
+
+    fn hill_seed_phase(&self) -> f32 {
+        let mut value = self.seed ^ 0xA076_1D64_78BD_642F;
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
+        value ^= value >> 31;
+        let unit = (value >> 40) as f32 / ((1_u32 << 24) - 1) as f32;
+        unit * TAU
     }
 
     fn feature_half_width(&self, feature: Feature) -> f32 {
