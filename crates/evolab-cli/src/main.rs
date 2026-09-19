@@ -208,19 +208,19 @@ fn run() -> Result<(), String> {
             mutations,
             random_segments,
             max_segments,
-        } => run_creature_stream(
-            &event_host,
+        } => run_creature_stream(CreatureStreamRequest {
+            event_host: &event_host,
             event_port,
             seconds,
             dt,
             frame_hz,
-            !max_speed,
-            genome.as_ref(),
+            realtime: !max_speed,
+            genome_path: genome.as_ref(),
             seed,
             mutations,
             random_segments,
             max_segments,
-        ),
+        }),
         Command::GenomeGenerate {
             output,
             seed,
@@ -427,19 +427,34 @@ fn run_stream(
     Ok(())
 }
 
-fn run_creature_stream(
-    event_host: &str,
+struct CreatureStreamRequest<'a> {
+    event_host: &'a str,
     event_port: u16,
     seconds: f32,
     dt: f32,
     frame_hz: f32,
     realtime: bool,
-    genome_path: Option<&PathBuf>,
+    genome_path: Option<&'a PathBuf>,
     seed: u64,
     mutations: usize,
     random_segments: usize,
     max_segments: usize,
-) -> Result<(), String> {
+}
+
+fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String> {
+    let CreatureStreamRequest {
+        event_host,
+        event_port,
+        seconds,
+        dt,
+        frame_hz,
+        realtime,
+        genome_path,
+        seed,
+        mutations,
+        random_segments,
+        max_segments,
+    } = request;
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
     }
