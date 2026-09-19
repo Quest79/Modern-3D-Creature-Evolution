@@ -2237,6 +2237,49 @@ func _timeline_json() -> String:
     return JSON.stringify(_timeline_config_dictionary())
 
 
+func _on_accelerator_selected(index: int) -> void:
+    var values := ["cpu", "auto", "cuda"]
+    if index >= 0 and index < values.size():
+        _accelerator_mode = values[index]
+    _save_settings()
+
+
+func _on_gpu_ids_changed(value: String) -> void:
+    _gpu_ids = value.strip_edges()
+    _save_settings()
+
+
+func _on_accelerator_number_changed(_value: float) -> void:
+    _gpu_batch_size = int(_gpu_batch_spin.value)
+    _gpu_max_parts = int(_gpu_max_parts_spin.value)
+    _gpu_max_joints = int(_gpu_max_joints_spin.value)
+    _save_settings()
+
+
+func _on_cpu_fallback_toggled(value: bool) -> void:
+    _cpu_fallback = value
+    _save_settings()
+
+
+func _on_throughput_selected(index: int) -> void:
+    _throughput_mode = "deterministic" if index == 0 else "max"
+    _save_settings()
+
+
+func _accelerator_cli_args() -> PackedStringArray:
+    var args := PackedStringArray([
+        "--accelerator", _accelerator_mode,
+        "--gpus", _gpu_ids,
+        "--gpu-batch-size", str(int(_gpu_batch_spin.value)),
+        "--gpu-max-parts", str(int(_gpu_max_parts_spin.value)),
+        "--gpu-max-joints", str(int(_gpu_max_joints_spin.value)),
+        "--throughput-mode", _throughput_mode,
+    ])
+    if not _cpu_fallback_check.button_pressed:
+        args.append("--no-cpu-fallback")
+    return args
+
+
 func _on_terrain_selected(index: int) -> void:
     var terrain_names := ["flat", "slope", "hills", "stairs"]
     if index >= 0 and index < terrain_names.size():
@@ -2527,6 +2570,36 @@ func _load_settings() -> void:
     )
     _structural_mutation_chance = clampf(_structural_mutation_chance, 0.0, 1.0)
 
+    _accelerator_mode = str(
+        config.get_value("accelerator", "mode", _accelerator_mode)
+    )
+    if _accelerator_mode not in ["cpu", "auto", "cuda"]:
+        _accelerator_mode = "cpu"
+    _gpu_ids = str(config.get_value("accelerator", "gpu_ids", _gpu_ids))
+    _gpu_batch_size = clampi(
+        int(config.get_value("accelerator", "batch_size", _gpu_batch_size)),
+        1,
+        1000000
+    )
+    _gpu_max_parts = clampi(
+        int(config.get_value("accelerator", "max_parts", _gpu_max_parts)),
+        1,
+        1024
+    )
+    _gpu_max_joints = clampi(
+        int(config.get_value("accelerator", "max_joints", _gpu_max_joints)),
+        1,
+        2048
+    )
+    _cpu_fallback = bool(
+        config.get_value("accelerator", "cpu_fallback", _cpu_fallback)
+    )
+    _throughput_mode = str(
+        config.get_value("accelerator", "throughput_mode", _throughput_mode)
+    )
+    if _throughput_mode not in ["deterministic", "max"]:
+        _throughput_mode = "deterministic"
+
     var timeline_raw := str(config.get_value("timeline", "json", ""))
     if not timeline_raw.is_empty():
         var parsed_timeline = JSON.parse_string(timeline_raw)
@@ -2588,6 +2661,13 @@ func _save_settings() -> void:
         "structural_mutation_chance",
         _structural_mutation_chance
     )
+    config.set_value("accelerator", "mode", _accelerator_mode)
+    config.set_value("accelerator", "gpu_ids", _gpu_ids)
+    config.set_value("accelerator", "batch_size", _gpu_batch_size)
+    config.set_value("accelerator", "max_parts", _gpu_max_parts)
+    config.set_value("accelerator", "max_joints", _gpu_max_joints)
+    config.set_value("accelerator", "cpu_fallback", _cpu_fallback)
+    config.set_value("accelerator", "throughput_mode", _throughput_mode)
     config.set_value("timeline", "json", JSON.stringify(_timeline_config_dictionary()))
     config.set_value("camera", "move_speed", _camera_move_speed)
     config.set_value(
@@ -2796,15 +2876,26 @@ func _load_capabilities() -> void:
 
     var backends: Array = parsed.get("backends", [])
     var backend: Dictionary = backends[0] if not backends.is_empty() else {}
+    _cuda_devices = parsed.get("cuda_devices", [])
+    var gpu_text := "no CUDA GPU"
+    if not _cuda_devices.is_empty():
+        var names: PackedStringArray = []
+        for device_value in _cuda_devices:
+            if typeof(device_value) == TYPE_DICTIONARY:
+                var device: Dictionary = device_value
+                names.append(
+                    "%s: %s"
+                    % [str(device.get("id", "?")), str(device.get("name", "GPU"))]
+                )
+        gpu_text = ", ".join(names)
+
     _capabilities_label.text = (
-        "v%s • %s logical CPU threads • %s • deterministic: %s • streaming: %s • GPU: %s"
+        "v%s • %s CPU threads • %s • CUDA: %s"
         % [
             str(parsed.get("app_version", "?")),
             str(parsed.get("logical_cpu_threads", "?")),
             str(backend.get("name", "unknown")),
-            _yes_no(backend.get("deterministic", false)),
-            _yes_no(backend.get("state_streaming", false)),
-            "yes" if backend.get("gpu_accelerated", false) else "not yet",
+            gpu_text,
         ]
     )
 
@@ -3041,6 +3132,15 @@ func _experiment_ancestor_dictionary() -> Dictionary:
     return {}
 
 
+func _parse_gpu_ids_for_json(value: String) -> Array:
+    var ids: Array = []
+    for part in value.split(",", false):
+        var trimmed := part.strip_edges()
+        if trimmed.is_valid_int():
+            ids.append(int(trimmed))
+    return ids
+
+
 func _experiment_dictionary(name_override := "") -> Dictionary:
     var ancestor := _experiment_ancestor_dictionary()
     if ancestor.is_empty():
@@ -3082,6 +3182,19 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
             },
             "trials_per_creature": int(_trials_spin.value),
             "trial_aggregation": _trial_aggregation_value(),
+            "accelerator": {
+                "mode": _accelerator_mode,
+                "gpu_ids": _parse_gpu_ids_for_json(_gpu_ids_edit.text),
+                "batch_size": int(_gpu_batch_spin.value),
+                "max_parts": int(_gpu_max_parts_spin.value),
+                "max_joints": int(_gpu_max_joints_spin.value),
+                "cpu_fallback": _cpu_fallback_check.button_pressed,
+                "throughput_mode": (
+                    "deterministic"
+                    if _throughput_mode == "deterministic"
+                    else "max_throughput"
+                ),
+            },
             "timeline": _timeline_config_dictionary(),
         },
     }
@@ -3237,6 +3350,41 @@ func _apply_experiment_dictionary(experiment: Dictionary) -> bool:
     )
     _trial_aggregation_option.select(maxi(aggregation_index, 0))
 
+    var accelerator_value = evolution.get("accelerator", {})
+    if typeof(accelerator_value) == TYPE_DICTIONARY:
+        var accelerator: Dictionary = accelerator_value
+        _accelerator_mode = str(accelerator.get("mode", _accelerator_mode))
+        var accelerator_index := ["cpu", "auto", "cuda"].find(_accelerator_mode)
+        _accelerator_option.select(maxi(accelerator_index, 0))
+
+        var gpu_ids_value = accelerator.get("gpu_ids", [])
+        if typeof(gpu_ids_value) == TYPE_ARRAY:
+            var gpu_parts: PackedStringArray = []
+            for gpu_id in gpu_ids_value:
+                gpu_parts.append(str(gpu_id))
+            _gpu_ids = ",".join(gpu_parts)
+            _gpu_ids_edit.text = _gpu_ids
+
+        _gpu_batch_spin.value = int(
+            accelerator.get("batch_size", _gpu_batch_spin.value)
+        )
+        _gpu_max_parts_spin.value = int(
+            accelerator.get("max_parts", _gpu_max_parts_spin.value)
+        )
+        _gpu_max_joints_spin.value = int(
+            accelerator.get("max_joints", _gpu_max_joints_spin.value)
+        )
+        _cpu_fallback_check.button_pressed = bool(
+            accelerator.get("cpu_fallback", _cpu_fallback_check.button_pressed)
+        )
+        var throughput := str(
+            accelerator.get("throughput_mode", "deterministic")
+        )
+        _throughput_mode = (
+            "max" if throughput in ["max", "max_throughput"] else "deterministic"
+        )
+        _throughput_option.select(0 if _throughput_mode == "deterministic" else 1)
+
     var timeline_value = evolution.get("timeline", {})
     if typeof(timeline_value) == TYPE_DICTIONARY:
         var keyframes = timeline_value.get("keyframes", [])
@@ -3364,6 +3512,10 @@ func _evolution_results_path() -> String:
     return ProjectSettings.globalize_path("user://evolution_results.evoresults")
 
 
+func _evolution_checkpoint_path() -> String:
+    return ProjectSettings.globalize_path("user://evolution_checkpoint.evockpt")
+
+
 func _load_results_file(path: String) -> bool:
     if not FileAccess.file_exists(path):
         return false
@@ -3452,6 +3604,8 @@ func _on_batch_pressed() -> void:
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
         "--world-json", _world_json(),
+        "--backend", _accelerator_mode,
+        "--gpus", _gpu_ids_edit.text.strip_edges(),
         "--event-port", str(_event_port),
     ])
 
@@ -3533,6 +3687,9 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
     _live_button.disabled = disabled
     _batch_button.disabled = disabled
     _evolve_button.disabled = disabled
+    _resume_evolution_button.disabled = (
+        disabled or not FileAccess.file_exists(_evolution_checkpoint_path())
+    )
     _watch_champion_button.disabled = disabled or not _has_evolution_champion
     _save_button.disabled = disabled or _current_genome.is_empty()
     _save_experiment_button.disabled = disabled
