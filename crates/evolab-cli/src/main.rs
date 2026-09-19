@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
     FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
-    SimulationConfig, WorldConfig, WorldSnapshot, evolve_population, mutate_genome,
-    random_creature,
+    SimulationConfig, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    evolve_population, mutate_genome, random_creature,
 };
 use serde_json::{Value, json};
 
@@ -219,6 +219,22 @@ enum Command {
         #[arg(long)]
         world_json: Option<String>,
 
+        /// Global actuator strength multiplier.
+        #[arg(long, default_value_t = 1.0)]
+        motor_strength: f32,
+
+        /// Number of deterministic trial seeds per creature.
+        #[arg(long, default_value_t = 1)]
+        trials: usize,
+
+        /// Trial aggregation: mean, median, worst, or best.
+        #[arg(long, default_value = "mean")]
+        trial_aggregation: String,
+
+        /// Serialized TimelineConfig JSON.
+        #[arg(long)]
+        timeline_json: Option<String>,
+
         /// Weight for horizontal distance traveled.
         #[arg(long, default_value_t = 1.0)]
         fitness_distance: f32,
@@ -371,6 +387,10 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json,
+            motor_strength,
+            trials,
+            trial_aggregation,
+            timeline_json,
             fitness_distance,
             fitness_speed,
             fitness_upright,
@@ -394,6 +414,10 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json: world_json.as_deref(),
+            motor_strength,
+            trials,
+            trial_aggregation: &trial_aggregation,
+            timeline_json: timeline_json.as_deref(),
             fitness_distance,
             fitness_speed,
             fitness_upright,
@@ -830,6 +854,10 @@ struct EvolveRequest<'a> {
     seconds: f32,
     dt: f32,
     world_json: Option<&'a str>,
+    motor_strength: f32,
+    trials: usize,
+    trial_aggregation: &'a str,
+    timeline_json: Option<&'a str>,
     fitness_distance: f32,
     fitness_speed: f32,
     fitness_upright: f32,
@@ -876,6 +904,18 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         CreatureGenome::three_segment_walker()
     };
 
+    let mut simulation = simulation_config(request.seconds, request.dt, request.world_json)?;
+    simulation.motor_strength_multiplier = request.motor_strength;
+
+    let timeline = if let Some(raw) = request.timeline_json {
+        serde_json::from_str::<TimelineConfig>(raw)
+            .map_err(|err| format!("invalid --timeline-json: {err}"))?
+    } else {
+        TimelineConfig::default()
+    };
+
+    let trial_aggregation = parse_trial_aggregation(request.trial_aggregation)?;
+
     let config = EvolutionConfig {
         population_size: request.population,
         generations: request.generations,
@@ -885,7 +925,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         mutations_per_child: request.mutations,
         seed: request.seed,
         worker_threads: request.workers,
-        simulation: simulation_config(request.seconds, request.dt, request.world_json)?,
+        simulation,
         fitness: FitnessConfig {
             weights: FitnessWeights {
                 distance: request.fitness_distance,
@@ -899,6 +939,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             max_segments: request.max_segments.max(2),
             ..MutationConfig::default()
         },
+        trials_per_creature: request.trials,
+        trial_aggregation,
+        timeline,
     };
     config.validate()?;
 
@@ -915,6 +958,10 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "crossover_chance": config.crossover_chance,
                 "mutations_per_child": config.mutations_per_child,
                 "fitness_weights": config.fitness.weights,
+                "motor_strength_multiplier": config.simulation.motor_strength_multiplier,
+                "trials_per_creature": config.trials_per_creature,
+                "trial_aggregation": config.trial_aggregation,
+                "timeline": config.timeline,
                 "world": config.simulation.world,
                 "world_geometry": config.simulation.world.geometry(),
             }),
@@ -948,6 +995,22 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     "best_brain_unique_sensors": summary.best_brain_unique_sensors,
                     "best_brain_outputs": summary.best_brain_outputs,
                     "evaluations_completed": summary.evaluations_completed,
+                    "effective_population": summary.effective_settings.population_size,
+                    "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
+                    "effective_structural_mutation_chance":
+                        summary.effective_settings.mutation.structural_mutation_chance,
+                    "effective_motor_strength_multiplier":
+                        summary.effective_settings.simulation.motor_strength_multiplier,
+                    "effective_duration_seconds":
+                        summary.effective_settings.simulation.duration_seconds,
+                    "effective_trials_per_creature":
+                        summary.effective_settings.trials_per_creature,
+                    "effective_trial_aggregation":
+                        summary.effective_settings.trial_aggregation,
+                    "effective_fitness_weights": summary.effective_settings.fitness.weights,
+                    "effective_world": summary.effective_settings.simulation.world,
+                    "active_timeline_events": summary.active_timeline_events,
+                    "triggered_timeline_events": summary.triggered_timeline_events,
                     "champion_file": request
                         .champion_output
                         .map(|path| path.to_string_lossy().to_string()),
@@ -989,6 +1052,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         "champion_brain_outputs": result.champion.brain.outputs.len(),
         "generations_completed": result.generations_completed,
         "evaluations_completed": result.evaluations_completed,
+        "final_settings": result.final_settings,
         "wall_seconds": elapsed.as_secs_f64(),
         "champion_file": request
             .champion_output
@@ -1011,6 +1075,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "fitness_weights": config.fitness.weights,
                 "generations_completed": result.generations_completed,
                 "evaluations_completed": result.evaluations_completed,
+                "final_settings": result.final_settings,
                 "wall_seconds": elapsed.as_secs_f64(),
                 "champion": result.champion,
                 "history": result.history,
@@ -1035,6 +1100,18 @@ fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
         .map_err(|err| format!("failed to serialize champion genome: {err}"))?;
     fs::write(path, json)
         .map_err(|err| format!("failed to write champion genome {}: {err}", path.display()))
+}
+
+fn parse_trial_aggregation(value: &str) -> Result<TrialAggregation, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mean" => Ok(TrialAggregation::Mean),
+        "median" => Ok(TrialAggregation::Median),
+        "worst" => Ok(TrialAggregation::Worst),
+        "best" => Ok(TrialAggregation::Best),
+        other => Err(format!(
+            "invalid trial aggregation '{other}'; expected mean, median, worst, or best"
+        )),
+    }
 }
 
 fn simulation_config(
