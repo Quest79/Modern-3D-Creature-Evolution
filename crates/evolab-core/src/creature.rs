@@ -342,10 +342,8 @@ impl CreatureSimulator {
                 {
                     let position_error = (target - sensor.angle_radians).abs();
                     let angular_speed = sensor.velocity_radians_per_second.abs();
-                    let torque_proxy = (
-                        position_error * gene.motor_stiffness
-                            + angular_speed * gene.motor_damping
-                    )
+                    let torque_proxy = (position_error * gene.motor_stiffness
+                        + angular_speed * gene.motor_damping)
                         .min(gene.motor_max_torque);
                     motor_effort += torque_proxy * angular_speed * config.dt;
                 }
