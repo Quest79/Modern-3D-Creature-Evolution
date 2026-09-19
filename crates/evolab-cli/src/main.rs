@@ -9,9 +9,8 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
     ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec,
-    RapierCpuBackend,
-    SimulationConfig, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
-    evolve_population, mutate_genome, random_creature,
+    RapierCpuBackend, SimulationConfig, TimelineConfig, TrialAggregation, WorldConfig,
+    WorldSnapshot, evolve_population, mutate_genome, random_creature,
 };
 use serde_json::{Value, json};
 
@@ -1159,30 +1158,26 @@ fn run_experiment(
     }
 
     let started = Instant::now();
-    let result = evolve_population(
-        &experiment.ancestor,
-        &experiment.evolution,
-        |summary| {
-            if !json_output {
+    let result = evolve_population(&experiment.ancestor, &experiment.evolution, |summary| {
+        if !json_output {
+            println!(
+                "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
+                summary.generation,
+                experiment.evolution.generations,
+                summary.best_fitness,
+                summary.average_fitness,
+                summary.best_distance,
+                summary.effective_settings.trials_per_creature,
+            );
+            if !summary.triggered_timeline_events.is_empty() {
                 println!(
-                    "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
-                    summary.generation,
-                    experiment.evolution.generations,
-                    summary.best_fitness,
-                    summary.average_fitness,
-                    summary.best_distance,
-                    summary.effective_settings.trials_per_creature,
+                    "  timeline triggered: {}",
+                    summary.triggered_timeline_events.join(", ")
                 );
-                if !summary.triggered_timeline_events.is_empty() {
-                    println!(
-                        "  timeline triggered: {}",
-                        summary.triggered_timeline_events.join(", ")
-                    );
-                }
             }
-            Ok(())
-        },
-    )?;
+        }
+        Ok(())
+    })?;
     let elapsed = started.elapsed();
 
     if let Some(output) = champion_output {
@@ -1220,7 +1215,6 @@ fn run_experiment(
 
     Ok(())
 }
-
 
 fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
     let json = serde_json::to_string_pretty(genome)
