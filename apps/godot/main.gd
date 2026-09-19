@@ -887,9 +887,9 @@ func _build_world_from_geometry(geometry_value) -> void:
 
 
 func _set_world_controls_enabled(enabled: bool) -> void:
-    var controls: Array[Control] = []
     if _terrain_option != null:
-        controls.append(_terrain_option)
+        _terrain_option.disabled = not enabled
+
     for spin in [
         _world_seed_spin,
         _gravity_x_spin,
@@ -908,13 +908,11 @@ func _set_world_controls_enabled(enabled: bool) -> void:
         _pit_depth_spin,
     ]:
         if spin != null:
-            controls.append(spin)
+            spin.editable = enabled
+
     for check in [_walls_check, _blocks_check, _gaps_check, _pits_check]:
         if check != null:
-            controls.append(check)
-
-    for control in controls:
-        control.disabled = not enabled
+            check.disabled = not enabled
 
 
 func _apply_font_size() -> void:
