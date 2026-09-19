@@ -7,16 +7,33 @@ var _batch_spin: SpinBox
 var _workers_spin: SpinBox
 var _seconds_spin: SpinBox
 var _dt_spin: SpinBox
+var _seed_spin: SpinBox
+var _mutation_spin: SpinBox
+var _random_segments_spin: SpinBox
+var _max_segments_spin: SpinBox
+
+var _seed_creature_button: Button
+var _mutate_button: Button
+var _random_button: Button
+var _save_button: Button
+var _load_button: Button
 var _live_button: Button
-var _creature_button: Button
 var _batch_button: Button
 var _stop_button: Button
+
 var _status_label: Label
 var _progress_bar: ProgressBar
 var _metrics: RichTextLabel
 var _capabilities_label: Label
+
 var _probe_mesh: MeshInstance3D
 var _creature_meshes: Dictionary = {}
+var _current_genome: Dictionary = {}
+var _current_genome_source := ""
+var _current_mutation_count := 0
+
+var _save_dialog: FileDialog
+var _load_dialog: FileDialog
 
 var _udp: PacketPeerUDP
 var _event_port := 0
@@ -28,6 +45,7 @@ var _last_state_time := 0.0
 func _ready() -> void:
     _build_3d_preview()
     _build_ui()
+    _build_file_dialogs()
 
     if not _backend_exists():
         _set_status("Rust backend missing. Run BOOTSTRAP_AND_RUN.bat.")
@@ -108,9 +126,9 @@ func _build_3d_preview() -> void:
 
     var ground := MeshInstance3D.new()
     var ground_mesh := BoxMesh.new()
-    ground_mesh.size = Vector3(12.0, 0.2, 12.0)
+    ground_mesh.size = Vector3(14.0, 0.2, 14.0)
     ground.mesh = ground_mesh
-    ground.position = Vector3(1.8, 0.0, 0.0)
+    ground.position = Vector3(2.2, 0.0, 0.0)
     var ground_material := StandardMaterial3D.new()
     ground_material.albedo_color = Color(0.15, 0.18, 0.22)
     ground.material_override = ground_material
@@ -120,7 +138,7 @@ func _build_3d_preview() -> void:
     var probe_box := BoxMesh.new()
     probe_box.size = Vector3(0.5, 0.5, 0.5)
     _probe_mesh.mesh = probe_box
-    _probe_mesh.position = Vector3(1.8, 3.0, 0.0)
+    _probe_mesh.position = Vector3(2.2, 3.0, 0.0)
     var probe_material := StandardMaterial3D.new()
     probe_material.albedo_color = Color(0.25, 0.75, 1.0)
     probe_material.metallic = 0.15
@@ -129,9 +147,9 @@ func _build_3d_preview() -> void:
     add_child(_probe_mesh)
 
     var camera := Camera3D.new()
-    camera.position = Vector3(8.5, 5.5, 8.5)
+    camera.position = Vector3(9.2, 5.8, 9.2)
     add_child(camera)
-    camera.look_at(Vector3(1.8, 1.0, 0.0), Vector3.UP)
+    camera.look_at(Vector3(2.2, 1.2, 0.0), Vector3.UP)
 
 
 func _build_ui() -> void:
@@ -140,18 +158,18 @@ func _build_ui() -> void:
 
     var panel := PanelContainer.new()
     panel.position = Vector2(18, 18)
-    panel.size = Vector2(470, 800)
+    panel.size = Vector2(510, 884)
     layer.add_child(panel)
 
     var margin := MarginContainer.new()
     margin.add_theme_constant_override("margin_left", 18)
     margin.add_theme_constant_override("margin_right", 18)
-    margin.add_theme_constant_override("margin_top", 16)
-    margin.add_theme_constant_override("margin_bottom", 16)
+    margin.add_theme_constant_override("margin_top", 14)
+    margin.add_theme_constant_override("margin_bottom", 14)
     panel.add_child(margin)
 
     var column := VBoxContainer.new()
-    column.add_theme_constant_override("separation", 8)
+    column.add_theme_constant_override("separation", 6)
     margin.add_child(column)
 
     var title := Label.new()
@@ -160,39 +178,95 @@ func _build_ui() -> void:
     column.add_child(title)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 2 • Creature Morphology"
+    subtitle.text = "Step 2 • Mutation-Ready Creature Genome"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
     column.add_child(HSeparator.new())
 
-    _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
-    _batch_spin.tooltip_text = "Independent physics simulations evaluated as a batch."
-    _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
+    var editor_heading := Label.new()
+    editor_heading.text = "Creature generation"
+    editor_heading.add_theme_font_size_override("font_size", 17)
+    column.add_child(editor_heading)
+
+    _seed_spin = _add_number_row(column, "Seed", 1, 999999999, 1, 1)
+    _mutation_spin = _add_number_row(column, "Mutation operations", 0, 500, 12, 1)
+    _random_segments_spin = _add_number_row(column, "Random creature segments", 2, 40, 5, 1)
+    _max_segments_spin = _add_number_row(column, "Maximum segments", 2, 40, 12, 1)
+
+    var creature_row := HBoxContainer.new()
+    creature_row.add_theme_constant_override("separation", 6)
+    column.add_child(creature_row)
+
+    _seed_creature_button = Button.new()
+    _seed_creature_button.text = "Seed"
+    _seed_creature_button.tooltip_text = "Run the known three-segment seed creature."
+    _seed_creature_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _seed_creature_button.pressed.connect(_on_seed_creature_pressed)
+    creature_row.add_child(_seed_creature_button)
+
+    _mutate_button = Button.new()
+    _mutate_button.text = "Mutate Current"
+    _mutate_button.tooltip_text = "Mutate the current creature. If none exists, mutate the seed creature."
+    _mutate_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _mutate_button.pressed.connect(_on_mutate_pressed)
+    creature_row.add_child(_mutate_button)
+
+    _random_button = Button.new()
+    _random_button.text = "Random"
+    _random_button.tooltip_text = "Generate a new random morphology using the selected seed."
+    _random_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _random_button.pressed.connect(_on_random_pressed)
+    creature_row.add_child(_random_button)
+
+    var file_row := HBoxContainer.new()
+    file_row.add_theme_constant_override("separation", 6)
+    column.add_child(file_row)
+
+    _save_button = Button.new()
+    _save_button.text = "Save Genome..."
+    _save_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _save_button.disabled = true
+    _save_button.pressed.connect(_on_save_pressed)
+    file_row.add_child(_save_button)
+
+    _load_button = Button.new()
+    _load_button.text = "Load Genome..."
+    _load_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _load_button.pressed.connect(_on_load_pressed)
+    file_row.add_child(_load_button)
+
+    column.add_child(HSeparator.new())
+
+    var sim_heading := Label.new()
+    sim_heading.text = "Simulation / benchmark"
+    sim_heading.add_theme_font_size_override("font_size", 17)
+    column.add_child(sim_heading)
+
     _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 8.0, 0.1)
     _dt_spin = _add_number_row(column, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
+    _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
+    _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
 
-    _creature_button = Button.new()
-    _creature_button.text = "🧬 Watch 3-Segment Creature"
-    _creature_button.custom_minimum_size = Vector2(0, 42)
-    _creature_button.pressed.connect(_on_creature_pressed)
-    column.add_child(_creature_button)
+    var utility_row := HBoxContainer.new()
+    utility_row.add_theme_constant_override("separation", 6)
+    column.add_child(utility_row)
 
     _live_button = Button.new()
-    _live_button.text = "Watch Single-Box Physics"
-    _live_button.custom_minimum_size = Vector2(0, 38)
+    _live_button.text = "Single Box"
+    _live_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _live_button.pressed.connect(_on_live_pressed)
-    column.add_child(_live_button)
+    utility_row.add_child(_live_button)
 
     _batch_button = Button.new()
-    _batch_button.text = "Run Parallel Benchmark"
-    _batch_button.custom_minimum_size = Vector2(0, 38)
+    _batch_button.text = "Benchmark"
+    _batch_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _batch_button.pressed.connect(_on_batch_pressed)
-    column.add_child(_batch_button)
+    utility_row.add_child(_batch_button)
 
     _stop_button = Button.new()
     _stop_button.text = "■ Stop"
-    _stop_button.custom_minimum_size = Vector2(0, 34)
+    _stop_button.custom_minimum_size = Vector2(0, 32)
     _stop_button.disabled = true
     _stop_button.pressed.connect(_on_stop_pressed)
     column.add_child(_stop_button)
@@ -211,16 +285,11 @@ func _build_ui() -> void:
 
     column.add_child(HSeparator.new())
 
-    var heading := Label.new()
-    heading.text = "Live state / latest result"
-    heading.add_theme_font_size_override("font_size", 18)
-    column.add_child(heading)
-
     _metrics = RichTextLabel.new()
     _metrics.bbcode_enabled = true
     _metrics.fit_content = false
-    _metrics.custom_minimum_size = Vector2(0, 190)
-    _metrics.text = "[color=#9aa7bd]Watch the creature or run a benchmark.[/color]"
+    _metrics.custom_minimum_size = Vector2(0, 155)
+    _metrics.text = "[color=#9aa7bd]Generate, mutate, load, or watch a creature.[/color]"
     column.add_child(_metrics)
 
     _capabilities_label = Label.new()
@@ -229,11 +298,22 @@ func _build_ui() -> void:
     _capabilities_label.modulate = Color(0.64, 0.7, 0.8)
     column.add_child(_capabilities_label)
 
-    var footer := Label.new()
-    footer.text = "The creature body and motorized joints are simulated in Rust. Godot only renders snapshots."
-    footer.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-    footer.modulate = Color(0.64, 0.7, 0.8)
-    column.add_child(footer)
+
+func _build_file_dialogs() -> void:
+    _save_dialog = FileDialog.new()
+    _save_dialog.access = FileDialog.ACCESS_FILESYSTEM
+    _save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+    _save_dialog.filters = PackedStringArray(["*.json ; Creature Genome JSON"])
+    _save_dialog.current_file = "creature_genome.json"
+    _save_dialog.file_selected.connect(_on_save_file_selected)
+    add_child(_save_dialog)
+
+    _load_dialog = FileDialog.new()
+    _load_dialog.access = FileDialog.ACCESS_FILESYSTEM
+    _load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+    _load_dialog.filters = PackedStringArray(["*.json ; Creature Genome JSON"])
+    _load_dialog.file_selected.connect(_on_load_file_selected)
+    add_child(_load_dialog)
 
 
 func _add_number_row(
@@ -257,7 +337,7 @@ func _add_number_row(
     spin.max_value = max_value
     spin.step = step_value
     spin.value = default_value
-    spin.custom_minimum_size = Vector2(145, 32)
+    spin.custom_minimum_size = Vector2(145, 29)
     row.add_child(spin)
     return spin
 
@@ -284,7 +364,7 @@ func _load_capabilities() -> void:
     var backends: Array = parsed.get("backends", [])
     var backend: Dictionary = backends[0] if not backends.is_empty() else {}
     _capabilities_label.text = (
-        "v%s • %s logical CPU threads • %s • deterministic: %s • live streaming: %s • GPU: %s"
+        "v%s • %s logical CPU threads • %s • deterministic: %s • streaming: %s • GPU: %s"
         % [
             str(parsed.get("app_version", "?")),
             str(parsed.get("logical_cpu_threads", "?")),
@@ -296,25 +376,122 @@ func _load_capabilities() -> void:
     )
 
 
-func _on_creature_pressed() -> void:
-    if _job_pid > 0:
-        return
-
-    _probe_mesh.visible = false
-    _clear_creature_meshes()
-    _progress_bar.value = 0
-    _metrics.text = "[color=#9aa7bd]Starting three-segment creature...[/color]"
-
-    var args := PackedStringArray([
+func _base_creature_args() -> PackedStringArray:
+    return PackedStringArray([
         "creature-stream",
         "--event-port", str(_event_port),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
         "--frame-hz", "60",
+        "--seed", str(int(_seed_spin.value)),
+        "--max-segments", str(int(_max_segments_spin.value)),
     ])
 
+
+func _prepare_creature_run() -> void:
+    _probe_mesh.visible = false
+    _clear_creature_meshes()
+    _progress_bar.value = 0
+    _metrics.text = "[color=#9aa7bd]Starting creature simulation...[/color]"
+
+
+func _on_seed_creature_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    _prepare_creature_run()
+    var args := _base_creature_args()
     if _start_job("creature", args):
-        _set_status("Three-segment creature running...")
+        _set_status("Running three-segment seed creature...")
+
+
+func _on_mutate_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    _prepare_creature_run()
+    var args := _base_creature_args()
+    args.append_array(PackedStringArray([
+        "--mutations", str(int(_mutation_spin.value)),
+    ]))
+
+    if not _current_genome.is_empty():
+        var temp_path := ProjectSettings.globalize_path("user://mutation_parent.json")
+        if not _write_genome_file(temp_path, _current_genome):
+            _set_status("Could not prepare current genome for mutation.")
+            return
+        args.append_array(PackedStringArray(["--genome", temp_path]))
+
+    if _start_job("creature", args):
+        _set_status("Mutating creature and running it...")
+
+
+func _on_random_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    _prepare_creature_run()
+    var args := _base_creature_args()
+    args.append_array(PackedStringArray([
+        "--random-segments", str(int(_random_segments_spin.value)),
+        "--mutations", str(int(_mutation_spin.value)),
+    ]))
+
+    if _start_job("creature", args):
+        _set_status("Generating random creature and running it...")
+
+
+func _on_save_pressed() -> void:
+    if _current_genome.is_empty():
+        _set_status("There is no creature genome to save yet.")
+        return
+    _save_dialog.popup_centered_ratio(0.70)
+
+
+func _on_load_pressed() -> void:
+    if _job_pid > 0:
+        return
+    _load_dialog.popup_centered_ratio(0.70)
+
+
+func _on_save_file_selected(path: String) -> void:
+    if _write_genome_file(path, _current_genome):
+        _set_status("Saved genome: %s" % path)
+    else:
+        _set_status("Failed to save genome: %s" % path)
+
+
+func _on_load_file_selected(path: String) -> void:
+    var file := FileAccess.open(path, FileAccess.READ)
+    if file == null:
+        _set_status("Could not open genome: %s" % path)
+        return
+
+    var parsed = JSON.parse_string(file.get_as_text())
+    file.close()
+
+    if typeof(parsed) != TYPE_DICTIONARY:
+        _set_status("Genome file is not valid JSON.")
+        return
+
+    _current_genome = parsed
+    _save_button.disabled = false
+    _prepare_creature_run()
+
+    var args := _base_creature_args()
+    args.append_array(PackedStringArray(["--genome", path]))
+
+    if _start_job("creature", args):
+        _set_status("Loaded genome. Rust is validating and simulating it...")
+
+
+func _write_genome_file(path: String, genome: Dictionary) -> bool:
+    var file := FileAccess.open(path, FileAccess.WRITE)
+    if file == null:
+        return false
+    file.store_string(JSON.stringify(genome, "\t"))
+    file.close()
+    return true
 
 
 func _on_live_pressed() -> void:
@@ -394,12 +571,17 @@ func _stop_current_job() -> void:
 func _finish_job_controls() -> void:
     _set_run_buttons_disabled(false)
     _stop_button.disabled = true
+    _save_button.disabled = _current_genome.is_empty()
 
 
 func _set_run_buttons_disabled(disabled: bool) -> void:
-    _creature_button.disabled = disabled
+    _seed_creature_button.disabled = disabled
+    _mutate_button.disabled = disabled
+    _random_button.disabled = disabled
+    _load_button.disabled = disabled
     _live_button.disabled = disabled
     _batch_button.disabled = disabled
+    _save_button.disabled = disabled or _current_genome.is_empty()
 
 
 func _handle_event(event: Dictionary) -> void:
@@ -447,13 +629,24 @@ func _handle_event(event: Dictionary) -> void:
             _progress_bar.value = 0
             _last_state_time = 0.0
             _probe_mesh.visible = false
-            _build_creature_from_genome(event.get("genome", {}))
+
+            var genome_value = event.get("genome", {})
+            if typeof(genome_value) == TYPE_DICTIONARY:
+                _current_genome = genome_value
+                _save_button.disabled = false
+
+            _current_genome_source = str(event.get("genome_source", "unknown"))
+            var mutation_log: Array = event.get("mutation_log", [])
+            _current_mutation_count = mutation_log.size()
+
+            _build_creature_from_genome(_current_genome)
             _set_status(
-                "%s • %s segments • %s motorized joints"
+                "%s • %s segments • %s joints • %s mutations"
                 % [
                     str(event.get("creature_name", "Creature")),
                     str(event.get("segment_count", 0)),
                     str(event.get("joint_count", 0)),
+                    str(_current_mutation_count),
                 ]
             )
 
@@ -463,7 +656,7 @@ func _handle_event(event: Dictionary) -> void:
         "creature_stream_complete":
             _progress_bar.value = 100
             _set_status(
-                "Creature simulation complete • %s s"
+                "Creature simulation complete • %s s • genome ready to save/mutate"
                 % _format_float(event.get("simulated_seconds", 0.0), 3)
             )
             _job_pid = 0
@@ -536,7 +729,7 @@ func _show_creature_state(state_value) -> void:
 
         if position.size() >= 3:
             mesh.position = Vector3(
-                1.8 + float(position[0]),
+                2.2 + float(position[0]),
                 float(position[1]),
                 float(position[2])
             )
@@ -574,12 +767,13 @@ func _show_creature_state(state_value) -> void:
 
     _metrics.text = (
         "[table=2]"
-        + "[cell]Mode[/cell][cell][b]3-segment creature[/b][/cell]"
+        + "[cell]Genome[/cell][cell][b]%s[/b][/cell]" % _current_genome_source
         + "[cell]Segments[/cell][cell]%s[/cell]" % str(bodies.size())
+        + "[cell]Mutations[/cell][cell]%s[/cell]" % str(_current_mutation_count)
         + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
-        + "[cell]Simulated time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
-        + "[cell]Torso height[/cell][cell]%s m[/cell]" % _format_float(root_height, 3)
-        + "[cell]Torso speed[/cell][cell]%s m/s[/cell]" % _format_float(root_speed, 3)
+        + "[cell]Time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
+        + "[cell]Root height[/cell][cell]%s m[/cell]" % _format_float(root_height, 3)
+        + "[cell]Root speed[/cell][cell]%s m/s[/cell]" % _format_float(root_speed, 3)
         + "[/table]"
     )
 
@@ -594,7 +788,7 @@ func _show_world_state(state_value) -> void:
 
     if position.size() >= 3:
         _probe_mesh.position = Vector3(
-            1.8 + float(position[0]),
+            2.2 + float(position[0]),
             float(position[1]),
             float(position[2])
         )
@@ -628,10 +822,9 @@ func _show_world_state(state_value) -> void:
         "[table=2]"
         + "[cell]Mode[/cell][cell][b]Single-box physics[/b][/cell]"
         + "[cell]Step[/cell][cell]%s[/cell]" % str(state.get("step", 0))
-        + "[cell]Simulated time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
+        + "[cell]Time[/cell][cell][b]%s s[/b][/cell]" % _format_float(_last_state_time, 3)
         + "[cell]Height[/cell][cell]%s m[/cell]" % _format_float(position[1] if position.size() >= 2 else 0.0, 3)
         + "[cell]Speed[/cell][cell]%s m/s[/cell]" % _format_float(speed, 3)
-        + "[cell]Sleeping[/cell][cell]%s[/cell]" % str(state.get("sleeping", false))
         + "[/table]"
     )
 
@@ -640,7 +833,7 @@ func _show_probe_result(result: Dictionary) -> void:
     var position: Array = result.get("final_probe_position", [0.0, 0.35, 0.0])
     if position.size() >= 3:
         _probe_mesh.position = Vector3(
-            1.8 + float(position[0]),
+            2.2 + float(position[0]),
             float(position[1]),
             float(position[2])
         )
@@ -649,38 +842,34 @@ func _show_probe_result(result: Dictionary) -> void:
 
     _metrics.text = (
         "[table=2]"
-        + "[cell]Simulations evaluated[/cell][cell][b]%s[/b][/cell]" % _format_int(result.get("worlds_evaluated", 0))
+        + "[cell]Simulations[/cell][cell][b]%s[/b][/cell]" % _format_int(result.get("worlds_evaluated", 0))
         + "[cell]Wall time[/cell][cell][b]%.4f s[/b][/cell]" % float(result.get("wall_seconds", 0.0))
-        + "[cell]Simulation throughput[/cell][cell][b]%s / s[/b][/cell]" % _format_float(result.get("worlds_per_second", 0.0), 1)
-        + "[cell]Physics throughput[/cell][cell][b]%s steps / s[/b][/cell]" % _format_float(result.get("physics_steps_per_second", 0.0), 0)
+        + "[cell]Throughput[/cell][cell][b]%s / s[/b][/cell]" % _format_float(result.get("worlds_per_second", 0.0), 1)
+        + "[cell]Physics[/cell][cell][b]%s steps / s[/b][/cell]" % _format_float(result.get("physics_steps_per_second", 0.0), 0)
         + "[cell]Steps / simulation[/cell][cell]%s[/cell]" % _format_int(result.get("steps_per_world", 0))
-        + "[cell]Physics dt[/cell][cell]%.8f s[/cell]" % float(result.get("physics_dt_seconds", 0.0))
-        + "[cell]Simulated time[/cell][cell]%.3f s[/cell]" % float(result.get("simulated_seconds_per_world", 0.0))
-        + "[cell]Deterministic[/cell][cell]%s[/cell]" % str(result.get("deterministic", false))
         + "[/table]"
     )
 
 
 func _segment_color(id: int) -> Color:
-    match id:
-        0:
-            return Color(0.25, 0.78, 1.0)
-        1:
-            return Color(0.95, 0.55, 0.22)
-        2:
-            return Color(0.45, 0.92, 0.42)
-        _:
-            return Color(0.75, 0.75, 0.85)
+    var hue := fmod(float(id) * 0.173 + 0.54, 1.0)
+    return Color.from_hsv(hue, 0.62, 0.95)
 
 
 func _reset_probe() -> void:
-    _probe_mesh.position = Vector3(1.8, 3.0, 0.0)
+    _probe_mesh.position = Vector3(2.2, 3.0, 0.0)
     _probe_mesh.quaternion = Quaternion.IDENTITY
 
 
 func _set_controls_enabled(enabled: bool) -> void:
-    if _creature_button != null:
-        _creature_button.disabled = not enabled
+    if _seed_creature_button != null:
+        _seed_creature_button.disabled = not enabled
+    if _mutate_button != null:
+        _mutate_button.disabled = not enabled
+    if _random_button != null:
+        _random_button.disabled = not enabled
+    if _load_button != null:
+        _load_button.disabled = not enabled
     if _live_button != null:
         _live_button.disabled = not enabled
     if _batch_button != null:
