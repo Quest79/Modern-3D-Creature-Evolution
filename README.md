@@ -8,9 +8,9 @@ See [SPEC.md](SPEC.md) for the full seven-part project specification.
 
 ## Development status
 
-**Step 6 — Experiment Timeline / Scheduling: implemented.**
+**Step 7 — Results / History / Analysis: implemented.**
 
-Steps 1–6 are live. Experiments can now schedule world, fitness, mutation, motor, population, duration, and repeated-trial changes across generations, with conditional events and portable .evo experiment files.
+Steps 1–7 are live. Evolution now persists per-generation history, champion archives, lineage, diversity, analysis classes, Pareto fronts, and MAP-Elites-style occupancy in a dedicated Results UI.
 
 Current foundation:
 
@@ -53,12 +53,19 @@ Current foundation:
 - repeated creature trials with mean / median / worst / best aggregation
 - saved human-readable .evo experiment files with load and fork support
 - headless `evolab run experiment.evo` execution
+- persistent .evoresults analysis files
+- deterministic individual IDs and parent lineage tracking
+- per-generation diversity statistics and analysis-class summaries
+- distance/energy Pareto-front analysis
+- MAP-Elites-style segment/brain occupancy analysis
+- generation best/average fitness graph in the Godot Results window
+- per-generation champion archive with load and comparison controls
 
 The Rust backend remains the authoritative simulator. Godot renders streamed snapshots and provides creature, fitness, evolution, and
 world/terrain controls while Rust remains authoritative for physics and world
 geometry.
 
-See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), [docs/STEP-4.md](docs/STEP-4.md), [docs/STEP-5.md](docs/STEP-5.md), and [docs/STEP-6.md](docs/STEP-6.md).
+See [docs/STEP-1.md](docs/STEP-1.md), [docs/STEP-2.md](docs/STEP-2.md), [docs/STEP-3.md](docs/STEP-3.md), [docs/STEP-4.md](docs/STEP-4.md), [docs/STEP-5.md](docs/STEP-5.md), [docs/STEP-6.md](docs/STEP-6.md), and [docs/STEP-7.md](docs/STEP-7.md).
 
 ## Windows quick start
 
