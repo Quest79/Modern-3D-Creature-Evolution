@@ -94,6 +94,8 @@ var _current_genome: Dictionary = {}
 var _current_genome_source := ""
 var _current_mutation_count := 0
 var _has_evolution_champion := false
+var _champion_world: Dictionary = {}
+var _champion_motor_strength := 1.0
 
 var _font_size := 16
 var _camera_move_speed := 6.0
@@ -1591,6 +1593,7 @@ func _base_creature_args() -> PackedStringArray:
         "--seed", str(int(_seed_spin.value)),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--world-json", _world_json(),
+        "--motor-strength", str(_motor_strength_spin.value),
     ])
 
 
@@ -1676,11 +1679,16 @@ func _on_evolve_pressed() -> void:
         "--elite", str(int(_elite_spin.value)),
         "--crossover", str(_crossover_spin.value),
         "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--structural-mutation-chance", str(_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(int(_seed_spin.value)),
         "--workers", str(int(_workers_spin.value)),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
+        "--motor-strength", str(_motor_strength_spin.value),
+        "--trials", str(int(_trials_spin.value)),
+        "--trial-aggregation", _trial_aggregation_value(),
+        "--timeline-json", _timeline_json(),
         "--fitness-distance", str(_fitness_distance_spin.value),
         "--fitness-speed", str(_fitness_speed_spin.value),
         "--fitness-upright", str(_fitness_upright_spin.value),
