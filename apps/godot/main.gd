@@ -1117,6 +1117,10 @@ func _world_json() -> String:
 
 
 func _refresh_world_preview() -> void:
+    _render_world_config(_world_config_dictionary())
+
+
+func _render_world_config(world_config: Dictionary) -> void:
     if not _backend_exists():
         return
 
@@ -1126,7 +1130,7 @@ func _refresh_world_preview() -> void:
         PackedStringArray([
             "world-geometry",
             "--world-json",
-            JSON.stringify(_world_config_dictionary()),
+            JSON.stringify(world_config),
         ]),
         output,
         true,
