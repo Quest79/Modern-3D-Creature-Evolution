@@ -22,6 +22,11 @@ var _tournament_spin: SpinBox
 var _elite_spin: SpinBox
 var _crossover_spin: SpinBox
 var _evolution_mutations_spin: SpinBox
+var _fitness_distance_spin: SpinBox
+var _fitness_speed_spin: SpinBox
+var _fitness_upright_spin: SpinBox
+var _fitness_stability_spin: SpinBox
+var _fitness_energy_spin: SpinBox
 
 var _seed_creature_button: Button
 var _mutate_button: Button
@@ -62,6 +67,11 @@ var _font_size := 16
 var _camera_move_speed := 6.0
 var _mouse_sensitivity_degrees := 0.15
 var _playback_speed := 1.0
+var _fitness_distance_weight := 1.0
+var _fitness_speed_weight := 0.0
+var _fitness_upright_weight := 0.0
+var _fitness_stability_weight := 0.0
+var _fitness_energy_weight := 0.0
 var _hud_width := DEFAULT_HUD_WIDTH
 var _visible_hud_width := DEFAULT_HUD_WIDTH
 var _hud_dragging := false
@@ -367,6 +377,37 @@ func _build_ui() -> void:
     _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
     _evolution_mutations_spin = _add_number_row(column, "Mutations / child", 1, 500, 8, 1)
 
+    var fitness_heading := Label.new()
+    fitness_heading.text = "Fitness weights"
+    _section_headings.append(fitness_heading)
+    column.add_child(fitness_heading)
+
+    _fitness_distance_spin = _add_number_row(
+        column, "Distance", -100.0, 100.0, _fitness_distance_weight, 0.05
+    )
+    _fitness_speed_spin = _add_number_row(
+        column, "Average speed", -100.0, 100.0, _fitness_speed_weight, 0.05
+    )
+    _fitness_upright_spin = _add_number_row(
+        column, "Upright", -100.0, 100.0, _fitness_upright_weight, 0.05
+    )
+    _fitness_stability_spin = _add_number_row(
+        column, "Stability", -100.0, 100.0, _fitness_stability_weight, 0.05
+    )
+    _fitness_energy_spin = _add_number_row(
+        column, "Energy / effort", -100.0, 100.0, _fitness_energy_weight, 0.01
+    )
+    _fitness_energy_spin.tooltip_text = "Use a negative weight to penalize actuator effort."
+
+    for spin in [
+        _fitness_distance_spin,
+        _fitness_speed_spin,
+        _fitness_upright_spin,
+        _fitness_stability_spin,
+        _fitness_energy_spin,
+    ]:
+        spin.value_changed.connect(_on_fitness_weights_changed)
+
     var evolution_row := HBoxContainer.new()
     evolution_row.add_theme_constant_override("separation", 6)
     column.add_child(evolution_row)
@@ -542,6 +583,15 @@ func _on_playback_speed_changed(value: float) -> void:
     _save_settings()
 
 
+func _on_fitness_weights_changed(_value: float) -> void:
+    _fitness_distance_weight = float(_fitness_distance_spin.value)
+    _fitness_speed_weight = float(_fitness_speed_spin.value)
+    _fitness_upright_weight = float(_fitness_upright_spin.value)
+    _fitness_stability_weight = float(_fitness_stability_spin.value)
+    _fitness_energy_weight = float(_fitness_energy_spin.value)
+    _save_settings()
+
+
 func _apply_font_size() -> void:
     if _ui_theme == null:
         return
@@ -572,6 +622,21 @@ func _load_settings() -> void:
         config.get_value("viewer", "playback_speed", _playback_speed)
     )
     _playback_speed = clampf(_playback_speed, 0.01, 2.0)
+    _fitness_distance_weight = float(
+        config.get_value("fitness", "distance", _fitness_distance_weight)
+    )
+    _fitness_speed_weight = float(
+        config.get_value("fitness", "average_speed", _fitness_speed_weight)
+    )
+    _fitness_upright_weight = float(
+        config.get_value("fitness", "upright", _fitness_upright_weight)
+    )
+    _fitness_stability_weight = float(
+        config.get_value("fitness", "stability", _fitness_stability_weight)
+    )
+    _fitness_energy_weight = float(
+        config.get_value("fitness", "energy", _fitness_energy_weight)
+    )
     _camera_move_speed = float(
         config.get_value("camera", "move_speed", _camera_move_speed)
     )
@@ -591,6 +656,11 @@ func _save_settings() -> void:
     config.set_value("ui", "font_size", _font_size)
     config.set_value("ui", "hud_width", _hud_width)
     config.set_value("viewer", "playback_speed", _playback_speed)
+    config.set_value("fitness", "distance", _fitness_distance_weight)
+    config.set_value("fitness", "average_speed", _fitness_speed_weight)
+    config.set_value("fitness", "upright", _fitness_upright_weight)
+    config.set_value("fitness", "stability", _fitness_stability_weight)
+    config.set_value("fitness", "energy", _fitness_energy_weight)
     config.set_value("camera", "move_speed", _camera_move_speed)
     config.set_value(
         "camera",
@@ -887,6 +957,11 @@ func _on_evolve_pressed() -> void:
         "--workers", str(int(_workers_spin.value)),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
+        "--fitness-distance", str(_fitness_distance_spin.value),
+        "--fitness-speed", str(_fitness_speed_spin.value),
+        "--fitness-upright", str(_fitness_upright_spin.value),
+        "--fitness-stability", str(_fitness_stability_spin.value),
+        "--fitness-energy", str(_fitness_energy_spin.value),
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
     ])
@@ -899,7 +974,7 @@ func _on_evolve_pressed() -> void:
         args.append_array(PackedStringArray(["--genome", parent_path]))
 
     if _start_job("evolution", args):
-        _set_status("Evolution running • fitness = horizontal distance traveled")
+        _set_status("Evolution running • weighted fitness enabled")
 
 
 func _on_watch_champion_pressed() -> void:
@@ -1117,8 +1192,9 @@ func _handle_event(event: Dictionary) -> void:
                 _probe_mesh.visible = false
                 _build_creature_from_genome(_current_genome)
 
+            var best_metrics: Dictionary = event.get("best_metrics", {})
             _set_status(
-                "Generation %d / %d • best %.4f m • average %.4f m"
+                "Generation %d / %d • best score %.4f • average %.4f"
                 % [
                     generation,
                     generations,
@@ -1129,9 +1205,12 @@ func _handle_event(event: Dictionary) -> void:
             _metrics.text = (
                 "[table=2]"
                 + "[cell]Generation[/cell][cell][b]%d / %d[/b][/cell]" % [generation, generations]
-                + "[cell]Best distance[/cell][cell][b]%.4f m[/b][/cell]" % float(event.get("best_distance", 0.0))
-                + "[cell]Average distance[/cell][cell]%.4f m[/cell]" % float(event.get("average_fitness", 0.0))
-                + "[cell]Worst distance[/cell][cell]%.4f m[/cell]" % float(event.get("worst_fitness", 0.0))
+                + "[cell]Best fitness[/cell][cell][b]%.4f[/b][/cell]" % float(event.get("best_fitness", 0.0))
+                + "[cell]Distance[/cell][cell]%.4f m[/cell]" % float(best_metrics.get("distance", 0.0))
+                + "[cell]Average speed[/cell][cell]%.4f m/s[/cell]" % float(best_metrics.get("average_speed", 0.0))
+                + "[cell]Upright[/cell][cell]%.3f[/cell]" % float(best_metrics.get("upright", 0.0))
+                + "[cell]Stability[/cell][cell]%.3f[/cell]" % float(best_metrics.get("stability", 0.0))
+                + "[cell]Energy / effort[/cell][cell]%.4f[/cell]" % float(best_metrics.get("energy", 0.0))
                 + "[cell]Champion segments[/cell][cell]%s[/cell]" % str(event.get("best_segments", 0))
                 + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(event.get("best_brain_nodes", 0))
                 + "[cell]Sensors used[/cell][cell]%s unique / %s nodes[/cell]"
@@ -1153,8 +1232,9 @@ func _handle_event(event: Dictionary) -> void:
             _build_creature_from_genome(_current_genome)
             _has_evolution_champion = not _current_genome.is_empty()
             _progress_bar.value = 100
+            var champion_metrics: Dictionary = event.get("champion_metrics", {})
             _set_status(
-                "Evolution complete • champion %.4f m • %s evaluations"
+                "Evolution complete • champion score %.4f • %s evaluations"
                 % [
                     float(event.get("champion_fitness", 0.0)),
                     str(event.get("evaluations_completed", 0)),
@@ -1162,7 +1242,12 @@ func _handle_event(event: Dictionary) -> void:
             )
             _metrics.text = (
                 "[table=2]"
-                + "[cell]Champion distance[/cell][cell][b]%.4f m[/b][/cell]" % float(event.get("champion_distance", 0.0))
+                + "[cell]Champion fitness[/cell][cell][b]%.4f[/b][/cell]" % float(event.get("champion_fitness", 0.0))
+                + "[cell]Distance[/cell][cell]%.4f m[/cell]" % float(champion_metrics.get("distance", 0.0))
+                + "[cell]Average speed[/cell][cell]%.4f m/s[/cell]" % float(champion_metrics.get("average_speed", 0.0))
+                + "[cell]Upright[/cell][cell]%.3f[/cell]" % float(champion_metrics.get("upright", 0.0))
+                + "[cell]Stability[/cell][cell]%.3f[/cell]" % float(champion_metrics.get("stability", 0.0))
+                + "[cell]Energy / effort[/cell][cell]%.4f[/cell]" % float(champion_metrics.get("energy", 0.0))
                 + "[cell]Generations[/cell][cell]%s[/cell]" % str(event.get("generations_completed", 0))
                 + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
                 + "[cell]Brain nodes[/cell][cell]%s[/cell]" % str(event.get("champion_brain_nodes", 0))
