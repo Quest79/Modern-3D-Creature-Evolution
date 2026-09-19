@@ -208,10 +208,9 @@ where
             average_fitness: average,
             best_distance: best.metrics.distance,
         };
-        let triggered =
-            config
-                .timeline
-                .newly_triggered(generation, context, &active_condition_ids);
+        let triggered = config
+            .timeline
+            .newly_triggered(generation, context, &active_condition_ids);
         for id in &triggered {
             active_condition_ids.insert(id.clone());
         }
@@ -247,11 +246,9 @@ where
 
         if generation < config.generations {
             let mut next_settings = EffectiveEvolutionSettings::from(config);
-            config.timeline.apply_to(
-                generation + 1,
-                &active_condition_ids,
-                &mut next_settings,
-            );
+            config
+                .timeline
+                .apply_to(generation + 1, &active_condition_ids, &mut next_settings);
             validate_effective_settings(&next_settings)?;
             population = breed_next_generation(&evaluated, config, &next_settings, &mut rng)?;
         }
@@ -357,19 +354,31 @@ fn aggregate_trials(results: &[FitnessResult], aggregation: TrialAggregation) ->
             let count = results.len() as f32;
             let score = results.iter().map(|result| result.score).sum::<f32>() / count;
             let metrics = FitnessMetrics {
-                distance: results.iter().map(|result| result.metrics.distance).sum::<f32>() / count,
+                distance: results
+                    .iter()
+                    .map(|result| result.metrics.distance)
+                    .sum::<f32>()
+                    / count,
                 average_speed: results
                     .iter()
                     .map(|result| result.metrics.average_speed)
                     .sum::<f32>()
                     / count,
-                upright: results.iter().map(|result| result.metrics.upright).sum::<f32>() / count,
+                upright: results
+                    .iter()
+                    .map(|result| result.metrics.upright)
+                    .sum::<f32>()
+                    / count,
                 stability: results
                     .iter()
                     .map(|result| result.metrics.stability)
                     .sum::<f32>()
                     / count,
-                energy: results.iter().map(|result| result.metrics.energy).sum::<f32>() / count,
+                energy: results
+                    .iter()
+                    .map(|result| result.metrics.energy)
+                    .sum::<f32>()
+                    / count,
             };
             FitnessResult { score, metrics }
         }
@@ -400,12 +409,7 @@ fn aggregate_trials(results: &[FitnessResult], aggregation: TrialAggregation) ->
                         .map(|result| result.metrics.stability)
                         .collect(),
                 ),
-                energy: median(
-                    results
-                        .iter()
-                        .map(|result| result.metrics.energy)
-                        .collect(),
-                ),
+                energy: median(results.iter().map(|result| result.metrics.energy).collect()),
             },
         },
     }
