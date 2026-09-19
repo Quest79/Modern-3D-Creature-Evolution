@@ -372,12 +372,10 @@ impl CreatureSimulator {
                         gene.motor_stiffness * config.motor_strength_multiplier,
                         gene.motor_damping * config.motor_strength_multiplier,
                     );
-                    joint
-                        .data
-                        .set_motor_max_force(
-                            JointAxis::AngX,
-                            gene.motor_max_torque * config.motor_strength_multiplier,
-                        );
+                    joint.data.set_motor_max_force(
+                        JointAxis::AngX,
+                        gene.motor_max_torque * config.motor_strength_multiplier,
+                    );
                 }
             }
 
