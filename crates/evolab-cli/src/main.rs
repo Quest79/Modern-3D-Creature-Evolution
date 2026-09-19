@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
-    MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, WorldSnapshot,
-    evolve_population, mutate_genome, random_creature,
+    FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    SimulationConfig, WorldSnapshot, evolve_population, mutate_genome, random_creature,
 };
 use serde_json::{Value, json};
 
@@ -202,6 +202,26 @@ enum Command {
         #[arg(long, default_value_t = 1.0 / 120.0)]
         dt: f32,
 
+        /// Weight for horizontal distance traveled.
+        #[arg(long, default_value_t = 1.0)]
+        fitness_distance: f32,
+
+        /// Weight for average horizontal speed.
+        #[arg(long, default_value_t = 0.0)]
+        fitness_speed: f32,
+
+        /// Weight for average upright posture.
+        #[arg(long, default_value_t = 0.0)]
+        fitness_upright: f32,
+
+        /// Weight for low root angular velocity / stability.
+        #[arg(long, default_value_t = 0.0)]
+        fitness_stability: f32,
+
+        /// Weight for actuator effort. Use a negative value to penalize energy use.
+        #[arg(long, default_value_t = 0.0)]
+        fitness_energy: f32,
+
         /// Optional local UDP port for generation progress/champion events.
         #[arg(long)]
         event_port: Option<u16>,
@@ -320,6 +340,11 @@ fn run() -> Result<(), String> {
             workers,
             seconds,
             dt,
+            fitness_distance,
+            fitness_speed,
+            fitness_upright,
+            fitness_stability,
+            fitness_energy,
             event_port,
             event_host,
             champion_output,
@@ -337,6 +362,11 @@ fn run() -> Result<(), String> {
             workers,
             seconds,
             dt,
+            fitness_distance,
+            fitness_speed,
+            fitness_upright,
+            fitness_stability,
+            fitness_energy,
             event_port,
             event_host: &event_host,
             champion_output: champion_output.as_ref(),
@@ -745,6 +775,11 @@ struct EvolveRequest<'a> {
     workers: usize,
     seconds: f32,
     dt: f32,
+    fitness_distance: f32,
+    fitness_speed: f32,
+    fitness_upright: f32,
+    fitness_stability: f32,
+    fitness_energy: f32,
     event_port: Option<u16>,
     event_host: &'a str,
     champion_output: Option<&'a PathBuf>,
@@ -800,6 +835,15 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             dt: request.dt,
             ..SimulationConfig::default()
         },
+        fitness: FitnessConfig {
+            weights: FitnessWeights {
+                distance: request.fitness_distance,
+                average_speed: request.fitness_speed,
+                upright: request.fitness_upright,
+                stability: request.fitness_stability,
+                energy: request.fitness_energy,
+            },
+        },
         mutation: MutationConfig {
             max_segments: request.max_segments.max(2),
             ..MutationConfig::default()
@@ -819,7 +863,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "elite": config.elite_count,
                 "crossover_chance": config.crossover_chance,
                 "mutations_per_child": config.mutations_per_child,
-                "fitness": "horizontal_distance",
+                "fitness_weights": config.fitness.weights,
             }),
         );
     }
@@ -843,6 +887,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     "average_fitness": summary.average_fitness,
                     "worst_fitness": summary.worst_fitness,
                     "best_distance": summary.best_distance,
+                    "best_metrics": summary.best_metrics,
                     "best_segments": summary.best_segments,
                     "best_joints": summary.best_joints,
                     "best_brain_nodes": summary.best_brain_nodes,
@@ -857,11 +902,12 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             );
         } else {
             println!(
-                "generation {:>4}/{:<4}  best {:>8.4} m  avg {:>8.4} m  segments {}  brain {}",
+                "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  segments {}  brain {}",
                 summary.generation,
                 config.generations,
                 summary.best_fitness,
                 summary.average_fitness,
+                summary.best_distance,
                 summary.best_segments,
                 summary.best_brain_nodes
             );
@@ -880,6 +926,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         "kind": "evolution_complete",
         "champion_fitness": result.champion_fitness,
         "champion_distance": result.champion_distance,
+        "champion_metrics": result.champion_metrics,
+        "fitness_weights": config.fitness.weights,
         "champion_segments": result.champion.segments.len(),
         "champion_joints": result.champion.joints.len(),
         "champion_brain_nodes": result.champion.brain.node_count(),
@@ -906,6 +954,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "kind": "evolution_complete",
                 "champion_fitness": result.champion_fitness,
                 "champion_distance": result.champion_distance,
+                "champion_metrics": result.champion_metrics,
+                "fitness_weights": config.fitness.weights,
                 "generations_completed": result.generations_completed,
                 "evaluations_completed": result.evaluations_completed,
                 "wall_seconds": elapsed.as_secs_f64(),
@@ -915,8 +965,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         );
     } else if socket.is_none() {
         println!(
-            "complete: champion {:.4} m after {} generations / {} evaluations in {:.3} s",
+            "complete: champion score {:.4} (distance {:.4} m) after {} generations / {} evaluations in {:.3} s",
             result.champion_fitness,
+            result.champion_distance,
             result.generations_completed,
             result.evaluations_completed,
             elapsed.as_secs_f64()
