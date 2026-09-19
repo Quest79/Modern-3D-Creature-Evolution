@@ -196,6 +196,8 @@ var _event_port := 0
 var _job_pid := 0
 var _job_kind := ""
 var _dead_process_since_ms := -1
+var _job_started_ms := -1
+var _job_received_event := false
 var _last_state_time := 0.0
 
 var _replay_frames: Array = []
@@ -254,6 +256,22 @@ func _process(delta: float) -> void:
     if _job_pid > 0:
         if OS.is_process_running(_job_pid):
             _dead_process_since_ms = -1
+            if (
+                not _job_received_event
+                and _job_started_ms >= 0
+                and Time.get_ticks_msec() - _job_started_ms >= 5000
+            ):
+                OS.kill(_job_pid)
+                _job_pid = 0
+                _job_kind = ""
+                _job_started_ms = -1
+                _reset_replay()
+                _set_status("Simulator started but sent no events for 5 seconds.")
+                _metrics.text = (
+                    "[color=#ff8a8a][b]Test failed:[/b] "
+                    + "the simulator sent no data back to the GUI.[/color]"
+                )
+                _finish_job_controls()
         elif _dead_process_since_ms < 0:
             # Give final UDP packets a moment to arrive before declaring the
             # process dead. Fast benchmark jobs can otherwise race the GUI.
@@ -262,15 +280,28 @@ func _process(delta: float) -> void:
             var ended_kind := _job_kind
             _job_pid = 0
             _dead_process_since_ms = -1
+            _job_started_ms = -1
 
             if (
                 (ended_kind == "live" or ended_kind == "creature")
                 and _replay_active
             ):
-                # The producer is expected to finish before slow-motion
-                # playback. If its tiny completion packet was dropped, use the
-                # newest buffered frame as the replay end instead of aborting.
-                if not _replay_source_complete and not _replay_frames.is_empty():
+                if _replay_frames.is_empty():
+                    _job_kind = ""
+                    _reset_replay()
+                    _set_status(
+                        "Simulator exited before sending any %s state."
+                        % ("creature" if ended_kind == "creature" else "world")
+                    )
+                    _metrics.text = (
+                        "[color=#ff8a8a][b]Test failed:[/b] "
+                        + "the simulator process exited before any state arrived.[/color]"
+                    )
+                    _finish_job_controls()
+                elif not _replay_source_complete:
+                    # The producer is expected to finish before slow-motion
+                    # playback. If its tiny completion packet was dropped, use
+                    # the newest buffered frame as the replay end.
                     _replay_source_complete = true
                     _replay_final_time = float(
                         _replay_frames.back().get("simulated_seconds", 0.0)
@@ -2153,6 +2184,10 @@ func _on_walkthrough_run_test() -> void:
 
     _walkthrough_step = 3
     _refresh_walkthrough()
+    _walkthrough_completed = true
+    _save_settings()
+    _walkthrough_window.hide()
+    _set_status("Guided first test starting • watch the 3D view and Status / Results.")
     _on_seed_creature_pressed()
 
 
@@ -3933,11 +3968,14 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
 
     _job_kind = kind
     _dead_process_since_ms = -1
+    _job_started_ms = Time.get_ticks_msec()
+    _job_received_event = false
     _job_pid = OS.create_process(_backend_path(), args, false)
 
     if _job_pid <= 0:
         _job_pid = 0
         _job_kind = ""
+        _job_started_ms = -1
         _set_status("Failed to start Rust simulator.")
         return false
 
@@ -3960,6 +3998,8 @@ func _stop_current_job() -> void:
     _job_pid = 0
     _job_kind = ""
     _dead_process_since_ms = -1
+    _job_started_ms = -1
+    _job_received_event = false
     _reset_replay()
     _finish_job_controls()
 
@@ -4012,7 +4052,22 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
 
 
 func _handle_event(event: Dictionary) -> void:
+    _job_received_event = true
     var kind := str(event.get("kind", ""))
+
+    if kind == "creature_stream_error":
+        _job_pid = 0
+        _job_kind = ""
+        _dead_process_since_ms = -1
+        _job_started_ms = -1
+        _reset_replay()
+        _set_status("Creature simulator error: %s" % str(event.get("message", "unknown error")))
+        _metrics.text = (
+            "[color=#ff8a8a][b]Creature test failed:[/b] %s[/color]"
+            % str(event.get("message", "unknown error"))
+        )
+        _finish_job_controls()
+        return
 
     match kind:
         "evolution_started":
@@ -4347,6 +4402,8 @@ func _finish_replay() -> void:
     _job_pid = 0
     _job_kind = ""
     _dead_process_since_ms = -1
+    _job_started_ms = -1
+    _job_received_event = false
     _progress_bar.value = 100
 
     if completed_kind == "creature":
