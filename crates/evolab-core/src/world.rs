@@ -255,7 +255,7 @@ impl WorldConfig {
 
         while x < half_x {
             let mut skip = false;
-            let mut pit_drop = 0.0;
+            let mut pit_drop: f32 = 0.0;
             for feature in features {
                 let half_width = self.feature_half_width(*feature);
                 if (x - feature.x).abs() <= half_width {
