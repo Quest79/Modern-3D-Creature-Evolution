@@ -180,6 +180,10 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         elite: usize,
 
+        /// Probability that a child receives a donor brain subtree before mutation.
+        #[arg(long, default_value_t = 0.5)]
+        crossover: f32,
+
         #[arg(long, default_value_t = 8)]
         mutations: usize,
 
@@ -309,6 +313,7 @@ fn run() -> Result<(), String> {
             generations,
             tournament,
             elite,
+            crossover,
             mutations,
             max_segments,
             seed,
@@ -325,6 +330,7 @@ fn run() -> Result<(), String> {
             generations,
             tournament,
             elite,
+            crossover,
             mutations,
             max_segments,
             seed,
@@ -639,6 +645,8 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
             "joint_count": genome.joints.len(),
             "brain_outputs": genome.brain.outputs.len(),
             "brain_nodes": genome.brain.node_count(),
+            "brain_sensor_nodes": genome.brain.sensor_node_count(),
+            "brain_unique_sensors": genome.brain.unique_sensor_count(),
             "frame_hz": frame_hz,
             "sample_every_steps": sample_every_steps,
             "realtime": realtime,
@@ -730,6 +738,7 @@ struct EvolveRequest<'a> {
     generations: usize,
     tournament: usize,
     elite: usize,
+    crossover: f32,
     mutations: usize,
     max_segments: usize,
     seed: u64,
@@ -768,7 +777,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
         let mut genome: CreatureGenome = serde_json::from_str(&raw)
             .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
-        genome.brain.sync_with_joints(&genome.joints);
+        genome.brain.sync_with_structure(&genome.joints, &genome.segments);
         genome.validate()?;
         genome
     } else {
@@ -780,6 +789,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         generations: request.generations,
         tournament_size: request.tournament,
         elite_count: request.elite,
+        crossover_chance: request.crossover,
         mutations_per_child: request.mutations,
         seed: request.seed,
         worker_threads: request.workers,
@@ -805,6 +815,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "generations": config.generations,
                 "tournament": config.tournament_size,
                 "elite": config.elite_count,
+                "crossover_chance": config.crossover_chance,
                 "mutations_per_child": config.mutations_per_child,
                 "fitness": "horizontal_distance",
             }),
@@ -833,6 +844,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     "best_segments": summary.best_segments,
                     "best_joints": summary.best_joints,
                     "best_brain_nodes": summary.best_brain_nodes,
+                    "best_brain_sensor_nodes": summary.best_brain_sensor_nodes,
+                    "best_brain_unique_sensors": summary.best_brain_unique_sensors,
+                    "best_brain_outputs": summary.best_brain_outputs,
                     "evaluations_completed": summary.evaluations_completed,
                     "champion_file": request
                         .champion_output
@@ -867,6 +881,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         "champion_segments": result.champion.segments.len(),
         "champion_joints": result.champion.joints.len(),
         "champion_brain_nodes": result.champion.brain.node_count(),
+        "champion_brain_sensor_nodes": result.champion.brain.sensor_node_count(),
+        "champion_brain_unique_sensors": result.champion.brain.unique_sensor_count(),
+        "champion_brain_outputs": result.champion.brain.outputs.len(),
         "generations_completed": result.generations_completed,
         "evaluations_completed": result.evaluations_completed,
         "wall_seconds": elapsed.as_secs_f64(),
