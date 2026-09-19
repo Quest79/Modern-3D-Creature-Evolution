@@ -11,8 +11,8 @@ use evolab_core::{
     CreatureSnapshot, EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile,
     FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
     SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
-    discover_cuda_devices, evolve_population, evolve_population_checkpointed, mutate_genome,
-    random_creature, run_cuda_probe_batch,
+    discover_cuda_devices, evolve_population_checkpointed, mutate_genome, random_creature,
+    run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
