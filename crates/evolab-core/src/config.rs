@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::WorldConfig;
 
+fn default_motor_strength_multiplier() -> f32 {
+    1.0
+}
+
 /// Physics settings shared by every backend.
 ///
 /// Fixed timesteps are a hard requirement for reproducible evolutionary runs.
@@ -14,6 +18,9 @@ pub struct SimulationConfig {
     /// Configurable terrain, obstacles, friction, gravity, and procedural seed.
     #[serde(default)]
     pub world: WorldConfig,
+    /// Global actuator-strength scale applied during this simulation.
+    #[serde(default = "default_motor_strength_multiplier")]
+    pub motor_strength_multiplier: f32,
     /// Requests deterministic scheduling/stepping where the backend supports it.
     pub deterministic: bool,
 }
@@ -24,6 +31,7 @@ impl Default for SimulationConfig {
             dt: 1.0 / 120.0,
             duration_seconds: 5.0,
             world: WorldConfig::default(),
+            motor_strength_multiplier: default_motor_strength_multiplier(),
             deterministic: true,
         }
     }
@@ -38,6 +46,11 @@ impl SimulationConfig {
             return Err("duration_seconds must be finite and greater than 0".into());
         }
         self.world.validate()?;
+        if !self.motor_strength_multiplier.is_finite()
+            || !(0.0..=20.0).contains(&self.motor_strength_multiplier)
+        {
+            return Err("motor_strength_multiplier must be between 0 and 20".into());
+        }
         Ok(())
     }
 
