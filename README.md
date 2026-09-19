@@ -55,6 +55,10 @@ Current foundation:
 - headless `evolab run experiment.evo` execution
 - persistent .evoresults analysis files
 - deterministic individual IDs and parent lineage tracking
+- retained genome, mutation history, and trial seeds for every evaluated creature
+- historical creature replay using the generation's recorded simulation/world settings
+- historical creature load, compare, ancestry, and fork controls
+- best/average/median fitness history curves
 - per-generation diversity statistics and analysis-class summaries
 - distance/energy Pareto-front analysis
 - MAP-Elites-style segment/brain occupancy analysis
