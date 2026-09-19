@@ -10,8 +10,8 @@ use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
     EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, MutationConfig,
     PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, TimelineConfig,
-    TrialAggregation, WorldConfig, WorldSnapshot, evolve_population, mutate_genome,
-    random_creature,
+    TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices, evolve_population,
+    mutate_genome, random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
@@ -53,6 +53,14 @@ enum Command {
         /// Serialized WorldConfig JSON.
         #[arg(long)]
         world_json: Option<String>,
+
+        /// Physics backend: cpu, cuda, or auto.
+        #[arg(long, default_value = "cpu")]
+        backend: String,
+
+        /// CUDA device IDs, for example 0 or 0,1. Empty means all CUDA GPUs.
+        #[arg(long, default_value = "")]
+        gpus: String,
 
         /// Emit one machine-readable JSON result to stdout.
         #[arg(long, default_value_t = false)]
@@ -344,6 +352,8 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json,
+            backend,
+            gpus,
             json: json_output,
             event_port,
             event_host,
@@ -353,6 +363,8 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json: world_json.as_deref(),
+            backend: &backend,
+            gpu_ids: parse_gpu_ids(&gpus)?,
             json_output,
             event_host: &event_host,
             event_port,
@@ -499,6 +511,8 @@ struct BatchRequest<'a> {
     seconds: f32,
     dt: f32,
     world_json: Option<&'a str>,
+    backend: &'a str,
+    gpu_ids: Vec<u32>,
     json_output: bool,
     event_host: &'a str,
     event_port: Option<u16>,
@@ -511,6 +525,8 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
         seconds,
         dt,
         world_json,
+        backend,
+        gpu_ids,
         json_output,
         event_host,
         event_port,
@@ -521,10 +537,74 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
     }
 
     let config = simulation_config(seconds, dt, world_json)?;
+    let backend_name = backend.trim().to_ascii_lowercase();
+    let event_socket = make_event_socket(event_host, event_port)?;
+
+    if backend_name == "cuda" || backend_name == "auto" {
+        let cuda_devices = discover_cuda_devices().unwrap_or_default();
+        if !cuda_devices.is_empty() {
+            let report = run_cuda_probe_batch(
+                &config,
+                &ProbeSpec::default(),
+                batch,
+                &gpu_ids,
+            )?;
+            let result = json!({
+                "protocol_version": 1,
+                "kind": "probe_result",
+                "backend": report.backend,
+                "worlds_evaluated": report.worlds_evaluated,
+                "workers_requested": workers,
+                "gpu_ids": gpu_ids,
+                "physics_dt_seconds": config.dt,
+                "steps_per_world": report.steps_per_world,
+                "simulated_seconds_per_world": report.simulated_seconds_per_world,
+                "wall_seconds": report.wall_seconds,
+                "worlds_per_second": report.worlds_per_second,
+                "physics_steps_per_second": report.physics_steps_per_second,
+                "final_probe_position": report.final_position,
+                "final_probe_velocity": report.final_linear_velocity,
+                "device_performance": report.devices,
+                "deterministic": true,
+            });
+
+            if let Some(socket) = event_socket.as_ref() {
+                send_event(socket, &json!({
+                    "protocol_version": 1,
+                    "kind": "batch_started",
+                    "total": batch,
+                    "backend": result["backend"],
+                    "world": config.world,
+                    "world_geometry": config.world.geometry(),
+                }));
+                send_event(socket, &result);
+            }
+
+            if json_output {
+                println!("{result}");
+            } else if event_socket.is_none() {
+                println!("backend              : {}", report.backend);
+                println!("worlds evaluated     : {}", report.worlds_evaluated);
+                println!("CUDA devices         : {:?}", gpu_ids);
+                println!("physics dt           : {:.8} s", config.dt);
+                println!("steps/world          : {}", report.steps_per_world);
+                println!("wall time            : {:.3} s", report.wall_seconds);
+                println!("throughput           : {:.1} worlds/s", report.worlds_per_second);
+                println!(
+                    "physics throughput   : {:.0} steps/s",
+                    report.physics_steps_per_second
+                );
+            }
+            return Ok(());
+        } else if backend_name == "cuda" {
+            return Err("CUDA backend requested, but no CUDA device is available".into());
+        }
+    } else if backend_name != "cpu" {
+        return Err("backend must be cpu, cuda, or auto".into());
+    }
 
     let runner = BatchRunner { threads: workers };
     let backend = RapierCpuBackend;
-    let event_socket = make_event_socket(event_host, event_port)?;
 
     if let Some(socket) = event_socket.as_ref() {
         send_event(
@@ -1306,6 +1386,22 @@ fn parse_trial_aggregation(value: &str) -> Result<TrialAggregation, String> {
     }
 }
 
+fn parse_gpu_ids(value: &str) -> Result<Vec<u32>, String> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    value
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("invalid GPU id '{}'", part.trim()))
+        })
+        .collect()
+}
+
+
 fn simulation_config(
     seconds: f32,
     dt: f32,
@@ -1354,13 +1450,29 @@ fn run_capabilities(json_output: bool) -> Result<(), String> {
     let logical_cpu_threads = thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
+    let cuda_devices = discover_cuda_devices().unwrap_or_default();
+
+    let mut backends = vec![serde_json::to_value(backend.capabilities())
+        .map_err(|err| format!("failed to serialize backend capabilities: {err}"))?];
+    if !cuda_devices.is_empty() {
+        backends.push(json!({
+            "name": "cuda-probe",
+            "deterministic": true,
+            "state_streaming": false,
+            "parallel_worlds": true,
+            "gpu_accelerated": true,
+            "creature_physics": false,
+            "scope": "flat-world probe batches",
+        }));
+    }
 
     let result = json!({
         "protocol_version": 1,
         "kind": "capabilities",
         "app_version": env!("CARGO_PKG_VERSION"),
         "logical_cpu_threads": logical_cpu_threads,
-        "backends": [backend.capabilities()],
+        "cuda_devices": cuda_devices,
+        "backends": backends,
     });
 
     if json_output {
@@ -1371,7 +1483,14 @@ fn run_capabilities(json_output: bool) -> Result<(), String> {
         println!("backend             : {}", backend.name());
         println!("state streaming     : yes");
         println!("deterministic       : yes");
-        println!("GPU accelerated     : no");
+        println!(
+            "CUDA devices         : {}",
+            cuda_devices.len()
+        );
+        println!(
+            "GPU probe backend    : {}",
+            if cuda_devices.is_empty() { "unavailable" } else { "available" }
+        );
     }
 
     Ok(())
