@@ -11,6 +11,11 @@ var _seed_spin: SpinBox
 var _mutation_spin: SpinBox
 var _random_segments_spin: SpinBox
 var _max_segments_spin: SpinBox
+var _population_spin: SpinBox
+var _generations_spin: SpinBox
+var _tournament_spin: SpinBox
+var _elite_spin: SpinBox
+var _evolution_mutations_spin: SpinBox
 
 var _seed_creature_button: Button
 var _mutate_button: Button
@@ -19,6 +24,8 @@ var _save_button: Button
 var _load_button: Button
 var _live_button: Button
 var _batch_button: Button
+var _evolve_button: Button
+var _watch_champion_button: Button
 var _stop_button: Button
 
 var _status_label: Label
@@ -31,6 +38,7 @@ var _creature_meshes: Dictionary = {}
 var _current_genome: Dictionary = {}
 var _current_genome_source := ""
 var _current_mutation_count := 0
+var _has_evolution_champion := false
 
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
@@ -166,7 +174,14 @@ func _build_ui() -> void:
     margin.add_theme_constant_override("margin_right", 18)
     margin.add_theme_constant_override("margin_top", 14)
     margin.add_theme_constant_override("margin_bottom", 14)
-    panel.add_child(margin)
+    var scroll := ScrollContainer.new()
+    scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+    scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    panel.add_child(scroll)
+
+    margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    scroll.add_child(margin)
 
     var column := VBoxContainer.new()
     column.add_theme_constant_override("separation", 6)
@@ -178,7 +193,7 @@ func _build_ui() -> void:
     column.add_child(title)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 2 • Mutation-Ready Creature Genome"
+    subtitle.text = "Step 2 • Population Evolution"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
@@ -235,6 +250,36 @@ func _build_ui() -> void:
     _load_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _load_button.pressed.connect(_on_load_pressed)
     file_row.add_child(_load_button)
+
+    column.add_child(HSeparator.new())
+
+    var evolution_heading := Label.new()
+    evolution_heading.text = "Evolution"
+    evolution_heading.add_theme_font_size_override("font_size", 17)
+    column.add_child(evolution_heading)
+
+    _population_spin = _add_number_row(column, "Population", 2, 10000, 50, 1)
+    _generations_spin = _add_number_row(column, "Generations", 1, 10000, 100, 1)
+    _tournament_spin = _add_number_row(column, "Tournament size", 1, 1000, 7, 1)
+    _elite_spin = _add_number_row(column, "Elite kept", 1, 999, 2, 1)
+    _evolution_mutations_spin = _add_number_row(column, "Mutations / child", 1, 500, 8, 1)
+
+    var evolution_row := HBoxContainer.new()
+    evolution_row.add_theme_constant_override("separation", 6)
+    column.add_child(evolution_row)
+
+    _evolve_button = Button.new()
+    _evolve_button.text = "🧬 Start Evolution"
+    _evolve_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _evolve_button.pressed.connect(_on_evolve_pressed)
+    evolution_row.add_child(_evolve_button)
+
+    _watch_champion_button = Button.new()
+    _watch_champion_button.text = "Watch Champion"
+    _watch_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _watch_champion_button.disabled = true
+    _watch_champion_button.pressed.connect(_on_watch_champion_pressed)
+    evolution_row.add_child(_watch_champion_button)
 
     column.add_child(HSeparator.new())
 
@@ -441,6 +486,66 @@ func _on_random_pressed() -> void:
         _set_status("Generating random creature and running it...")
 
 
+func _on_evolve_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    if int(_tournament_spin.value) > int(_population_spin.value):
+        _set_status("Tournament size cannot exceed population.")
+        return
+    if int(_elite_spin.value) >= int(_population_spin.value):
+        _set_status("Elite kept must be smaller than population.")
+        return
+
+    _probe_mesh.visible = false
+    _progress_bar.value = 0
+    _has_evolution_champion = false
+    _watch_champion_button.disabled = true
+    _metrics.text = "[color=#9aa7bd]Creating and evaluating generation 1...[/color]"
+
+    var args := PackedStringArray([
+        "evolve",
+        "--population", str(int(_population_spin.value)),
+        "--generations", str(int(_generations_spin.value)),
+        "--tournament", str(int(_tournament_spin.value)),
+        "--elite", str(int(_elite_spin.value)),
+        "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--max-segments", str(int(_max_segments_spin.value)),
+        "--seed", str(int(_seed_spin.value)),
+        "--workers", str(int(_workers_spin.value)),
+        "--seconds", str(_seconds_spin.value),
+        "--dt", str(_dt_spin.value),
+        "--event-port", str(_event_port),
+    ])
+
+    if not _current_genome.is_empty():
+        var parent_path := ProjectSettings.globalize_path("user://evolution_parent.json")
+        if not _write_genome_file(parent_path, _current_genome):
+            _set_status("Could not write evolution parent genome.")
+            return
+        args.append_array(PackedStringArray(["--genome", parent_path]))
+
+    if _start_job("evolution", args):
+        _set_status("Evolution running • fitness = horizontal distance traveled")
+
+
+func _on_watch_champion_pressed() -> void:
+    if _job_pid > 0 or _current_genome.is_empty():
+        return
+
+    var champion_path := ProjectSettings.globalize_path("user://evolution_champion.json")
+    if not _write_genome_file(champion_path, _current_genome):
+        _set_status("Could not prepare champion genome.")
+        return
+
+    _prepare_creature_run()
+    var args := _base_creature_args()
+    args.append_array(PackedStringArray(["--genome", champion_path]))
+
+    if _start_job("creature", args):
+        _set_status("Watching evolution champion in real time...")
+
+
 func _on_save_pressed() -> void:
     if _current_genome.is_empty():
         _set_status("There is no creature genome to save yet.")
@@ -581,6 +686,8 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
     _load_button.disabled = disabled
     _live_button.disabled = disabled
     _batch_button.disabled = disabled
+    _evolve_button.disabled = disabled
+    _watch_champion_button.disabled = disabled or not _has_evolution_champion
     _save_button.disabled = disabled or _current_genome.is_empty()
 
 
@@ -588,6 +695,74 @@ func _handle_event(event: Dictionary) -> void:
     var kind := str(event.get("kind", ""))
 
     match kind:
+        "evolution_started":
+            _progress_bar.value = 0
+            _set_status(
+                "Evolution started • %s creatures × %s generations"
+                % [str(event.get("population", 0)), str(event.get("generations", 0))]
+            )
+
+        "generation_complete":
+            var generation := int(event.get("generation", 0))
+            var generations := int(event.get("generations", 1))
+            _progress_bar.value = float(event.get("fraction", 0.0)) * 100.0
+
+            var champion_value = event.get("champion", {})
+            if typeof(champion_value) == TYPE_DICTIONARY:
+                _current_genome = champion_value
+                _current_genome_source = "generation %d champion" % generation
+                _probe_mesh.visible = false
+                _build_creature_from_genome(_current_genome)
+
+            _set_status(
+                "Generation %d / %d • best %.4f m • average %.4f m"
+                % [
+                    generation,
+                    generations,
+                    float(event.get("best_fitness", 0.0)),
+                    float(event.get("average_fitness", 0.0)),
+                ]
+            )
+            _metrics.text = (
+                "[table=2]"
+                + "[cell]Generation[/cell][cell][b]%d / %d[/b][/cell]" % [generation, generations]
+                + "[cell]Best distance[/cell][cell][b]%.4f m[/b][/cell]" % float(event.get("best_distance", 0.0))
+                + "[cell]Average distance[/cell][cell]%.4f m[/cell]" % float(event.get("average_fitness", 0.0))
+                + "[cell]Worst distance[/cell][cell]%.4f m[/cell]" % float(event.get("worst_fitness", 0.0))
+                + "[cell]Champion segments[/cell][cell]%s[/cell]" % str(event.get("best_segments", 0))
+                + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
+                + "[/table]"
+            )
+
+        "evolution_complete":
+            var final_champion = event.get("champion", {})
+            if typeof(final_champion) == TYPE_DICTIONARY:
+                _current_genome = final_champion
+                _current_genome_source = "evolution champion"
+                _build_creature_from_genome(_current_genome)
+
+            _has_evolution_champion = true
+            _progress_bar.value = 100
+            _set_status(
+                "Evolution complete • champion %.4f m • %s evaluations"
+                % [
+                    float(event.get("champion_fitness", 0.0)),
+                    str(event.get("evaluations_completed", 0)),
+                ]
+            )
+            _metrics.text = (
+                "[table=2]"
+                + "[cell]Champion distance[/cell][cell][b]%.4f m[/b][/cell]" % float(event.get("champion_distance", 0.0))
+                + "[cell]Generations[/cell][cell]%s[/cell]" % str(event.get("generations_completed", 0))
+                + "[cell]Evaluations[/cell][cell]%s[/cell]" % str(event.get("evaluations_completed", 0))
+                + "[cell]Wall time[/cell][cell]%.3f s[/cell]" % float(event.get("wall_seconds", 0.0))
+                + "[cell]Next[/cell][cell]Click Watch Champion[/cell]"
+                + "[/table]"
+            )
+            _job_pid = 0
+            _job_kind = ""
+            _finish_job_controls()
+
         "batch_started":
             _progress_bar.value = 0
             _set_status("Benchmark started • %s simulations" % str(event.get("total", 0)))
@@ -695,6 +870,15 @@ func _build_creature_from_genome(genome_value) -> void:
         material.metallic = 0.08
         material.roughness = 0.45
         instance.material_override = material
+
+        var initial: Array = segment.get("initial_position", [0.0, 0.0, 0.0])
+        if initial.size() >= 3:
+            instance.position = Vector3(
+                2.2 + float(initial[0]),
+                float(initial[1]),
+                float(initial[2])
+            )
+
         add_child(instance)
         _creature_meshes[id_key] = instance
 
@@ -874,6 +1058,10 @@ func _set_controls_enabled(enabled: bool) -> void:
         _live_button.disabled = not enabled
     if _batch_button != null:
         _batch_button.disabled = not enabled
+    if _evolve_button != null:
+        _evolve_button.disabled = not enabled
+    if _watch_champion_button != null:
+        _watch_champion_button.disabled = not enabled or not _has_evolution_champion
 
 
 func _set_status(text: String) -> void:
