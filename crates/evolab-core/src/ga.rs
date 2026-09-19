@@ -131,8 +131,8 @@ where
         let worst = evaluated
             .last()
             .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
-        let average = evaluated.iter().map(|item| item.fitness).sum::<f32>()
-            / evaluated.len() as f32;
+        let average =
+            evaluated.iter().map(|item| item.fitness).sum::<f32>() / evaluated.len() as f32;
 
         if global_champion
             .as_ref()
@@ -161,8 +161,7 @@ where
         }
     }
 
-    let champion =
-        global_champion.ok_or_else(|| "evolution produced no champion".to_string())?;
+    let champion = global_champion.ok_or_else(|| "evolution produced no champion".to_string())?;
 
     Ok(EvolutionResult {
         champion: champion.genome,
@@ -184,13 +183,8 @@ fn initial_population(
 
     while population.len() < config.population_size {
         let seed = rng.next_seed();
-        let child = mutate_genome(
-            ancestor,
-            seed,
-            config.mutations_per_child,
-            &config.mutation,
-        )?
-        .genome;
+        let child =
+            mutate_genome(ancestor, seed, config.mutations_per_child, &config.mutation)?.genome;
         population.push(child);
     }
 
@@ -323,9 +317,8 @@ mod tests {
             ..EvolutionConfig::default()
         };
 
-        let first =
-            evolve_population(&CreatureGenome::three_segment_walker(), &config, |_| Ok(()))
-                .unwrap();
+        let first = evolve_population(&CreatureGenome::three_segment_walker(), &config, |_| Ok(()))
+            .unwrap();
         let second =
             evolve_population(&CreatureGenome::three_segment_walker(), &config, |_| Ok(()))
                 .unwrap();
