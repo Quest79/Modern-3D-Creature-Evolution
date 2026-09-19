@@ -1242,6 +1242,7 @@ func _base_creature_args() -> PackedStringArray:
         "--playback-speed", "%.2f" % _playback_speed,
         "--seed", str(int(_seed_spin.value)),
         "--max-segments", str(int(_max_segments_spin.value)),
+        "--world-json", _world_json(),
     ])
 
 
@@ -1337,6 +1338,7 @@ func _on_evolve_pressed() -> void:
         "--fitness-upright", str(_fitness_upright_spin.value),
         "--fitness-stability", str(_fitness_stability_spin.value),
         "--fitness-energy", str(_fitness_energy_spin.value),
+        "--world-json", _world_json(),
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
     ])
@@ -1463,6 +1465,7 @@ func _on_live_pressed() -> void:
         "--dt", str(_dt_spin.value),
         "--frame-hz", "60",
         "--playback-speed", "%.2f" % _playback_speed,
+        "--world-json", _world_json(),
     ])
 
     if _start_job("live", args):
@@ -1485,6 +1488,7 @@ func _on_batch_pressed() -> void:
         "--workers", str(int(_workers_spin.value)),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
+        "--world-json", _world_json(),
         "--event-port", str(_event_port),
     ])
 
@@ -1507,6 +1511,7 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
         return false
 
     _set_run_buttons_disabled(true)
+    _set_world_controls_enabled(false)
     _stop_button.disabled = false
     return true
 
@@ -1529,6 +1534,7 @@ func _stop_current_job() -> void:
 
 func _finish_job_controls() -> void:
     _set_run_buttons_disabled(false)
+    _set_world_controls_enabled(true)
     _stop_button.disabled = true
     _save_button.disabled = _current_genome.is_empty()
 
@@ -1550,6 +1556,7 @@ func _handle_event(event: Dictionary) -> void:
 
     match kind:
         "evolution_started":
+            _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
             _set_status(
                 "Evolution started • %s creatures × %s generations"
@@ -1654,6 +1661,7 @@ func _handle_event(event: Dictionary) -> void:
             _finish_job_controls()
 
         "batch_started":
+            _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
             _set_status("Benchmark started • %s simulations" % str(event.get("total", 0)))
 
@@ -1674,6 +1682,7 @@ func _handle_event(event: Dictionary) -> void:
             _finish_job_controls()
 
         "stream_started":
+            _build_world_from_geometry(event.get("world_geometry", []))
             _begin_replay("live")
             _progress_bar.value = 0
             _last_state_time = 0.0
@@ -1697,6 +1706,7 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "creature_stream_started":
+            _build_world_from_geometry(event.get("world_geometry", []))
             _begin_replay("creature")
             _progress_bar.value = 0
             _last_state_time = 0.0
