@@ -1008,8 +1008,21 @@ fn tournament_select(
 
 #[cfg(test)]
 mod tests {
-    use super::{EvolutionConfig, evolve_population};
+    use super::{EvolutionConfig, GenerationSummary, evolve_population};
     use crate::{CreatureGenome, SimulationConfig};
+
+    fn clear_runtime_timing(history: &mut [GenerationSummary]) {
+        for summary in history {
+            summary.execution.wall_seconds = 0.0;
+            summary.execution.items_per_second = 0.0;
+            summary.execution.physics_steps_per_second = 0.0;
+            for device in &mut summary.execution.devices {
+                device.wall_seconds = 0.0;
+                device.items_per_second = 0.0;
+                device.physics_steps_per_second = 0.0;
+            }
+        }
+    }
 
     #[test]
     fn short_evolution_returns_generation_history() {
@@ -1064,6 +1077,11 @@ mod tests {
 
         assert_eq!(first.champion, second.champion);
         assert_eq!(first.champion_fitness, second.champion_fitness);
-        assert_eq!(first.history, second.history);
+
+        let mut first_history = first.history.clone();
+        let mut second_history = second.history.clone();
+        clear_runtime_timing(&mut first_history);
+        clear_runtime_timing(&mut second_history);
+        assert_eq!(first_history, second_history);
     }
 }
