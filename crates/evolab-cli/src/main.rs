@@ -437,6 +437,8 @@ fn run_batch(
                 "kind": "batch_started",
                 "total": batch,
                 "backend": backend.name(),
+                "world": config.world,
+                "world_geometry": config.world.geometry(),
             }),
         );
     }
