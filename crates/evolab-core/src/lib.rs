@@ -8,6 +8,7 @@ mod batch;
 mod config;
 mod creature;
 mod evolution;
+mod ga;
 mod rapier_cpu;
 
 pub use backend::{
@@ -22,5 +23,8 @@ pub use creature::{
 pub use evolution::{
     GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult, mutate_genome,
     random_creature,
+};
+pub use ga::{
+    EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
 };
 pub use rapier_cpu::RapierCpuBackend;
