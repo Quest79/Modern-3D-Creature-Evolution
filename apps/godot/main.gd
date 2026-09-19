@@ -304,7 +304,7 @@ func _build_ui() -> void:
     header_row.add_child(_settings_button)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 3 • Evolvable Expression-Tree Brains"
+    subtitle.text = "Step 4 • Configurable Fitness"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
