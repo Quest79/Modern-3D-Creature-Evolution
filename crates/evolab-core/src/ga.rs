@@ -2,7 +2,8 @@ use rayon::{ThreadPoolBuilder, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CreatureGenome, CreatureSimulator, GenomeRng, MutationConfig, SimulationConfig, mutate_genome,
+    CreatureGenome, CreatureSimulator, GenomeRng, MutationConfig, SimulationConfig,
+    crossover_brain_subtree, mutate_genome,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -11,6 +12,7 @@ pub struct EvolutionConfig {
     pub generations: usize,
     pub tournament_size: usize,
     pub elite_count: usize,
+    pub crossover_chance: f32,
     pub mutations_per_child: usize,
     pub seed: u64,
     pub worker_threads: usize,
@@ -25,6 +27,7 @@ impl Default for EvolutionConfig {
             generations: 100,
             tournament_size: 7,
             elite_count: 2,
+            crossover_chance: 0.5,
             mutations_per_child: 8,
             seed: 1,
             worker_threads: 0,
@@ -54,6 +57,9 @@ impl EvolutionConfig {
         if self.elite_count == 0 || self.elite_count >= self.population_size {
             return Err("elite_count must be at least 1 and smaller than population_size".into());
         }
+        if !self.crossover_chance.is_finite() || !(0.0..=1.0).contains(&self.crossover_chance) {
+            return Err("crossover_chance must be between 0 and 1".into());
+        }
         if self.mutations_per_child == 0 {
             return Err("mutations_per_child must be greater than 0".into());
         }
@@ -79,6 +85,9 @@ pub struct GenerationSummary {
     pub best_segments: usize,
     pub best_joints: usize,
     pub best_brain_nodes: usize,
+    pub best_brain_sensor_nodes: usize,
+    pub best_brain_unique_sensors: usize,
+    pub best_brain_outputs: usize,
     pub evaluations_completed: usize,
     pub champion: CreatureGenome,
 }
@@ -151,6 +160,9 @@ where
             best_segments: best.genome.segments.len(),
             best_joints: best.genome.joints.len(),
             best_brain_nodes: best.genome.brain.node_count(),
+            best_brain_sensor_nodes: best.genome.brain.sensor_node_count(),
+            best_brain_unique_sensors: best.genome.brain.unique_sensor_count(),
+            best_brain_outputs: best.genome.brain.outputs.len(),
             evaluations_completed,
             champion: best.genome.clone(),
         };
@@ -242,8 +254,17 @@ fn breed_next_generation(
     while next.len() < config.population_size {
         let parent_index = tournament_select(evaluated, config.tournament_size, rng);
         let parent = &evaluated[parent_index].genome;
+
+        let base = if rng.chance(config.crossover_chance) {
+            let donor_index = tournament_select(evaluated, config.tournament_size, rng);
+            let donor = &evaluated[donor_index].genome;
+            crossover_brain_subtree(parent, donor, rng)
+        } else {
+            parent.clone()
+        };
+
         let child = mutate_genome(
-            parent,
+            &base,
             rng.next_seed(),
             config.mutations_per_child,
             &config.mutation,
