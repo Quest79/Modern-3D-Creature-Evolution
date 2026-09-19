@@ -193,6 +193,10 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1")]
         event_host: String,
 
+        /// Optional path where the current/final champion genome is written.
+        #[arg(long)]
+        champion_output: Option<PathBuf>,
+
         /// Emit final evolution result as JSON.
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -290,6 +294,7 @@ fn run() -> Result<(), String> {
             dt,
             event_port,
             event_host,
+            champion_output,
             json,
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
@@ -305,6 +310,7 @@ fn run() -> Result<(), String> {
             dt,
             event_port,
             event_host: &event_host,
+            champion_output: champion_output.as_ref(),
             json_output: json,
         }),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
@@ -692,15 +698,40 @@ struct EvolveRequest<'a> {
     dt: f32,
     event_port: Option<u16>,
     event_host: &'a str,
+    champion_output: Option<&'a PathBuf>,
     json_output: bool,
 }
 
 fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
+    let socket = make_event_socket(request.event_host, request.event_port)?;
+    let result = run_evolve_inner(&request, socket.as_ref());
+
+    if let Err(err) = &result {
+        if let Some(socket) = socket.as_ref() {
+            send_event(
+                socket,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "evolution_error",
+                    "message": err,
+                }),
+            );
+        }
+    }
+
+    result
+}
+
+fn run_evolve_inner(
+    request: &EvolveRequest<'_>,
+    socket: Option<&UdpSocket>,
+) -> Result<(), String> {
     let ancestor = if let Some(path) = request.genome_path {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
-        let genome: CreatureGenome = serde_json::from_str(&raw)
+        let mut genome: CreatureGenome = serde_json::from_str(&raw)
             .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
+        genome.brain.sync_with_joints(&genome.joints);
         genome.validate()?;
         genome
     } else {
@@ -727,9 +758,7 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
     };
     config.validate()?;
 
-    let socket = make_event_socket(request.event_host, request.event_port)?;
-
-    if let Some(socket) = socket.as_ref() {
+    if let Some(socket) = socket {
         send_event(
             socket,
             &json!({
@@ -747,7 +776,11 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
 
     let started = Instant::now();
     let result = evolve_population(&ancestor, &config, |summary| {
-        if let Some(socket) = socket.as_ref() {
+        if let Some(path) = request.champion_output {
+            write_genome(path, &summary.champion)?;
+        }
+
+        if let Some(socket) = socket {
             send_event(
                 socket,
                 &json!({
@@ -764,41 +797,66 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
                     "best_joints": summary.best_joints,
                     "best_brain_nodes": summary.best_brain_nodes,
                     "evaluations_completed": summary.evaluations_completed,
-                    "champion": summary.champion,
+                    "champion_file": request
+                        .champion_output
+                        .map(|path| path.to_string_lossy().to_string()),
                 }),
             );
         } else {
             println!(
-                "generation {:>4}/{:<4}  best {:>8.4} m  avg {:>8.4} m  segments {}",
+                "generation {:>4}/{:<4}  best {:>8.4} m  avg {:>8.4} m  segments {}  brain {}",
                 summary.generation,
                 config.generations,
                 summary.best_fitness,
                 summary.average_fitness,
-                summary.best_segments
+                summary.best_segments,
+                summary.best_brain_nodes
             );
         }
         Ok(())
     })?;
 
     let elapsed = started.elapsed();
-    let final_event = json!({
+
+    if let Some(path) = request.champion_output {
+        write_genome(path, &result.champion)?;
+    }
+
+    let transport_event = json!({
         "protocol_version": 1,
         "kind": "evolution_complete",
         "champion_fitness": result.champion_fitness,
         "champion_distance": result.champion_distance,
+        "champion_segments": result.champion.segments.len(),
+        "champion_joints": result.champion.joints.len(),
+        "champion_brain_nodes": result.champion.brain.node_count(),
         "generations_completed": result.generations_completed,
         "evaluations_completed": result.evaluations_completed,
         "wall_seconds": elapsed.as_secs_f64(),
-        "champion": result.champion,
-        "history": result.history,
+        "champion_file": request
+            .champion_output
+            .map(|path| path.to_string_lossy().to_string()),
     });
 
-    if let Some(socket) = socket.as_ref() {
-        send_event(socket, &final_event);
+    if let Some(socket) = socket {
+        send_event(socket, &transport_event);
     }
 
     if request.json_output {
-        println!("{final_event}");
+        println!(
+            "{}",
+            json!({
+                "protocol_version": 1,
+                "kind": "evolution_complete",
+                "champion_fitness": result.champion_fitness,
+                "champion_distance": result.champion_distance,
+                "generations_completed": result.generations_completed,
+                "evaluations_completed": result.evaluations_completed,
+                "wall_seconds": elapsed.as_secs_f64(),
+                "champion": result.champion,
+                "history": result.history,
+            })
+        );
     } else if socket.is_none() {
         println!(
             "complete: champion {:.4} m after {} generations / {} evaluations in {:.3} s",
@@ -810,6 +868,13 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(genome)
+        .map_err(|err| format!("failed to serialize champion genome: {err}"))?;
+    fs::write(path, json)
+        .map_err(|err| format!("failed to write champion genome {}: {err}", path.display()))
 }
 
 fn run_capabilities(json_output: bool) -> Result<(), String> {
