@@ -3,11 +3,13 @@
 //! Rendering is intentionally outside this crate. The GUI consumes backend-
 //! neutral snapshots/results and never owns the authoritative physics state.
 
+mod accelerator;
 mod backend;
 mod batch;
 mod brain;
 mod config;
 mod creature;
+mod cuda_probe;
 mod evolution;
 mod experiment;
 mod fitness;
@@ -17,6 +19,10 @@ mod results;
 mod timeline;
 mod world;
 
+pub use accelerator::{
+    AcceleratorConfig, AcceleratorMode, CudaDeviceInfo, DevicePerformance, DeviceWorkAssignment,
+    ExecutionPerformance, GpuCompatibility, ThroughputMode, schedule_gpu_work,
+};
 pub use backend::{
     BackendCapabilities, PhysicsBackend, ProbeSpec, SimulationReport, WorldSnapshot,
 };
@@ -30,6 +36,7 @@ pub use creature::{
     CreatureBodySnapshot, CreatureGenome, CreatureReport, CreatureSimulator, CreatureSnapshot,
     JointGene, SegmentGene,
 };
+pub use cuda_probe::{CudaProbeBatchReport, discover_cuda_devices, run_cuda_probe_batch};
 pub use evolution::{
     GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult,
     crossover_brain_subtree, mutate_genome, random_creature,
