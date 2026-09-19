@@ -358,9 +358,10 @@ impl CreatureSimulator {
                 {
                     let position_error = (target - sensor.angle_radians).abs();
                     let angular_speed = sensor.velocity_radians_per_second.abs();
-                    let torque_proxy = (position_error * gene.motor_stiffness
-                        + angular_speed * gene.motor_damping)
-                        .min(gene.motor_max_torque);
+                    let strength = config.motor_strength_multiplier;
+                    let torque_proxy = (position_error * gene.motor_stiffness * strength
+                        + angular_speed * gene.motor_damping * strength)
+                        .min(gene.motor_max_torque * strength);
                     motor_effort += torque_proxy * angular_speed * config.dt;
                 }
 
@@ -368,12 +369,15 @@ impl CreatureSimulator {
                     joint.data.set_motor_position(
                         JointAxis::AngX,
                         target,
-                        gene.motor_stiffness,
-                        gene.motor_damping,
+                        gene.motor_stiffness * config.motor_strength_multiplier,
+                        gene.motor_damping * config.motor_strength_multiplier,
                     );
                     joint
                         .data
-                        .set_motor_max_force(JointAxis::AngX, gene.motor_max_torque);
+                        .set_motor_max_force(
+                            JointAxis::AngX,
+                            gene.motor_max_torque * config.motor_strength_multiplier,
+                        );
                 }
             }
 
