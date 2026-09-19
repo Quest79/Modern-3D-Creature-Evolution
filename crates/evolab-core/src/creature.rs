@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BrainContext, BrainGenome, JointSensorState, SegmentSensorState, SimulationConfig,
-    WorldConfig, legacy_expression,
+    BrainContext, BrainGenome, JointSensorState, SegmentSensorState, SimulationConfig, WorldConfig,
+    legacy_expression,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
