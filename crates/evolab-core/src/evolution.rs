@@ -419,11 +419,12 @@ fn perturb_one_constant(expression: &mut Expression, rng: &mut GenomeRng) -> boo
         Expression::Add(left, right)
         | Expression::Subtract(left, right)
         | Expression::Multiply(left, right) => {
-            if rng.chance(0.5) {
-                perturb_one_constant(left, rng) || perturb_one_constant(right, rng)
+            let (first, second) = if rng.chance(0.5) {
+                (left, right)
             } else {
-                perturb_one_constant(right, rng) || perturb_one_constant(left, rng)
-            }
+                (right, left)
+            };
+            perturb_one_constant(first, rng) || perturb_one_constant(second, rng)
         }
         Expression::Negate(value)
         | Expression::Sin(value)
