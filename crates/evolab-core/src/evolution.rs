@@ -103,6 +103,10 @@ impl GenomeRng {
         value as f32 / ((1_u32 << 24) - 1) as f32
     }
 
+    pub fn next_seed(&mut self) -> u64 {
+        self.next_u64()
+    }
+
     pub fn range_f32(&mut self, min: f32, max: f32) -> f32 {
         min + (max - min) * self.next_f32()
     }
