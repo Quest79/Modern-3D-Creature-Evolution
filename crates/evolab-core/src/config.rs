@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::WorldConfig;
+
 /// Physics settings shared by every backend.
 ///
 /// Fixed timesteps are a hard requirement for reproducible evolutionary runs.
@@ -9,10 +11,9 @@ pub struct SimulationConfig {
     pub dt: f32,
     /// Length of one evaluation in simulated seconds.
     pub duration_seconds: f32,
-    /// World gravity in m/s^2.
-    pub gravity: [f32; 3],
-    /// Half-extents of the default flat test ground.
-    pub ground_half_extents: [f32; 3],
+    /// Configurable terrain, obstacles, friction, gravity, and procedural seed.
+    #[serde(default)]
+    pub world: WorldConfig,
     /// Requests deterministic scheduling/stepping where the backend supports it.
     pub deterministic: bool,
 }
@@ -22,8 +23,7 @@ impl Default for SimulationConfig {
         Self {
             dt: 1.0 / 120.0,
             duration_seconds: 5.0,
-            gravity: [0.0, -9.81, 0.0],
-            ground_half_extents: [50.0, 0.1, 50.0],
+            world: WorldConfig::default(),
             deterministic: true,
         }
     }
@@ -37,16 +37,7 @@ impl SimulationConfig {
         if !self.duration_seconds.is_finite() || self.duration_seconds <= 0.0 {
             return Err("duration_seconds must be finite and greater than 0".into());
         }
-        if self.gravity.iter().any(|v| !v.is_finite()) {
-            return Err("gravity must contain only finite values".into());
-        }
-        if self
-            .ground_half_extents
-            .iter()
-            .any(|v| !v.is_finite() || *v <= 0.0)
-        {
-            return Err("ground_half_extents must be finite and greater than 0".into());
-        }
+        self.world.validate()?;
         Ok(())
     }
 
