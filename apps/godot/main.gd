@@ -570,7 +570,7 @@ func _build_ui() -> void:
     _evolution_mutations_spin = _add_number_row(evolution_section, "Mutations / child", 1, 500, 8, 1)
     _structural_mutation_spin = _add_number_row(
         evolution_section,
-        "Structural mutation chance"
+        "Structural mutation chance",
         0.0,
         1.0,
         _structural_mutation_chance,
