@@ -22,6 +22,10 @@ var _tournament_spin: SpinBox
 var _elite_spin: SpinBox
 var _crossover_spin: SpinBox
 var _evolution_mutations_spin: SpinBox
+var _structural_mutation_spin: SpinBox
+var _motor_strength_spin: SpinBox
+var _trials_spin: SpinBox
+var _trial_aggregation_option: OptionButton
 var _fitness_distance_spin: SpinBox
 var _fitness_speed_spin: SpinBox
 var _fitness_upright_spin: SpinBox
@@ -47,6 +51,10 @@ var _obstacle_spacing_spin: SpinBox
 var _obstacle_size_spin: SpinBox
 var _gap_width_spin: SpinBox
 var _pit_depth_spin: SpinBox
+var _timeline_generation_spin: SpinBox
+var _timeline_condition_option: OptionButton
+var _timeline_condition_value_spin: SpinBox
+var _timeline_list: ItemList
 
 var _seed_creature_button: Button
 var _mutate_button: Button
@@ -59,6 +67,9 @@ var _evolve_button: Button
 var _watch_champion_button: Button
 var _stop_button: Button
 var _settings_button: Button
+var _save_experiment_button: Button
+var _load_experiment_button: Button
+var _fork_experiment_button: Button
 
 var _status_label: Label
 var _progress_bar: ProgressBar
@@ -113,6 +124,14 @@ var _obstacle_spacing := 5.0
 var _obstacle_size := 1.0
 var _gap_width := 1.5
 var _pit_depth := 1.5
+var _motor_strength := 1.0
+var _trials_per_creature := 1
+var _trial_aggregation := "mean"
+var _structural_mutation_chance := 0.30
+var _timeline_entries: Array = []
+var _timeline_next_id := 1
+var _experiment_name := "Experiment"
+var _experiment_fork_pending := false
 var _hud_width := DEFAULT_HUD_WIDTH
 var _visible_hud_width := DEFAULT_HUD_WIDTH
 var _hud_dragging := false
@@ -122,6 +141,8 @@ var _camera_pitch := 0.0
 
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
+var _experiment_save_dialog: FileDialog
+var _experiment_load_dialog: FileDialog
 
 var _udp: PacketPeerUDP
 var _event_port := 0
