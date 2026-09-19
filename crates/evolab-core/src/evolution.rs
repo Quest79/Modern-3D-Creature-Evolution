@@ -103,6 +103,20 @@ impl GenomeRng {
         x
     }
 
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    pub fn from_state(state: u64) -> Self {
+        Self {
+            state: if state == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                state
+            },
+        }
+    }
+
     pub fn next_f32(&mut self) -> f32 {
         let value = (self.next_u64() >> 40) as u32;
         value as f32 / ((1_u32 << 24) - 1) as f32
