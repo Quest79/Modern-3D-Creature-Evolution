@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use crate::{BrainContext, BrainGenome, SimulationConfig, legacy_expression};
 
