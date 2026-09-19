@@ -7,6 +7,7 @@ mod accelerator;
 mod backend;
 mod batch;
 mod brain;
+mod checkpoint;
 mod config;
 mod creature;
 mod cuda_probe;
@@ -30,6 +31,9 @@ pub use batch::BatchRunner;
 pub use brain::{
     BrainContext, BrainGenome, BrainOutputGene, Expression, JointSensorState, SegmentSensorState,
     SensorKind, legacy_expression,
+};
+pub use checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, CheckpointCandidate, EvolutionCheckpoint,
 };
 pub use config::SimulationConfig;
 pub use creature::{
