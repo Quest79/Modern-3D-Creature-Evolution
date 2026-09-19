@@ -10,6 +10,13 @@ const HUD_RESIZE_HANDLE_WIDTH := 8.0
 
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
+var _accelerator_option: OptionButton
+var _gpu_ids_edit: LineEdit
+var _gpu_batch_spin: SpinBox
+var _gpu_max_parts_spin: SpinBox
+var _gpu_max_joints_spin: SpinBox
+var _cpu_fallback_check: CheckBox
+var _throughput_option: OptionButton
 var _seconds_spin: SpinBox
 var _dt_spin: SpinBox
 var _seed_spin: SpinBox
@@ -67,6 +74,7 @@ var _load_button: Button
 var _live_button: Button
 var _batch_button: Button
 var _evolve_button: Button
+var _resume_evolution_button: Button
 var _watch_champion_button: Button
 var _stop_button: Button
 var _settings_button: Button
@@ -117,8 +125,16 @@ var _has_evolution_champion := false
 var _champion_world: Dictionary = {}
 var _champion_motor_strength := 1.0
 var _results_data: Dictionary = {}
+var _cuda_devices: Array = []
 
 var _font_size := 16
+var _accelerator_mode := "cpu"
+var _gpu_ids := ""
+var _gpu_batch_size := 4096
+var _gpu_max_parts := 64
+var _gpu_max_joints := 128
+var _cpu_fallback := true
+var _throughput_mode := "deterministic"
 var _camera_move_speed := 6.0
 var _mouse_sensitivity_degrees := 0.15
 var _playback_speed := 1.0
@@ -389,7 +405,7 @@ func _build_ui() -> void:
     header_row.add_child(_settings_button)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 7 • Results / History / Analysis"
+    subtitle.text = "Step 8 • GPU / Multi-GPU Acceleration"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
@@ -740,6 +756,15 @@ func _build_ui() -> void:
     _evolve_button.pressed.connect(_on_evolve_pressed)
     evolution_row.add_child(_evolve_button)
 
+    _resume_evolution_button = Button.new()
+    _resume_evolution_button.text = "Resume"
+    _resume_evolution_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _resume_evolution_button.disabled = not FileAccess.file_exists(
+        _evolution_checkpoint_path()
+    )
+    _resume_evolution_button.pressed.connect(_on_resume_evolution_pressed)
+    evolution_row.add_child(_resume_evolution_button)
+
     _watch_champion_button = Button.new()
     _watch_champion_button.text = "Watch Champion"
     _watch_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -769,6 +794,66 @@ func _build_ui() -> void:
     _playback_speed_spin.value_changed.connect(_on_playback_speed_changed)
     _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
     _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
+
+    var accelerator_row := HBoxContainer.new()
+    column.add_child(accelerator_row)
+    var accelerator_label := Label.new()
+    accelerator_label.text = "Execution backend"
+    accelerator_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    accelerator_row.add_child(accelerator_label)
+    _accelerator_option = OptionButton.new()
+    _accelerator_option.custom_minimum_size = Vector2(145, 29)
+    for accelerator_name in ["CPU", "Auto", "CUDA"]:
+        _accelerator_option.add_item(accelerator_name)
+    var accelerator_index := ["cpu", "auto", "cuda"].find(_accelerator_mode)
+    _accelerator_option.select(maxi(accelerator_index, 0))
+    _accelerator_option.item_selected.connect(_on_accelerator_selected)
+    accelerator_row.add_child(_accelerator_option)
+
+    var gpu_ids_row := HBoxContainer.new()
+    column.add_child(gpu_ids_row)
+    var gpu_ids_label := Label.new()
+    gpu_ids_label.text = "CUDA GPU IDs"
+    gpu_ids_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    gpu_ids_row.add_child(gpu_ids_label)
+    _gpu_ids_edit = LineEdit.new()
+    _gpu_ids_edit.custom_minimum_size = Vector2(145, 29)
+    _gpu_ids_edit.placeholder_text = "all (or 0,1)"
+    _gpu_ids_edit.text = _gpu_ids
+    _gpu_ids_edit.text_changed.connect(_on_gpu_ids_changed)
+    gpu_ids_row.add_child(_gpu_ids_edit)
+
+    _gpu_batch_spin = _add_number_row(
+        column, "GPU batch size", 1, 1000000, _gpu_batch_size, 1
+    )
+    _gpu_max_parts_spin = _add_number_row(
+        column, "GPU max parts", 1, 1024, _gpu_max_parts, 1
+    )
+    _gpu_max_joints_spin = _add_number_row(
+        column, "GPU max joints", 1, 2048, _gpu_max_joints, 1
+    )
+    for accelerator_spin in [_gpu_batch_spin, _gpu_max_parts_spin, _gpu_max_joints_spin]:
+        accelerator_spin.value_changed.connect(_on_accelerator_number_changed)
+
+    _cpu_fallback_check = CheckBox.new()
+    _cpu_fallback_check.text = "Allow CPU fallback for unsupported accelerator work"
+    _cpu_fallback_check.button_pressed = _cpu_fallback
+    _cpu_fallback_check.toggled.connect(_on_cpu_fallback_toggled)
+    column.add_child(_cpu_fallback_check)
+
+    var throughput_row := HBoxContainer.new()
+    column.add_child(throughput_row)
+    var throughput_label := Label.new()
+    throughput_label.text = "Throughput policy"
+    throughput_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    throughput_row.add_child(throughput_label)
+    _throughput_option = OptionButton.new()
+    _throughput_option.custom_minimum_size = Vector2(145, 29)
+    _throughput_option.add_item("Deterministic")
+    _throughput_option.add_item("Max throughput")
+    _throughput_option.select(0 if _throughput_mode == "deterministic" else 1)
+    _throughput_option.item_selected.connect(_on_throughput_selected)
+    throughput_row.add_child(_throughput_option)
 
     var utility_row := HBoxContainer.new()
     utility_row.add_theme_constant_override("separation", 6)
