@@ -88,11 +88,15 @@ var _results_window: Window
 var _results_history_list: ItemList
 var _results_champion_list: ItemList
 var _results_lineage_list: ItemList
+var _results_species_list: ItemList
 var _results_detail: RichTextLabel
 var _results_analysis: RichTextLabel
 var _results_graph: Control
 var _results_best_line: Line2D
 var _results_average_line: Line2D
+var _results_diversity_graph: Control
+var _results_morphology_line: Line2D
+var _results_class_line: Line2D
 var _font_size_spin: SpinBox
 var _camera_speed_spin: SpinBox
 var _mouse_sensitivity_spin: SpinBox
@@ -160,6 +164,7 @@ var _save_dialog: FileDialog
 var _load_dialog: FileDialog
 var _experiment_save_dialog: FileDialog
 var _experiment_load_dialog: FileDialog
+var _results_load_dialog: FileDialog
 
 var _udp: PacketPeerUDP
 var _event_port := 0
@@ -834,10 +839,29 @@ func _build_results_window() -> void:
     margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
     _results_window.add_child(margin)
 
+    var root_column := VBoxContainer.new()
+    root_column.add_theme_constant_override("separation", 8)
+    margin.add_child(root_column)
+
+    var results_toolbar := HBoxContainer.new()
+    root_column.add_child(results_toolbar)
+
+    var load_results_button := Button.new()
+    load_results_button.text = "Load Results..."
+    load_results_button.pressed.connect(_on_load_results_pressed)
+    results_toolbar.add_child(load_results_button)
+
+    var results_title := Label.new()
+    results_title.text = "Persisted evolution analysis"
+    results_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    results_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+    results_title.modulate = Color(0.70, 0.76, 0.86)
+    results_toolbar.add_child(results_title)
+
     var tabs := TabContainer.new()
     tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
-    margin.add_child(tabs)
+    root_column.add_child(tabs)
 
     var history_tab := VBoxContainer.new()
     history_tab.name = "History"
@@ -918,9 +942,55 @@ func _build_results_window() -> void:
     _results_lineage_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
     lineage_tab.add_child(_results_lineage_list)
 
+    var classes_tab := VBoxContainer.new()
+    classes_tab.name = "Classes"
+    classes_tab.add_theme_constant_override("separation", 8)
+    tabs.add_child(classes_tab)
+
+    var classes_help := Label.new()
+    classes_help.text = (
+        "Descriptive analysis classes: segment count × brain-size bucket. "
+        + "These are not yet selection/speciation groups."
+    )
+    classes_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    classes_help.modulate = Color(0.70, 0.76, 0.86)
+    classes_tab.add_child(classes_help)
+
+    _results_species_list = ItemList.new()
+    _results_species_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+    classes_tab.add_child(_results_species_list)
+
     var analysis_tab := VBoxContainer.new()
     analysis_tab.name = "Analysis"
+    analysis_tab.add_theme_constant_override("separation", 8)
     tabs.add_child(analysis_tab)
+
+    _results_diversity_graph = Control.new()
+    _results_diversity_graph.custom_minimum_size = Vector2(0, 180)
+    _results_diversity_graph.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    var diversity_bg := ColorRect.new()
+    diversity_bg.color = Color(0.05, 0.06, 0.08, 0.92)
+    diversity_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    diversity_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _results_diversity_graph.add_child(diversity_bg)
+
+    _results_morphology_line = Line2D.new()
+    _results_morphology_line.width = 2.5
+    _results_morphology_line.default_color = Color(0.45, 0.90, 0.55)
+    _results_diversity_graph.add_child(_results_morphology_line)
+
+    _results_class_line = Line2D.new()
+    _results_class_line.width = 2.0
+    _results_class_line.default_color = Color(0.85, 0.55, 1.0)
+    _results_diversity_graph.add_child(_results_class_line)
+
+    analysis_tab.add_child(_results_diversity_graph)
+
+    var diversity_key := Label.new()
+    diversity_key.text = "Unique morphologies (green)   Analysis classes (purple)"
+    diversity_key.modulate = Color(0.72, 0.78, 0.88)
+    analysis_tab.add_child(diversity_key)
+
     _results_analysis = RichTextLabel.new()
     _results_analysis.bbcode_enabled = true
     _results_analysis.fit_content = false
