@@ -882,6 +882,165 @@ func _on_fitness_weights_changed(_value: float) -> void:
     _save_settings()
 
 
+func _on_schedule_base_changed(_value: float) -> void:
+    _structural_mutation_chance = float(_structural_mutation_spin.value)
+    _motor_strength = float(_motor_strength_spin.value)
+    _trials_per_creature = int(_trials_spin.value)
+    _save_settings()
+
+
+func _on_trial_aggregation_selected(index: int) -> void:
+    var values := ["mean", "median", "worst", "best"]
+    if index >= 0 and index < values.size():
+        _trial_aggregation = values[index]
+    _save_settings()
+
+
+func _on_timeline_condition_selected(index: int) -> void:
+    _timeline_condition_value_spin.editable = index != 0
+
+
+func _fitness_config_dictionary() -> Dictionary:
+    return {
+        "weights": {
+            "distance": float(_fitness_distance_spin.value),
+            "average_speed": float(_fitness_speed_spin.value),
+            "upright": float(_fitness_upright_spin.value),
+            "stability": float(_fitness_stability_spin.value),
+            "energy": float(_fitness_energy_spin.value),
+        }
+    }
+
+
+func _trial_aggregation_value() -> String:
+    if _trial_aggregation_option == null:
+        return _trial_aggregation
+    var values := ["mean", "median", "worst", "best"]
+    var index := _trial_aggregation_option.selected
+    if index >= 0 and index < values.size():
+        return values[index]
+    return "mean"
+
+
+func _timeline_snapshot_changes() -> Dictionary:
+    _sync_world_state_from_controls()
+    return {
+        "world": _world_config_dictionary(),
+        "fitness": _fitness_config_dictionary(),
+        "population_size": int(_population_spin.value),
+        "mutations_per_child": int(_evolution_mutations_spin.value),
+        "structural_mutation_chance": float(_structural_mutation_spin.value),
+        "motor_strength_multiplier": float(_motor_strength_spin.value),
+        "trial_duration_seconds": float(_seconds_spin.value),
+        "trials_per_creature": int(_trials_spin.value),
+        "trial_aggregation": _trial_aggregation_value(),
+    }
+
+
+func _timeline_condition_dictionary() -> Variant:
+    var index := _timeline_condition_option.selected
+    if index == 0:
+        return null
+
+    var kinds := [
+        "",
+        "best_fitness_at_least",
+        "average_fitness_at_least",
+        "best_distance_at_least",
+    ]
+    return {
+        "kind": kinds[index],
+        "value": float(_timeline_condition_value_spin.value),
+    }
+
+
+func _on_add_timeline_keyframe() -> void:
+    var entry := {
+        "id": "timeline_%d" % _timeline_next_id,
+        "generation": int(_timeline_generation_spin.value),
+        "condition": _timeline_condition_dictionary(),
+        "changes": _timeline_snapshot_changes(),
+    }
+    _timeline_next_id += 1
+    _timeline_entries.append(entry)
+    _sort_timeline_entries()
+    _refresh_timeline_list()
+    _save_settings()
+    _set_status(
+        "Timeline keyframe added at generation %d."
+        % int(entry.get("generation", 1))
+    )
+
+
+func _on_remove_timeline_keyframe() -> void:
+    var selected := _timeline_list.get_selected_items()
+    if selected.is_empty():
+        return
+    var index := int(selected[0])
+    if index >= 0 and index < _timeline_entries.size():
+        _timeline_entries.remove_at(index)
+        _refresh_timeline_list()
+        _save_settings()
+
+
+func _on_clear_timeline() -> void:
+    _timeline_entries.clear()
+    _refresh_timeline_list()
+    _save_settings()
+
+
+func _sort_timeline_entries() -> void:
+    _timeline_entries.sort_custom(
+        func(a, b):
+            return int(a.get("generation", 1)) < int(b.get("generation", 1))
+    )
+
+
+func _refresh_timeline_list() -> void:
+    if _timeline_list == null:
+        return
+
+    _timeline_list.clear()
+    for entry_value in _timeline_entries:
+        if typeof(entry_value) != TYPE_DICTIONARY:
+            continue
+        var entry: Dictionary = entry_value
+        var generation := int(entry.get("generation", 1))
+        var condition_value = entry.get("condition", null)
+        var activation := "Gen %d" % generation
+        if typeof(condition_value) == TYPE_DICTIONARY:
+            var condition: Dictionary = condition_value
+            var condition_name := str(condition.get("kind", ""))
+            var threshold := float(condition.get("value", 0.0))
+            match condition_name:
+                "best_fitness_at_least":
+                    activation = "Gen %d+ • best fitness ≥ %.3f" % [generation, threshold]
+                "average_fitness_at_least":
+                    activation = "Gen %d+ • average fitness ≥ %.3f" % [generation, threshold]
+                "best_distance_at_least":
+                    activation = "Gen %d+ • best distance ≥ %.3f" % [generation, threshold]
+
+        var changes: Dictionary = entry.get("changes", {})
+        var world: Dictionary = changes.get("world", {})
+        _timeline_list.add_item(
+            "%s  |  %s  |  pop %s  |  trials %s"
+            % [
+                activation,
+                str(world.get("terrain", "flat")),
+                str(changes.get("population_size", "?")),
+                str(changes.get("trials_per_creature", "?")),
+            ]
+        )
+
+
+func _timeline_config_dictionary() -> Dictionary:
+    return {"keyframes": _timeline_entries.duplicate(true)}
+
+
+func _timeline_json() -> String:
+    return JSON.stringify(_timeline_config_dictionary())
+
+
 func _on_terrain_selected(index: int) -> void:
     var terrain_names := ["flat", "slope", "hills", "stairs"]
     if index >= 0 and index < terrain_names.size():
