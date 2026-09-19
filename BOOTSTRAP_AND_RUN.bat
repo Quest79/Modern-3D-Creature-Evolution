@@ -117,15 +117,35 @@ if errorlevel 1 (
 )
 
 echo.
-echo [SETUP] Updating the local checkout...
-git fetch origin main
-git checkout main >nul 2>&1
-git pull --ff-only origin main
+echo [SETUP] Synchronizing exactly to the latest main branch...
+git fetch --prune origin main
 if errorlevel 1 (
     echo.
-    echo [WARNING] The automatic Git update could not fast-forward.
-    echo Your local files were NOT overwritten. Continuing with the local copy.
+    echo [ERROR] Could not fetch the latest main branch.
+    echo The app will not launch from a stale checkout.
+    pause
+    exit /b 1
+)
+
+git checkout main >nul 2>&1
+if errorlevel 1 (
     echo.
+    echo [ERROR] Could not switch to the main branch.
+    echo Resolve local Git changes, then run this file again.
+    pause
+    exit /b 1
+)
+
+git reset --hard origin/main
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Could not synchronize the local checkout to origin/main.
+    pause
+    exit /b 1
+)
+
+for /f "delims=" %%C in ('git rev-parse --short HEAD') do (
+    echo [SETUP] Running main at commit %%C
 )
 
 echo.
