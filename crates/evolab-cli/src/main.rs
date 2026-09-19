@@ -706,17 +706,17 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
     let socket = make_event_socket(request.event_host, request.event_port)?;
     let result = run_evolve_inner(&request, socket.as_ref());
 
-    if let Err(err) = &result {
-        if let Some(socket) = socket.as_ref() {
-            send_event(
-                socket,
-                &json!({
-                    "protocol_version": 1,
-                    "kind": "evolution_error",
-                    "message": err,
-                }),
-            );
-        }
+    if let Err(err) = &result
+        && let Some(socket) = socket.as_ref()
+    {
+        send_event(
+            socket,
+            &json!({
+                "protocol_version": 1,
+                "kind": "evolution_error",
+                "message": err,
+            }),
+        );
     }
 
     result
