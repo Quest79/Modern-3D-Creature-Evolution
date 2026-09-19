@@ -16,6 +16,8 @@ Evolution can now write a complete `.evoresults` JSON file containing:
 - every generation summary
 - the champion from every generation
 - lineage records for every evaluated individual
+- the full genome for every evaluated individual
+- mutation records and exact trial/world seeds for every evaluated individual
 - diversity statistics
 - analysis-class summaries
 - distance/energy Pareto fronts
@@ -45,6 +47,9 @@ Each evaluated individual records:
 - joint count
 - brain-node count
 - analysis class
+- mutation descriptions
+- exact evaluation trial/world seeds
+- complete genome, including the brain
 
 Elites copied into a later generation receive a new ID with the previous elite
 recorded as their parent. Crossover children record both selected parents when
@@ -75,6 +80,7 @@ The Results window includes a generation graph for:
 
 - best fitness
 - average fitness
+- median fitness
 
 The generation browser shows best, average, worst, distance, champion identity,
 complexity, diversity, Pareto size, and MAP-Elites occupancy.
@@ -136,10 +142,17 @@ The new **Results** button opens four views:
 
 - **History** — fitness graph, generation list, detailed metrics
 - **Champions** — generation champion archive with load/compare controls
-- **Lineage** — individual IDs and parent relationships
-- **Analysis** — diversity, analysis classes, Pareto front, and MAP-Elites occupancy
+- **Lineage** — every evaluated creature, parent relationships, mutation history, trial seeds, ancestry, exact historical replay, load, compare, and fork controls
+- **Classes** — descriptive morphology/brain analysis groups
+- **Analysis** — diversity history, analysis classes, Pareto front, and MAP-Elites occupancy
 
 The Results button becomes available after a completed persisted evolution run.
+Results files can also be loaded later with **Load Results...**.
+
+Historical replay reconstructs the generation's recorded simulation settings and
+world, then runs the retained genome through the normal buffered/interpolated
+viewer. This means old creatures can be inspected at any playback speed without
+requiring a separate video capture.
 
 ## Current boundary
 
