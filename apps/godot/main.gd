@@ -357,7 +357,7 @@ func _build_ui() -> void:
     header_row.add_child(_settings_button)
 
     var subtitle := Label.new()
-    subtitle.text = "Step 5 • World / Terrain Editor"
+    subtitle.text = "Step 6 • Experiment Timeline / Scheduling"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
 
@@ -415,6 +415,28 @@ func _build_ui() -> void:
     _load_button.pressed.connect(_on_load_pressed)
     file_row.add_child(_load_button)
 
+    var experiment_row := HBoxContainer.new()
+    experiment_row.add_theme_constant_override("separation", 6)
+    column.add_child(experiment_row)
+
+    _save_experiment_button = Button.new()
+    _save_experiment_button.text = "Save Experiment..."
+    _save_experiment_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _save_experiment_button.pressed.connect(_on_save_experiment_pressed)
+    experiment_row.add_child(_save_experiment_button)
+
+    _load_experiment_button = Button.new()
+    _load_experiment_button.text = "Load Experiment..."
+    _load_experiment_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _load_experiment_button.pressed.connect(_on_load_experiment_pressed)
+    experiment_row.add_child(_load_experiment_button)
+
+    _fork_experiment_button = Button.new()
+    _fork_experiment_button.text = "Fork..."
+    _fork_experiment_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _fork_experiment_button.pressed.connect(_on_fork_experiment_pressed)
+    experiment_row.add_child(_fork_experiment_button)
+
     column.add_child(HSeparator.new())
 
     var evolution_heading := Label.new()
@@ -429,6 +451,42 @@ func _build_ui() -> void:
     _crossover_spin = _add_number_row(column, "Brain crossover", 0.0, 1.0, 0.5, 0.05)
     _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
     _evolution_mutations_spin = _add_number_row(column, "Mutations / child", 1, 500, 8, 1)
+    _structural_mutation_spin = _add_number_row(
+        column,
+        "Structural mutation chance",
+        0.0,
+        1.0,
+        _structural_mutation_chance,
+        0.01
+    )
+    _motor_strength_spin = _add_number_row(
+        column, "Motor strength", 0.0, 20.0, _motor_strength, 0.05
+    )
+    _motor_strength_spin.suffix = "x"
+    _trials_spin = _add_number_row(
+        column, "Trials / creature", 1, 100, _trials_per_creature, 1
+    )
+
+    var aggregation_row := HBoxContainer.new()
+    column.add_child(aggregation_row)
+    var aggregation_label := Label.new()
+    aggregation_label.text = "Trial aggregation"
+    aggregation_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    aggregation_row.add_child(aggregation_label)
+    _trial_aggregation_option = OptionButton.new()
+    _trial_aggregation_option.custom_minimum_size = Vector2(145, 29)
+    for aggregation_name in ["Mean", "Median", "Worst", "Best"]:
+        _trial_aggregation_option.add_item(aggregation_name)
+    var aggregation_index := ["mean", "median", "worst", "best"].find(
+        _trial_aggregation
+    )
+    _trial_aggregation_option.select(maxi(aggregation_index, 0))
+    _trial_aggregation_option.item_selected.connect(_on_trial_aggregation_selected)
+    aggregation_row.add_child(_trial_aggregation_option)
+
+    _structural_mutation_spin.value_changed.connect(_on_schedule_base_changed)
+    _motor_strength_spin.value_changed.connect(_on_schedule_base_changed)
+    _trials_spin.value_changed.connect(_on_schedule_base_changed)
 
     var fitness_heading := Label.new()
     fitness_heading.text = "Fitness weights"
@@ -567,6 +625,78 @@ func _build_ui() -> void:
 
     for world_check in [_walls_check, _blocks_check, _gaps_check, _pits_check]:
         world_check.toggled.connect(_on_world_toggle_changed)
+
+    column.add_child(HSeparator.new())
+
+    var timeline_heading := Label.new()
+    timeline_heading.text = "Experiment timeline"
+    _section_headings.append(timeline_heading)
+    column.add_child(timeline_heading)
+
+    var timeline_help := Label.new()
+    timeline_help.text = (
+        "Keyframes snapshot the current world, fitness, population, mutation, "
+        + "motor, duration, and trial settings."
+    )
+    timeline_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    timeline_help.modulate = Color(0.70, 0.76, 0.86)
+    column.add_child(timeline_help)
+
+    _timeline_generation_spin = _add_number_row(
+        column, "Keyframe generation", 1, 10000, 1, 1
+    )
+
+    var condition_row := HBoxContainer.new()
+    column.add_child(condition_row)
+    var condition_label := Label.new()
+    condition_label.text = "Activation"
+    condition_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    condition_row.add_child(condition_label)
+    _timeline_condition_option = OptionButton.new()
+    _timeline_condition_option.custom_minimum_size = Vector2(190, 29)
+    for condition_name in [
+        "At generation",
+        "Best fitness ≥",
+        "Average fitness ≥",
+        "Best distance ≥",
+    ]:
+        _timeline_condition_option.add_item(condition_name)
+    _timeline_condition_option.item_selected.connect(_on_timeline_condition_selected)
+    condition_row.add_child(_timeline_condition_option)
+
+    _timeline_condition_value_spin = _add_number_row(
+        column, "Condition threshold", -100000.0, 100000.0, 1.0, 0.1
+    )
+    _timeline_condition_value_spin.editable = false
+
+    _timeline_list = ItemList.new()
+    _timeline_list.custom_minimum_size = Vector2(0, 115)
+    _timeline_list.select_mode = ItemList.SELECT_SINGLE
+    column.add_child(_timeline_list)
+
+    var timeline_buttons := HBoxContainer.new()
+    timeline_buttons.add_theme_constant_override("separation", 6)
+    column.add_child(timeline_buttons)
+
+    var add_keyframe_button := Button.new()
+    add_keyframe_button.text = "Add Snapshot"
+    add_keyframe_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    add_keyframe_button.pressed.connect(_on_add_timeline_keyframe)
+    timeline_buttons.add_child(add_keyframe_button)
+
+    var remove_keyframe_button := Button.new()
+    remove_keyframe_button.text = "Remove"
+    remove_keyframe_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    remove_keyframe_button.pressed.connect(_on_remove_timeline_keyframe)
+    timeline_buttons.add_child(remove_keyframe_button)
+
+    var clear_timeline_button := Button.new()
+    clear_timeline_button.text = "Clear"
+    clear_timeline_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    clear_timeline_button.pressed.connect(_on_clear_timeline)
+    timeline_buttons.add_child(clear_timeline_button)
+
+    _refresh_timeline_list()
 
     var evolution_row := HBoxContainer.new()
     evolution_row.add_theme_constant_override("separation", 6)
