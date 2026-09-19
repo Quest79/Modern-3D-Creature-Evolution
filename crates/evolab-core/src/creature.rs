@@ -199,6 +199,8 @@ pub struct CreatureReport {
     pub steps: usize,
     pub simulated_seconds: f32,
     pub final_root_position: [f32; 3],
+    /// Approximate actuator mechanical work, integrated as |torque_proxy * angular_velocity| * dt.
+    pub motor_effort: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -312,6 +314,7 @@ impl CreatureSimulator {
 
         let sample_every_steps = sample_every_steps.max(1);
         let total_steps = config.step_count();
+        let mut motor_effort = 0.0_f32;
 
         for step in 1..=total_steps {
             let time_seconds = (step - 1) as f32 * config.dt;
@@ -331,6 +334,21 @@ impl CreatureSimulator {
                     .map(|expression| expression.evaluate(&context))
                     .unwrap_or_else(|| legacy_expression(gene).evaluate(&context))
                     .clamp(gene.limits_radians[0], gene.limits_radians[1]);
+
+                if let Some(sensor) = context
+                    .joints
+                    .iter()
+                    .find(|sensor| sensor.child_id == gene.child_id)
+                {
+                    let position_error = (target - sensor.angle_radians).abs();
+                    let angular_speed = sensor.velocity_radians_per_second.abs();
+                    let torque_proxy = (
+                        position_error * gene.motor_stiffness
+                            + angular_speed * gene.motor_damping
+                    )
+                        .min(gene.motor_max_torque);
+                    motor_effort += torque_proxy * angular_speed * config.dt;
+                }
 
                 if let Some(joint) = impulse_joints.get_mut(*joint_handle, true) {
                     joint.data.set_motor_position(
@@ -380,6 +398,7 @@ impl CreatureSimulator {
             steps: total_steps,
             simulated_seconds: total_steps as f32 * config.dt,
             final_root_position: [p.x, p.y, p.z],
+            motor_effort,
         })
     }
 
