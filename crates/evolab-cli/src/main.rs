@@ -9,7 +9,8 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     BatchRunner, CreatureGenome, CreatureSimulator, CreatureSnapshot, EvolutionConfig,
     FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
-    SimulationConfig, WorldSnapshot, evolve_population, mutate_genome, random_creature,
+    SimulationConfig, WorldConfig, WorldSnapshot, evolve_population, mutate_genome,
+    random_creature,
 };
 use serde_json::{Value, json};
 
@@ -47,6 +48,10 @@ enum Command {
         /// Fixed physics timestep in seconds.
         #[arg(long, default_value_t = 1.0 / 120.0)]
         dt: f32,
+
+        /// Serialized WorldConfig JSON.
+        #[arg(long)]
+        world_json: Option<String>,
 
         /// Emit one machine-readable JSON result to stdout.
         #[arg(long, default_value_t = false)]
@@ -90,6 +95,10 @@ enum Command {
         /// Playback speed for live viewing. 1.0 = real time.
         #[arg(long, default_value_t = 1.0)]
         playback_speed: f32,
+
+        /// Serialized WorldConfig JSON.
+        #[arg(long)]
+        world_json: Option<String>,
     },
 
     /// Stream the default three-segment creature with motorized joints.
@@ -141,6 +150,10 @@ enum Command {
         /// Hard structural limit used by generation/mutation.
         #[arg(long, default_value_t = 12)]
         max_segments: usize,
+
+        /// Serialized WorldConfig JSON.
+        #[arg(long)]
+        world_json: Option<String>,
     },
 
     /// Write a generated/mutated creature genome to a JSON file.
@@ -201,6 +214,10 @@ enum Command {
 
         #[arg(long, default_value_t = 1.0 / 120.0)]
         dt: f32,
+
+        /// Serialized WorldConfig JSON.
+        #[arg(long)]
+        world_json: Option<String>,
 
         /// Weight for horizontal distance traveled.
         #[arg(long, default_value_t = 1.0)]
@@ -264,6 +281,7 @@ fn run() -> Result<(), String> {
             workers,
             seconds,
             dt,
+            world_json,
             json: json_output,
             event_port,
             event_host,
@@ -272,6 +290,7 @@ fn run() -> Result<(), String> {
             workers,
             seconds,
             dt,
+            world_json.as_deref(),
             json_output,
             &event_host,
             event_port,
@@ -284,6 +303,7 @@ fn run() -> Result<(), String> {
             frame_hz,
             max_speed,
             playback_speed,
+            world_json,
         } => run_stream(
             &event_host,
             event_port,
@@ -292,6 +312,7 @@ fn run() -> Result<(), String> {
             frame_hz,
             !max_speed,
             playback_speed,
+            world_json.as_deref(),
         ),
         Command::CreatureStream {
             event_port,
@@ -306,6 +327,7 @@ fn run() -> Result<(), String> {
             mutations,
             random_segments,
             max_segments,
+            world_json,
         } => run_creature_stream(CreatureStreamRequest {
             event_host: &event_host,
             event_port,
@@ -319,6 +341,7 @@ fn run() -> Result<(), String> {
             mutations,
             random_segments,
             max_segments,
+            world_json: world_json.as_deref(),
         }),
         Command::GenomeGenerate {
             output,
@@ -340,6 +363,7 @@ fn run() -> Result<(), String> {
             workers,
             seconds,
             dt,
+            world_json,
             fitness_distance,
             fitness_speed,
             fitness_upright,
@@ -362,6 +386,7 @@ fn run() -> Result<(), String> {
             workers,
             seconds,
             dt,
+            world_json: world_json.as_deref(),
             fitness_distance,
             fitness_speed,
             fitness_upright,
@@ -381,6 +406,7 @@ fn run_batch(
     workers: usize,
     seconds: f32,
     dt: f32,
+    world_json: Option<&str>,
     json_output: bool,
     event_host: &str,
     event_port: Option<u16>,
@@ -389,12 +415,7 @@ fn run_batch(
         return Err("batch size must be greater than 0".into());
     }
 
-    let config = SimulationConfig {
-        duration_seconds: seconds,
-        dt,
-        ..SimulationConfig::default()
-    };
-    config.validate()?;
+    let config = simulation_config(seconds, dt, world_json)?;
 
     let runner = BatchRunner { threads: workers };
     let backend = RapierCpuBackend;
@@ -499,6 +520,7 @@ fn run_stream(
     frame_hz: f32,
     realtime: bool,
     playback_speed: f32,
+    world_json: Option<&str>,
 ) -> Result<(), String> {
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
@@ -507,12 +529,7 @@ fn run_stream(
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let config = SimulationConfig {
-        duration_seconds: seconds,
-        dt,
-        ..SimulationConfig::default()
-    };
-    config.validate()?;
+    let config = simulation_config(seconds, dt, world_json)?;
 
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "streaming requires an event port".to_string())?;
@@ -529,6 +546,8 @@ fn run_stream(
             "sample_every_steps": sample_every_steps,
             "realtime": realtime,
             "playback_speed": playback_speed,
+            "world": config.world,
+            "world_geometry": config.world.geometry(),
         }),
     );
 
@@ -592,6 +611,7 @@ struct CreatureStreamRequest<'a> {
     mutations: usize,
     random_segments: usize,
     max_segments: usize,
+    world_json: Option<&'a str>,
 }
 
 fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String> {
@@ -608,6 +628,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         mutations,
         random_segments,
         max_segments,
+        world_json,
     } = request;
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
@@ -616,12 +637,7 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let config = SimulationConfig {
-        duration_seconds: seconds,
-        dt,
-        ..SimulationConfig::default()
-    };
-    config.validate()?;
+    let config = simulation_config(seconds, dt, world_json)?;
 
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "creature streaming requires an event port".to_string())?;
@@ -684,6 +700,8 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
             "genome_source": genome_source,
             "mutation_log": mutation_log,
             "genome": genome,
+            "world": config.world,
+            "world_geometry": config.world.geometry(),
         }),
     );
 
@@ -775,6 +793,7 @@ struct EvolveRequest<'a> {
     workers: usize,
     seconds: f32,
     dt: f32,
+    world_json: Option<&'a str>,
     fitness_distance: f32,
     fitness_speed: f32,
     fitness_upright: f32,
@@ -830,11 +849,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         mutations_per_child: request.mutations,
         seed: request.seed,
         worker_threads: request.workers,
-        simulation: SimulationConfig {
-            duration_seconds: request.seconds,
-            dt: request.dt,
-            ..SimulationConfig::default()
-        },
+        simulation: simulation_config(request.seconds, request.dt, request.world_json)?,
         fitness: FitnessConfig {
             weights: FitnessWeights {
                 distance: request.fitness_distance,
@@ -864,6 +879,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "crossover_chance": config.crossover_chance,
                 "mutations_per_child": config.mutations_per_child,
                 "fitness_weights": config.fitness.weights,
+                "world": config.simulation.world,
+                "world_geometry": config.simulation.world.geometry(),
             }),
         );
     }
@@ -983,6 +1000,29 @@ fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
     fs::write(path, json)
         .map_err(|err| format!("failed to write champion genome {}: {err}", path.display()))
 }
+
+fn simulation_config(
+    seconds: f32,
+    dt: f32,
+    world_json: Option<&str>,
+) -> Result<SimulationConfig, String> {
+    let world = if let Some(raw) = world_json {
+        serde_json::from_str::<WorldConfig>(raw)
+            .map_err(|err| format!("invalid --world-json: {err}"))?
+    } else {
+        WorldConfig::default()
+    };
+
+    let config = SimulationConfig {
+        duration_seconds: seconds,
+        dt,
+        world,
+        ..SimulationConfig::default()
+    };
+    config.validate()?;
+    Ok(config)
+}
+
 
 fn run_capabilities(json_output: bool) -> Result<(), String> {
     let backend = RapierCpuBackend;
