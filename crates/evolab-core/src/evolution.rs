@@ -144,7 +144,7 @@ pub fn mutate_genome(
 
     let mut rng = GenomeRng::new(seed);
     let mut genome = source.clone();
-    genome.brain.sync_with_joints(&genome.joints);
+    genome.brain.sync_with_structure(&genome.joints, &genome.segments);
     let mut mutations = Vec::with_capacity(mutation_count);
 
     for _ in 0..mutation_count {
@@ -162,7 +162,7 @@ pub fn mutate_genome(
         }
     }
 
-    genome.brain.sync_with_joints(&genome.joints);
+    genome.brain.sync_with_structure(&genome.joints, &genome.segments);
     genome.name = format!("{} • mutated {}", source.name, seed);
     genome.validate()?;
 
@@ -211,7 +211,7 @@ pub fn random_creature(
         }
     }
 
-    genome.brain.sync_with_joints(&genome.joints);
+    genome.brain.sync_with_structure(&genome.joints, &genome.segments);
     genome.validate()?;
     Ok(MutationResult { genome, mutations })
 }
@@ -348,7 +348,7 @@ fn move_joint_anchor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option
 }
 
 fn mutate_brain(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
-    genome.brain.sync_with_joints(&genome.joints);
+    genome.brain.sync_with_structure(&genome.joints, &genome.segments);
     if genome.brain.outputs.is_empty() {
         return None;
     }
@@ -669,7 +669,7 @@ fn add_segment(
         motor_damping: rng.range_f32(2.5, 7.0),
         motor_max_torque: rng.range_f32(8.0, 30.0),
     });
-    genome.brain.sync_with_joints(&genome.joints);
+    genome.brain.sync_with_structure(&genome.joints, &genome.segments);
 
     Some(MutationRecord {
         kind: MutationKind::AddSegment,
@@ -700,7 +700,7 @@ fn remove_leaf_segment(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Opti
     genome
         .joints
         .retain(|joint| joint.parent_id != id && joint.child_id != id);
-    genome.brain.sync_with_joints(&genome.joints);
+    genome.brain.sync_with_structure(&genome.joints, &genome.segments);
 
     Some(MutationRecord {
         kind: MutationKind::RemoveLeafSegment,
