@@ -78,6 +78,7 @@ pub struct GenerationSummary {
     pub best_distance: f32,
     pub best_segments: usize,
     pub best_joints: usize,
+    pub best_brain_nodes: usize,
     pub evaluations_completed: usize,
     pub champion: CreatureGenome,
 }
@@ -149,6 +150,7 @@ where
             best_distance: best.distance_traveled,
             best_segments: best.genome.segments.len(),
             best_joints: best.genome.joints.len(),
+            best_brain_nodes: best.genome.brain.node_count(),
             evaluations_completed,
             champion: best.genome.clone(),
         };
