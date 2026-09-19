@@ -2237,6 +2237,7 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
 
     _set_run_buttons_disabled(true)
     _set_world_controls_enabled(false)
+    _set_timeline_controls_enabled(false)
     _stop_button.disabled = false
     return true
 
@@ -2260,8 +2261,24 @@ func _stop_current_job() -> void:
 func _finish_job_controls() -> void:
     _set_run_buttons_disabled(false)
     _set_world_controls_enabled(true)
+    _set_timeline_controls_enabled(true)
     _stop_button.disabled = true
     _save_button.disabled = _current_genome.is_empty()
+
+
+func _set_timeline_controls_enabled(enabled: bool) -> void:
+    if _timeline_generation_spin != null:
+        _timeline_generation_spin.editable = enabled
+    if _timeline_condition_option != null:
+        _timeline_condition_option.disabled = not enabled
+    if _timeline_condition_value_spin != null:
+        _timeline_condition_value_spin.editable = (
+            enabled and _timeline_condition_option.selected != 0
+        )
+    if _timeline_list != null:
+        _timeline_list.mouse_filter = (
+            Control.MOUSE_FILTER_STOP if enabled else Control.MOUSE_FILTER_IGNORE
+        )
 
 
 func _set_run_buttons_disabled(disabled: bool) -> void:
@@ -2274,6 +2291,9 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
     _evolve_button.disabled = disabled
     _watch_champion_button.disabled = disabled or not _has_evolution_champion
     _save_button.disabled = disabled or _current_genome.is_empty()
+    _save_experiment_button.disabled = disabled
+    _load_experiment_button.disabled = disabled
+    _fork_experiment_button.disabled = disabled
 
 
 func _handle_event(event: Dictionary) -> void:
