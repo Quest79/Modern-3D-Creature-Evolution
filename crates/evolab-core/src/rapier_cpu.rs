@@ -61,14 +61,26 @@ impl RapierCpuBackend {
         let mut rigid_bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
-        let ground = ColliderBuilder::cuboid(
-            config.ground_half_extents[0],
-            config.ground_half_extents[1],
-            config.ground_half_extents[2],
-        )
-        .friction(0.9)
-        .build();
-        colliders.insert(ground);
+        for shape in config.world.geometry() {
+            let collider = ColliderBuilder::cuboid(
+                shape.half_extents[0],
+                shape.half_extents[1],
+                shape.half_extents[2],
+            )
+            .translation(Vector::new(
+                shape.center[0],
+                shape.center[1],
+                shape.center[2],
+            ))
+            .rotation(Vector::new(
+                shape.rotation_radians[0],
+                shape.rotation_radians[1],
+                shape.rotation_radians[2],
+            ))
+            .friction(shape.friction)
+            .build();
+            colliders.insert(collider);
+        }
 
         let body = RigidBodyBuilder::dynamic()
             .translation(Vector::new(
@@ -89,7 +101,11 @@ impl RapierCpuBackend {
         .build();
         colliders.insert_with_parent(collider, body_handle, &mut rigid_bodies);
 
-        let gravity = Vector::new(config.gravity[0], config.gravity[1], config.gravity[2]);
+        let gravity = Vector::new(
+            config.world.gravity[0],
+            config.world.gravity[1],
+            config.world.gravity[2],
+        );
         let integration_parameters = IntegrationParameters {
             dt: config.dt,
             ..IntegrationParameters::default()
@@ -198,9 +214,8 @@ mod tests {
             .run_probe(&SimulationConfig::default(), &ProbeSpec::default())
             .expect("probe simulation should succeed");
 
-        // Ground top is y=0.1 and probe half-height is 0.25, so its center
-        // should settle close to y=0.35.
-        assert!((report.final_position[1] - 0.35).abs() < 0.08);
+        // Default ground surface is y=0.0 and probe half-height is 0.25.
+        assert!((report.final_position[1] - 0.25).abs() < 0.08);
     }
 
     #[test]
