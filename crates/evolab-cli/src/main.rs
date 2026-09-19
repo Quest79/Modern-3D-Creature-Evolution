@@ -496,7 +496,9 @@ fn run_stream(
     let mut observer = |snapshot: &WorldSnapshot| -> Result<(), String> {
         if realtime {
             let target = wall_start
-                + Duration::from_secs_f64(snapshot.simulated_seconds as f64 / playback_speed as f64);
+                + Duration::from_secs_f64(
+                    snapshot.simulated_seconds as f64 / playback_speed as f64,
+                );
             let now = Instant::now();
             if target > now {
                 thread::sleep(target - now);
@@ -647,7 +649,9 @@ fn run_creature_stream(request: CreatureStreamRequest<'_>) -> Result<(), String>
     let mut observer = |snapshot: &CreatureSnapshot| -> Result<(), String> {
         if realtime {
             let target = wall_start
-                + Duration::from_secs_f64(snapshot.simulated_seconds as f64 / playback_speed as f64);
+                + Duration::from_secs_f64(
+                    snapshot.simulated_seconds as f64 / playback_speed as f64,
+                );
             let now = Instant::now();
             if target > now {
                 thread::sleep(target - now);
