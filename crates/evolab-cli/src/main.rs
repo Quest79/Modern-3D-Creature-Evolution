@@ -255,6 +255,13 @@ enum Command {
         json: bool,
     },
 
+    /// Generate the exact static world geometry used by the simulator.
+    WorldGeometry {
+        /// Serialized WorldConfig JSON.
+        #[arg(long)]
+        world_json: Option<String>,
+    },
+
     /// Report backend and machine capabilities.
     Capabilities {
         #[arg(long, default_value_t = false)]
@@ -397,6 +404,7 @@ fn run() -> Result<(), String> {
             champion_output: champion_output.as_ref(),
             json_output: json,
         }),
+        Command::WorldGeometry { world_json } => run_world_geometry(world_json.as_deref()),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
@@ -1021,6 +1029,28 @@ fn simulation_config(
     };
     config.validate()?;
     Ok(config)
+}
+
+
+fn run_world_geometry(world_json: Option<&str>) -> Result<(), String> {
+    let world = if let Some(raw) = world_json {
+        serde_json::from_str::<WorldConfig>(raw)
+            .map_err(|err| format!("invalid --world-json: {err}"))?
+    } else {
+        WorldConfig::default()
+    };
+    world.validate()?;
+
+    println!(
+        "{}",
+        json!({
+            "protocol_version": 1,
+            "kind": "world_geometry",
+            "world": world,
+            "geometry": world.geometry(),
+        })
+    );
+    Ok(())
 }
 
 
