@@ -231,6 +231,39 @@ impl Expression {
         }
     }
 
+    pub fn sanitize_sensor_targets(
+        &mut self,
+        joint_ids: &HashSet<u32>,
+        segment_ids: &HashSet<u32>,
+    ) {
+        match self {
+            Self::Sensor(SensorKind::JointAngle(child_id))
+            | Self::Sensor(SensorKind::JointVelocity(child_id))
+                if !joint_ids.contains(child_id) =>
+            {
+                *self = Self::Sensor(SensorKind::Time);
+            }
+            Self::Sensor(SensorKind::SegmentGroundContact(segment_id))
+                if !segment_ids.contains(segment_id) =>
+            {
+                *self = Self::Sensor(SensorKind::Time);
+            }
+            Self::Add(left, right)
+            | Self::Subtract(left, right)
+            | Self::Multiply(left, right) => {
+                left.sanitize_sensor_targets(joint_ids, segment_ids);
+                right.sanitize_sensor_targets(joint_ids, segment_ids);
+            }
+            Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => {
+                value.sanitize_sensor_targets(joint_ids, segment_ids);
+            }
+            Self::Clamp { value, .. } => {
+                value.sanitize_sensor_targets(joint_ids, segment_ids);
+            }
+            _ => {}
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.depth() > MAX_EXPRESSION_DEPTH {
             return Err(format!(
@@ -355,6 +388,17 @@ impl BrainGenome {
         }
 
         Ok(())
+    }
+
+    pub fn sync_with_structure(&mut self, joints: &[JointGene], segments: &[SegmentGene]) {
+        self.sync_with_joints(joints);
+        let joint_ids: HashSet<u32> = joints.iter().map(|joint| joint.child_id).collect();
+        let segment_ids: HashSet<u32> = segments.iter().map(|segment| segment.id).collect();
+        for output in &mut self.outputs {
+            output
+                .expression
+                .sanitize_sensor_targets(&joint_ids, &segment_ids);
+        }
     }
 
     pub fn sync_with_joints(&mut self, joints: &[JointGene]) {
