@@ -429,7 +429,6 @@ func _build_settings_window() -> void:
 
     var heading := Label.new()
     heading.text = "Interface & Camera"
-    heading.add_theme_font_size_override("font_size", _font_size + 2)
     column.add_child(heading)
 
     _font_size_spin = _add_number_row(column, "Font size", 10, 32, _font_size, 1)
@@ -593,13 +592,13 @@ func _update_camera_movement(delta: float) -> void:
     var direction := Vector3.ZERO
     var basis := _camera.global_transform.basis
 
-    if Input.is_key_pressed(KEY_W):
+    if Input.is_physical_key_pressed(KEY_W):
         direction += -basis.z
-    if Input.is_key_pressed(KEY_S):
+    if Input.is_physical_key_pressed(KEY_S):
         direction += basis.z
-    if Input.is_key_pressed(KEY_A):
+    if Input.is_physical_key_pressed(KEY_A):
         direction += -basis.x
-    if Input.is_key_pressed(KEY_D):
+    if Input.is_physical_key_pressed(KEY_D):
         direction += basis.x
 
     if direction.length_squared() > 0.0:
