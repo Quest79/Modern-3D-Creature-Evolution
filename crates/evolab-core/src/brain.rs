@@ -225,9 +225,7 @@ impl Expression {
             Self::Negate(value) | Self::Sin(value) | Self::Cos(value) => {
                 value.replace_subtree_inner(target, replacement, cursor)
             }
-            Self::Clamp { value, .. } => {
-                value.replace_subtree_inner(target, replacement, cursor)
-            }
+            Self::Clamp { value, .. } => value.replace_subtree_inner(target, replacement, cursor),
         }
     }
 
@@ -248,9 +246,7 @@ impl Expression {
             {
                 *self = Self::Sensor(SensorKind::Time);
             }
-            Self::Add(left, right)
-            | Self::Subtract(left, right)
-            | Self::Multiply(left, right) => {
+            Self::Add(left, right) | Self::Subtract(left, right) | Self::Multiply(left, right) => {
                 left.sanitize_sensor_targets(joint_ids, segment_ids);
                 right.sanitize_sensor_targets(joint_ids, segment_ids);
             }
