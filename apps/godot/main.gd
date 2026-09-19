@@ -1743,6 +1743,342 @@ func _on_watch_champion_pressed() -> void:
         _set_status("Watching evolution champion in real time...")
 
 
+func _on_save_experiment_pressed() -> void:
+    if _job_pid > 0:
+        return
+    _experiment_fork_pending = false
+    var safe_name := _experiment_name.to_snake_case()
+    if safe_name.is_empty():
+        safe_name = "experiment"
+    _experiment_save_dialog.current_file = safe_name + ".evo"
+    _experiment_save_dialog.popup_centered_ratio(0.72)
+
+
+func _on_load_experiment_pressed() -> void:
+    if _job_pid > 0:
+        return
+    _experiment_load_dialog.popup_centered_ratio(0.72)
+
+
+func _on_fork_experiment_pressed() -> void:
+    if _job_pid > 0:
+        return
+    _experiment_fork_pending = true
+    var safe_name := _experiment_name.to_snake_case()
+    if safe_name.is_empty():
+        safe_name = "experiment"
+    _experiment_save_dialog.current_file = safe_name + "_fork.evo"
+    _experiment_save_dialog.popup_centered_ratio(0.72)
+
+
+func _experiment_ancestor_dictionary() -> Dictionary:
+    if not _current_genome.is_empty():
+        return _current_genome.duplicate(true)
+
+    if not _backend_exists():
+        return {}
+
+    var temp_path := ProjectSettings.globalize_path(
+        "user://experiment_default_ancestor.json"
+    )
+    var output: Array = []
+    var exit_code := OS.execute(
+        _backend_path(),
+        PackedStringArray([
+            "genome-generate",
+            "--output",
+            temp_path,
+            "--seed",
+            str(int(_seed_spin.value)),
+        ]),
+        output,
+        true,
+        false
+    )
+    if exit_code != 0 or not FileAccess.file_exists(temp_path):
+        return {}
+
+    var file := FileAccess.open(temp_path, FileAccess.READ)
+    if file == null:
+        return {}
+    var parsed = JSON.parse_string(file.get_as_text())
+    file.close()
+    if typeof(parsed) == TYPE_DICTIONARY:
+        return parsed
+    return {}
+
+
+func _experiment_dictionary(name_override := "") -> Dictionary:
+    var ancestor := _experiment_ancestor_dictionary()
+    if ancestor.is_empty():
+        return {}
+
+    _sync_world_state_from_controls()
+    var experiment_name := _experiment_name
+    if not str(name_override).is_empty():
+        experiment_name = str(name_override)
+
+    return {
+        "format_version": 1,
+        "name": experiment_name,
+        "ancestor": ancestor,
+        "evolution": {
+            "population_size": int(_population_spin.value),
+            "generations": int(_generations_spin.value),
+            "tournament_size": int(_tournament_spin.value),
+            "elite_count": int(_elite_spin.value),
+            "crossover_chance": float(_crossover_spin.value),
+            "mutations_per_child": int(_evolution_mutations_spin.value),
+            "seed": int(_seed_spin.value),
+            "worker_threads": int(_workers_spin.value),
+            "simulation": {
+                "dt": float(_dt_spin.value),
+                "duration_seconds": float(_seconds_spin.value),
+                "world": _world_config_dictionary(),
+                "motor_strength_multiplier": float(_motor_strength_spin.value),
+                "deterministic": true,
+            },
+            "fitness": _fitness_config_dictionary(),
+            "mutation": {
+                "min_segments": 2,
+                "max_segments": int(_max_segments_spin.value),
+                "min_half_extent": 0.10,
+                "max_half_extent": 0.85,
+                "structural_mutation_chance":
+                    float(_structural_mutation_spin.value),
+            },
+            "trials_per_creature": int(_trials_spin.value),
+            "trial_aggregation": _trial_aggregation_value(),
+            "timeline": _timeline_config_dictionary(),
+        },
+    }
+
+
+func _on_experiment_save_file_selected(path: String) -> void:
+    var file_name := path.get_file().get_basename()
+    var save_name := file_name
+    if _experiment_fork_pending:
+        save_name = "Fork of %s" % _experiment_name
+
+    var experiment := _experiment_dictionary(save_name)
+    if experiment.is_empty():
+        _set_status("Could not create experiment file.")
+        _experiment_fork_pending = false
+        return
+
+    var file := FileAccess.open(path, FileAccess.WRITE)
+    if file == null:
+        _set_status("Could not save experiment: %s" % path)
+        _experiment_fork_pending = false
+        return
+
+    file.store_string(JSON.stringify(experiment, "	"))
+    file.close()
+    _experiment_name = str(experiment.get("name", file_name))
+    _experiment_fork_pending = false
+    _set_status("Saved experiment: %s" % path)
+
+
+func _on_experiment_load_file_selected(path: String) -> void:
+    var file := FileAccess.open(path, FileAccess.READ)
+    if file == null:
+        _set_status("Could not open experiment: %s" % path)
+        return
+
+    var parsed = JSON.parse_string(file.get_as_text())
+    file.close()
+    if typeof(parsed) != TYPE_DICTIONARY:
+        _set_status("Experiment file is not valid JSON.")
+        return
+
+    var experiment: Dictionary = parsed
+    if int(experiment.get("format_version", 0)) != 1:
+        _set_status("Unsupported experiment file version.")
+        return
+
+    if not _apply_experiment_dictionary(experiment):
+        _set_status("Experiment file is incomplete or invalid.")
+        return
+
+    _set_status(
+        "Loaded experiment '%s' • %d timeline keyframes"
+        % [_experiment_name, _timeline_entries.size()]
+    )
+
+
+func _apply_experiment_dictionary(experiment: Dictionary) -> bool:
+    var ancestor_value = experiment.get("ancestor", null)
+    var evolution_value = experiment.get("evolution", null)
+    if (
+        typeof(ancestor_value) != TYPE_DICTIONARY
+        or typeof(evolution_value) != TYPE_DICTIONARY
+    ):
+        return false
+
+    var evolution: Dictionary = evolution_value
+    _experiment_name = str(experiment.get("name", "Experiment"))
+    _current_genome = ancestor_value.duplicate(true)
+    _current_genome_source = "experiment: %s" % _experiment_name
+    _save_button.disabled = false
+
+    _population_spin.value = int(
+        evolution.get("population_size", _population_spin.value)
+    )
+    _generations_spin.value = int(
+        evolution.get("generations", _generations_spin.value)
+    )
+    _tournament_spin.value = int(
+        evolution.get("tournament_size", _tournament_spin.value)
+    )
+    _elite_spin.value = int(evolution.get("elite_count", _elite_spin.value))
+    _crossover_spin.value = float(
+        evolution.get("crossover_chance", _crossover_spin.value)
+    )
+    _evolution_mutations_spin.value = int(
+        evolution.get("mutations_per_child", _evolution_mutations_spin.value)
+    )
+    _seed_spin.value = int(evolution.get("seed", _seed_spin.value))
+    _workers_spin.value = int(
+        evolution.get("worker_threads", _workers_spin.value)
+    )
+
+    var simulation_value = evolution.get("simulation", {})
+    if typeof(simulation_value) == TYPE_DICTIONARY:
+        var simulation: Dictionary = simulation_value
+        _dt_spin.value = float(simulation.get("dt", _dt_spin.value))
+        _seconds_spin.value = float(
+            simulation.get("duration_seconds", _seconds_spin.value)
+        )
+        _motor_strength_spin.value = float(
+            simulation.get(
+                "motor_strength_multiplier",
+                _motor_strength_spin.value
+            )
+        )
+        var world_value = simulation.get("world", {})
+        if typeof(world_value) == TYPE_DICTIONARY:
+            _apply_world_dictionary(world_value)
+
+    var fitness_value = evolution.get("fitness", {})
+    if typeof(fitness_value) == TYPE_DICTIONARY:
+        var weights_value = fitness_value.get("weights", {})
+        if typeof(weights_value) == TYPE_DICTIONARY:
+            var weights: Dictionary = weights_value
+            _fitness_distance_spin.value = float(
+                weights.get("distance", _fitness_distance_spin.value)
+            )
+            _fitness_speed_spin.value = float(
+                weights.get("average_speed", _fitness_speed_spin.value)
+            )
+            _fitness_upright_spin.value = float(
+                weights.get("upright", _fitness_upright_spin.value)
+            )
+            _fitness_stability_spin.value = float(
+                weights.get("stability", _fitness_stability_spin.value)
+            )
+            _fitness_energy_spin.value = float(
+                weights.get("energy", _fitness_energy_spin.value)
+            )
+
+    var mutation_value = evolution.get("mutation", {})
+    if typeof(mutation_value) == TYPE_DICTIONARY:
+        var mutation: Dictionary = mutation_value
+        _max_segments_spin.value = int(
+            mutation.get("max_segments", _max_segments_spin.value)
+        )
+        _structural_mutation_spin.value = float(
+            mutation.get(
+                "structural_mutation_chance",
+                _structural_mutation_spin.value
+            )
+        )
+
+    _trials_spin.value = int(
+        evolution.get("trials_per_creature", _trials_spin.value)
+    )
+    _trial_aggregation = str(
+        evolution.get("trial_aggregation", _trial_aggregation)
+    )
+    var aggregation_index := ["mean", "median", "worst", "best"].find(
+        _trial_aggregation
+    )
+    _trial_aggregation_option.select(maxi(aggregation_index, 0))
+
+    var timeline_value = evolution.get("timeline", {})
+    if typeof(timeline_value) == TYPE_DICTIONARY:
+        var keyframes = timeline_value.get("keyframes", [])
+        if typeof(keyframes) == TYPE_ARRAY:
+            _timeline_entries = keyframes.duplicate(true)
+            _sort_timeline_entries()
+            _timeline_next_id = _timeline_entries.size() + 1
+            _refresh_timeline_list()
+
+    _sync_world_state_from_controls()
+    _refresh_world_preview()
+    _build_creature_from_genome(_current_genome)
+    _save_settings()
+    return true
+
+
+func _apply_world_dictionary(world: Dictionary) -> void:
+    var gravity: Array = world.get(
+        "gravity",
+        [_gravity_x, _gravity_y, _gravity_z]
+    )
+    if gravity.size() >= 3:
+        _gravity_x = float(gravity[0])
+        _gravity_y = float(gravity[1])
+        _gravity_z = float(gravity[2])
+
+    _ground_friction = float(
+        world.get("ground_friction", _ground_friction)
+    )
+    _terrain_kind = str(world.get("terrain", _terrain_kind))
+    _world_seed = int(world.get("seed", _world_seed))
+    _slope_degrees = float(world.get("slope_degrees", _slope_degrees))
+    _hill_height = float(world.get("hill_height", _hill_height))
+    _hill_wavelength = float(
+        world.get("hill_wavelength", _hill_wavelength)
+    )
+    _stair_height = float(world.get("stair_height", _stair_height))
+    _stair_depth = float(world.get("stair_depth", _stair_depth))
+    _walls_enabled = bool(world.get("walls_enabled", _walls_enabled))
+    _blocks_enabled = bool(world.get("blocks_enabled", _blocks_enabled))
+    _gaps_enabled = bool(world.get("gaps_enabled", _gaps_enabled))
+    _pits_enabled = bool(world.get("pits_enabled", _pits_enabled))
+    _obstacle_count = int(world.get("obstacle_count", _obstacle_count))
+    _obstacle_spacing = float(
+        world.get("obstacle_spacing", _obstacle_spacing)
+    )
+    _obstacle_size = float(world.get("obstacle_size", _obstacle_size))
+    _gap_width = float(world.get("gap_width", _gap_width))
+    _pit_depth = float(world.get("pit_depth", _pit_depth))
+
+    var terrain_index := ["flat", "slope", "hills", "stairs"].find(
+        _terrain_kind
+    )
+    _terrain_option.select(maxi(terrain_index, 0))
+    _world_seed_spin.value = _world_seed
+    _gravity_x_spin.value = _gravity_x
+    _gravity_y_spin.value = _gravity_y
+    _gravity_z_spin.value = _gravity_z
+    _ground_friction_spin.value = _ground_friction
+    _slope_spin.value = _slope_degrees
+    _hill_height_spin.value = _hill_height
+    _hill_wavelength_spin.value = _hill_wavelength
+    _stair_height_spin.value = _stair_height
+    _stair_depth_spin.value = _stair_depth
+    _walls_check.button_pressed = _walls_enabled
+    _blocks_check.button_pressed = _blocks_enabled
+    _gaps_check.button_pressed = _gaps_enabled
+    _pits_check.button_pressed = _pits_enabled
+    _obstacle_count_spin.value = _obstacle_count
+    _obstacle_spacing_spin.value = _obstacle_spacing
+    _obstacle_size_spin.value = _obstacle_size
+    _gap_width_spin.value = _gap_width
+    _pit_depth_spin.value = _pit_depth
+
+
 func _on_save_pressed() -> void:
     if _current_genome.is_empty():
         _set_status("There is no creature genome to save yet.")
