@@ -97,7 +97,7 @@ mod platform {
     use std::{
         ffi::{CString, c_char, c_void},
         mem::transmute,
-        ptr::{null, null_mut},
+        ptr::null_mut,
         thread,
         time::Instant,
     };
