@@ -3,7 +3,10 @@ extends Node
 const EVENT_PORT_START := 47821
 const EVENT_PORT_TRIES := 32
 const SETTINGS_PATH := "user://settings.cfg"
-const HUD_WIDTH := 510.0
+const DEFAULT_HUD_WIDTH := 510.0
+const MIN_HUD_WIDTH := 320.0
+const MAX_HUD_WIDTH := 900.0
+const HUD_RESIZE_HANDLE_WIDTH := 8.0
 
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
@@ -43,6 +46,8 @@ var _settings_window: Window
 var _font_size_spin: SpinBox
 var _camera_speed_spin: SpinBox
 var _mouse_sensitivity_spin: SpinBox
+var _playback_speed_spin: SpinBox
+var _hud_resize_handle: ColorRect
 
 var _probe_mesh: MeshInstance3D
 var _camera: Camera3D
@@ -55,6 +60,10 @@ var _has_evolution_champion := false
 var _font_size := 16
 var _camera_move_speed := 6.0
 var _mouse_sensitivity_degrees := 0.15
+var _playback_speed := 1.0
+var _hud_width := DEFAULT_HUD_WIDTH
+var _visible_hud_width := DEFAULT_HUD_WIDTH
+var _hud_dragging := false
 var _mouse_looking := false
 var _camera_yaw := 0.0
 var _camera_pitch := 0.0
@@ -215,9 +224,17 @@ func _build_ui() -> void:
 
     _hud_panel = PanelContainer.new()
     _hud_panel.position = Vector2.ZERO
-    _hud_panel.size = Vector2(HUD_WIDTH, get_viewport().get_visible_rect().size.y)
+    _hud_panel.size = Vector2(_hud_width, get_viewport().get_visible_rect().size.y)
     _hud_panel.theme = _ui_theme
     layer.add_child(_hud_panel)
+
+    _hud_resize_handle = ColorRect.new()
+    _hud_resize_handle.color = Color(0.52, 0.57, 0.66, 0.55)
+    _hud_resize_handle.mouse_filter = Control.MOUSE_FILTER_STOP
+    _hud_resize_handle.mouse_default_cursor_shape = Control.CURSOR_HSIZE
+    _hud_resize_handle.tooltip_text = "Drag to resize the left HUD."
+    _hud_resize_handle.gui_input.connect(_on_hud_resize_input)
+    layer.add_child(_hud_resize_handle)
 
     var margin := MarginContainer.new()
     margin.add_theme_constant_override("margin_left", 18)
@@ -349,6 +366,17 @@ func _build_ui() -> void:
 
     _seconds_spin = _add_number_row(column, "Seconds / simulation", 0.1, 120.0, 8.0, 0.1)
     _dt_spin = _add_number_row(column, "Physics dt (seconds)", 0.0001, 0.05, 1.0 / 120.0, 0.0001)
+    _playback_speed_spin = _add_number_row(
+        column,
+        "Playback speed",
+        0.01,
+        2.0,
+        _playback_speed,
+        0.01
+    )
+    _playback_speed_spin.suffix = "x"
+    _playback_speed_spin.tooltip_text = "Live viewer speed. 0.01x = 100× slower, 2.00x = 2× faster."
+    _playback_speed_spin.value_changed.connect(_on_playback_speed_changed)
     _batch_spin = _add_number_row(column, "Parallel simulations", 1, 1000000, 1000, 1)
     _workers_spin = _add_number_row(column, "CPU workers (0 = auto)", 0, 256, 0, 1)
 
@@ -408,8 +436,8 @@ func _build_ui() -> void:
 func _build_settings_window() -> void:
     _settings_window = Window.new()
     _settings_window.title = "Settings"
-    _settings_window.size = Vector2i(430, 260)
-    _settings_window.min_size = Vector2i(360, 220)
+    _settings_window.size = Vector2i(430, 310)
+    _settings_window.min_size = Vector2i(360, 260)
     _settings_window.visible = false
     _settings_window.theme = _ui_theme
     _settings_window.close_requested.connect(_settings_window.hide)
@@ -455,7 +483,7 @@ func _build_settings_window() -> void:
     _mouse_sensitivity_spin.value_changed.connect(_on_mouse_sensitivity_changed)
 
     var help := Label.new()
-    help.text = "Hold right mouse button and move the mouse to look. W/S move along your aim; A/D strafe."
+    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. Drag the thin bar on the HUD's right edge to resize it; the width is saved automatically."
     help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     help.modulate = Color(0.70, 0.76, 0.86)
     column.add_child(help)
@@ -479,6 +507,11 @@ func _on_camera_speed_changed(value: float) -> void:
 
 func _on_mouse_sensitivity_changed(value: float) -> void:
     _mouse_sensitivity_degrees = float(value)
+    _save_settings()
+
+
+func _on_playback_speed_changed(value: float) -> void:
+    _playback_speed = clampf(float(value), 0.01, 2.0)
     _save_settings()
 
 
@@ -506,6 +539,12 @@ func _load_settings() -> void:
 
     _font_size = int(config.get_value("ui", "font_size", _font_size))
     _font_size = clampi(_font_size, 10, 32)
+    _hud_width = float(config.get_value("ui", "hud_width", _hud_width))
+    _hud_width = clampf(_hud_width, MIN_HUD_WIDTH, MAX_HUD_WIDTH)
+    _playback_speed = float(
+        config.get_value("viewer", "playback_speed", _playback_speed)
+    )
+    _playback_speed = clampf(_playback_speed, 0.01, 2.0)
     _camera_move_speed = float(
         config.get_value("camera", "move_speed", _camera_move_speed)
     )
@@ -523,6 +562,8 @@ func _load_settings() -> void:
 func _save_settings() -> void:
     var config := ConfigFile.new()
     config.set_value("ui", "font_size", _font_size)
+    config.set_value("ui", "hud_width", _hud_width)
+    config.set_value("viewer", "playback_speed", _playback_speed)
     config.set_value("camera", "move_speed", _camera_move_speed)
     config.set_value(
         "camera",
@@ -533,12 +574,47 @@ func _save_settings() -> void:
 
 
 func _update_layout() -> void:
+    var viewport_size := get_viewport().get_visible_rect().size
+    var max_for_window := maxf(
+        MIN_HUD_WIDTH,
+        minf(MAX_HUD_WIDTH, viewport_size.x - 240.0)
+    )
+    _visible_hud_width = clampf(_hud_width, MIN_HUD_WIDTH, max_for_window)
+
     if is_instance_valid(_hud_panel):
         _hud_panel.position = Vector2.ZERO
-        _hud_panel.size = Vector2(
-            HUD_WIDTH,
-            get_viewport().get_visible_rect().size.y
+        _hud_panel.size = Vector2(_visible_hud_width, viewport_size.y)
+
+    if is_instance_valid(_hud_resize_handle):
+        _hud_resize_handle.position = Vector2(
+            _visible_hud_width - HUD_RESIZE_HANDLE_WIDTH * 0.5,
+            0.0
         )
+        _hud_resize_handle.size = Vector2(HUD_RESIZE_HANDLE_WIDTH, viewport_size.y)
+
+
+func _on_hud_resize_input(event: InputEvent) -> void:
+    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+        _hud_dragging = event.pressed
+        if not event.pressed:
+            _hud_width = _visible_hud_width
+            _save_settings()
+        get_viewport().set_input_as_handled()
+        return
+
+    if event is InputEventMouseMotion and _hud_dragging:
+        var viewport_width := get_viewport().get_visible_rect().size.x
+        var max_for_window := maxf(
+            MIN_HUD_WIDTH,
+            minf(MAX_HUD_WIDTH, viewport_width - 240.0)
+        )
+        _hud_width = clampf(
+            get_viewport().get_mouse_position().x,
+            MIN_HUD_WIDTH,
+            max_for_window
+        )
+        _update_layout()
+        get_viewport().set_input_as_handled()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -552,7 +628,7 @@ func _unhandled_input(event: InputEvent) -> void:
         if event.pressed:
             if _settings_window != null and _settings_window.visible:
                 return
-            if event.position.x <= HUD_WIDTH:
+            if event.position.x <= _visible_hud_width:
                 return
             _set_mouse_look(true)
         else:
@@ -691,6 +767,7 @@ func _base_creature_args() -> PackedStringArray:
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
         "--frame-hz", "60",
+        "--playback-speed", "%.2f" % _playback_speed,
         "--seed", str(int(_seed_spin.value)),
         "--max-segments", str(int(_max_segments_spin.value)),
     ])
@@ -907,6 +984,7 @@ func _on_live_pressed() -> void:
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
         "--frame-hz", "60",
+        "--playback-speed", "%.2f" % _playback_speed,
     ])
 
     if _start_job("live", args):
@@ -1093,7 +1171,13 @@ func _handle_event(event: Dictionary) -> void:
         "stream_started":
             _progress_bar.value = 0
             _last_state_time = 0.0
-            _set_status("Single-box stream • %s Hz" % str(event.get("frame_hz", 60)))
+            _set_status(
+                "Single-box stream • %s Hz • %sx"
+                % [
+                    str(event.get("frame_hz", 60)),
+                    _format_float(event.get("playback_speed", 1.0), 2),
+                ]
+            )
 
         "world_state":
             _show_world_state(event.get("state", {}))
@@ -1125,13 +1209,14 @@ func _handle_event(event: Dictionary) -> void:
 
             _build_creature_from_genome(_current_genome)
             _set_status(
-                "%s • %s segments • %s joints • %s brain nodes • %s mutations"
+                "%s • %s segments • %s joints • %s brain nodes • %s mutations • %sx"
                 % [
                     str(event.get("creature_name", "Creature")),
                     str(event.get("segment_count", 0)),
                     str(event.get("joint_count", 0)),
                     str(event.get("brain_nodes", 0)),
                     str(_current_mutation_count),
+                    _format_float(event.get("playback_speed", 1.0), 2),
                 ]
             )
 
