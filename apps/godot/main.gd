@@ -731,6 +731,192 @@ func _on_fitness_weights_changed(_value: float) -> void:
     _save_settings()
 
 
+func _on_terrain_selected(index: int) -> void:
+    var terrain_names := ["flat", "slope", "hills", "stairs"]
+    if index >= 0 and index < terrain_names.size():
+        _terrain_kind = terrain_names[index]
+    _save_settings()
+    _refresh_world_preview()
+
+
+func _on_world_numeric_changed(_value: float) -> void:
+    _sync_world_state_from_controls()
+    _save_settings()
+    _refresh_world_preview()
+
+
+func _on_world_toggle_changed(_value: bool) -> void:
+    _sync_world_state_from_controls()
+    _save_settings()
+    _refresh_world_preview()
+
+
+func _sync_world_state_from_controls() -> void:
+    if _world_seed_spin == null:
+        return
+    _world_seed = int(_world_seed_spin.value)
+    _gravity_x = float(_gravity_x_spin.value)
+    _gravity_y = float(_gravity_y_spin.value)
+    _gravity_z = float(_gravity_z_spin.value)
+    _ground_friction = float(_ground_friction_spin.value)
+    _slope_degrees = float(_slope_spin.value)
+    _hill_height = float(_hill_height_spin.value)
+    _hill_wavelength = float(_hill_wavelength_spin.value)
+    _stair_height = float(_stair_height_spin.value)
+    _stair_depth = float(_stair_depth_spin.value)
+    _walls_enabled = _walls_check.button_pressed
+    _blocks_enabled = _blocks_check.button_pressed
+    _gaps_enabled = _gaps_check.button_pressed
+    _pits_enabled = _pits_check.button_pressed
+    _obstacle_count = int(_obstacle_count_spin.value)
+    _obstacle_spacing = float(_obstacle_spacing_spin.value)
+    _obstacle_size = float(_obstacle_size_spin.value)
+    _gap_width = float(_gap_width_spin.value)
+    _pit_depth = float(_pit_depth_spin.value)
+
+
+func _world_config_dictionary() -> Dictionary:
+    return {
+        "gravity": [_gravity_x, _gravity_y, _gravity_z],
+        "ground_half_extents": [50.0, 0.1, 12.0],
+        "ground_friction": _ground_friction,
+        "terrain": _terrain_kind,
+        "seed": _world_seed,
+        "slope_degrees": _slope_degrees,
+        "hill_height": _hill_height,
+        "hill_wavelength": _hill_wavelength,
+        "stair_height": _stair_height,
+        "stair_depth": _stair_depth,
+        "walls_enabled": _walls_enabled,
+        "blocks_enabled": _blocks_enabled,
+        "gaps_enabled": _gaps_enabled,
+        "pits_enabled": _pits_enabled,
+        "obstacle_count": _obstacle_count,
+        "obstacle_spacing": _obstacle_spacing,
+        "obstacle_size": _obstacle_size,
+        "gap_width": _gap_width,
+        "pit_depth": _pit_depth,
+    }
+
+
+func _world_json() -> String:
+    _sync_world_state_from_controls()
+    return JSON.stringify(_world_config_dictionary())
+
+
+func _refresh_world_preview() -> void:
+    if not _backend_exists():
+        return
+
+    var output: Array = []
+    var exit_code := OS.execute(
+        _backend_path(),
+        PackedStringArray([
+            "world-geometry",
+            "--world-json",
+            JSON.stringify(_world_config_dictionary()),
+        ]),
+        output,
+        true,
+        false
+    )
+    if exit_code != 0 or output.is_empty():
+        return
+
+    var parsed = JSON.parse_string(str(output[0]).strip_edges())
+    if typeof(parsed) != TYPE_DICTIONARY:
+        return
+
+    _build_world_from_geometry(parsed.get("geometry", []))
+
+
+func _build_world_from_geometry(geometry_value) -> void:
+    for mesh in _world_meshes:
+        if is_instance_valid(mesh):
+            mesh.queue_free()
+    _world_meshes.clear()
+
+    if typeof(geometry_value) != TYPE_ARRAY:
+        return
+
+    for shape_value in geometry_value:
+        if typeof(shape_value) != TYPE_DICTIONARY:
+            continue
+
+        var shape: Dictionary = shape_value
+        var center: Array = shape.get("center", [0.0, 0.0, 0.0])
+        var half: Array = shape.get("half_extents", [1.0, 0.1, 1.0])
+        var rotation: Array = shape.get("rotation_radians", [0.0, 0.0, 0.0])
+        if center.size() < 3 or half.size() < 3 or rotation.size() < 3:
+            continue
+
+        var instance := MeshInstance3D.new()
+        var box := BoxMesh.new()
+        box.size = Vector3(
+            float(half[0]) * 2.0,
+            float(half[1]) * 2.0,
+            float(half[2]) * 2.0
+        )
+        instance.mesh = box
+        instance.position = Vector3(
+            2.2 + float(center[0]),
+            float(center[1]),
+            float(center[2])
+        )
+        instance.rotation = Vector3(
+            float(rotation[0]),
+            float(rotation[1]),
+            float(rotation[2])
+        )
+
+        var material := StandardMaterial3D.new()
+        var kind := str(shape.get("kind", "ground"))
+        match kind:
+            "wall":
+                material.albedo_color = Color(0.58, 0.30, 0.20)
+            "block":
+                material.albedo_color = Color(0.42, 0.46, 0.54)
+            "pit_floor":
+                material.albedo_color = Color(0.10, 0.12, 0.15)
+            _:
+                material.albedo_color = Color(0.15, 0.18, 0.22)
+        material.roughness = 0.8
+        instance.material_override = material
+        add_child(instance)
+        _world_meshes.append(instance)
+
+
+func _set_world_controls_enabled(enabled: bool) -> void:
+    var controls: Array[Control] = []
+    if _terrain_option != null:
+        controls.append(_terrain_option)
+    for spin in [
+        _world_seed_spin,
+        _gravity_x_spin,
+        _gravity_y_spin,
+        _gravity_z_spin,
+        _ground_friction_spin,
+        _slope_spin,
+        _hill_height_spin,
+        _hill_wavelength_spin,
+        _stair_height_spin,
+        _stair_depth_spin,
+        _obstacle_count_spin,
+        _obstacle_spacing_spin,
+        _obstacle_size_spin,
+        _gap_width_spin,
+        _pit_depth_spin,
+    ]:
+        if spin != null:
+            controls.append(spin)
+    for check in [_walls_check, _blocks_check, _gaps_check, _pits_check]:
+        if check != null:
+            controls.append(check)
+
+    for control in controls:
+        control.disabled = not enabled
+
+
 func _apply_font_size() -> void:
     if _ui_theme == null:
         return
@@ -776,6 +962,36 @@ func _load_settings() -> void:
     _fitness_energy_weight = float(
         config.get_value("fitness", "energy", _fitness_energy_weight)
     )
+    _terrain_kind = str(config.get_value("world", "terrain", _terrain_kind))
+    _world_seed = int(config.get_value("world", "seed", _world_seed))
+    _gravity_x = float(config.get_value("world", "gravity_x", _gravity_x))
+    _gravity_y = float(config.get_value("world", "gravity_y", _gravity_y))
+    _gravity_z = float(config.get_value("world", "gravity_z", _gravity_z))
+    _ground_friction = float(
+        config.get_value("world", "ground_friction", _ground_friction)
+    )
+    _slope_degrees = float(config.get_value("world", "slope_degrees", _slope_degrees))
+    _hill_height = float(config.get_value("world", "hill_height", _hill_height))
+    _hill_wavelength = float(
+        config.get_value("world", "hill_wavelength", _hill_wavelength)
+    )
+    _stair_height = float(config.get_value("world", "stair_height", _stair_height))
+    _stair_depth = float(config.get_value("world", "stair_depth", _stair_depth))
+    _walls_enabled = bool(config.get_value("world", "walls_enabled", _walls_enabled))
+    _blocks_enabled = bool(config.get_value("world", "blocks_enabled", _blocks_enabled))
+    _gaps_enabled = bool(config.get_value("world", "gaps_enabled", _gaps_enabled))
+    _pits_enabled = bool(config.get_value("world", "pits_enabled", _pits_enabled))
+    _obstacle_count = int(
+        config.get_value("world", "obstacle_count", _obstacle_count)
+    )
+    _obstacle_spacing = float(
+        config.get_value("world", "obstacle_spacing", _obstacle_spacing)
+    )
+    _obstacle_size = float(
+        config.get_value("world", "obstacle_size", _obstacle_size)
+    )
+    _gap_width = float(config.get_value("world", "gap_width", _gap_width))
+    _pit_depth = float(config.get_value("world", "pit_depth", _pit_depth))
     _camera_move_speed = float(
         config.get_value("camera", "move_speed", _camera_move_speed)
     )
@@ -800,6 +1016,26 @@ func _save_settings() -> void:
     config.set_value("fitness", "upright", _fitness_upright_weight)
     config.set_value("fitness", "stability", _fitness_stability_weight)
     config.set_value("fitness", "energy", _fitness_energy_weight)
+    config.set_value("world", "terrain", _terrain_kind)
+    config.set_value("world", "seed", _world_seed)
+    config.set_value("world", "gravity_x", _gravity_x)
+    config.set_value("world", "gravity_y", _gravity_y)
+    config.set_value("world", "gravity_z", _gravity_z)
+    config.set_value("world", "ground_friction", _ground_friction)
+    config.set_value("world", "slope_degrees", _slope_degrees)
+    config.set_value("world", "hill_height", _hill_height)
+    config.set_value("world", "hill_wavelength", _hill_wavelength)
+    config.set_value("world", "stair_height", _stair_height)
+    config.set_value("world", "stair_depth", _stair_depth)
+    config.set_value("world", "walls_enabled", _walls_enabled)
+    config.set_value("world", "blocks_enabled", _blocks_enabled)
+    config.set_value("world", "gaps_enabled", _gaps_enabled)
+    config.set_value("world", "pits_enabled", _pits_enabled)
+    config.set_value("world", "obstacle_count", _obstacle_count)
+    config.set_value("world", "obstacle_spacing", _obstacle_spacing)
+    config.set_value("world", "obstacle_size", _obstacle_size)
+    config.set_value("world", "gap_width", _gap_width)
+    config.set_value("world", "pit_depth", _pit_depth)
     config.set_value("camera", "move_speed", _camera_move_speed)
     config.set_value(
         "camera",
