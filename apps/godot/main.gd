@@ -969,8 +969,14 @@ func _build_results_window() -> void:
     var lineage_buttons := HBoxContainer.new()
     lineage_tab.add_child(lineage_buttons)
 
+    var replay_lineage_button := Button.new()
+    replay_lineage_button.text = "Replay Selected"
+    replay_lineage_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    replay_lineage_button.pressed.connect(_on_replay_lineage_creature)
+    lineage_buttons.add_child(replay_lineage_button)
+
     var load_lineage_button := Button.new()
-    load_lineage_button.text = "Load Selected Creature"
+    load_lineage_button.text = "Load Selected"
     load_lineage_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     load_lineage_button.pressed.connect(_on_load_lineage_creature)
     lineage_buttons.add_child(load_lineage_button)
@@ -1402,6 +1408,92 @@ func _result_lineage_record_at(flat_index: int) -> Dictionary:
     return {}
 
 
+func _result_lineage_record_by_id(individual_id: int) -> Dictionary:
+    if _results_data.is_empty():
+        return {}
+
+    var result: Dictionary = _results_data.get("result", {})
+    var history: Array = result.get("history", [])
+    for summary_value in history:
+        if typeof(summary_value) != TYPE_DICTIONARY:
+            continue
+        var summary: Dictionary = summary_value
+        var lineage: Array = summary.get("lineage", [])
+        for record_value in lineage:
+            if (
+                typeof(record_value) == TYPE_DICTIONARY
+                and int(record_value.get("individual_id", -1)) == individual_id
+            ):
+                return record_value
+
+    return {}
+
+
+func _result_generation_summary(generation: int) -> Dictionary:
+    if _results_data.is_empty():
+        return {}
+
+    var result: Dictionary = _results_data.get("result", {})
+    var history: Array = result.get("history", [])
+    for summary_value in history:
+        if (
+            typeof(summary_value) == TYPE_DICTIONARY
+            and int(summary_value.get("generation", -1)) == generation
+        ):
+            return summary_value
+
+    return {}
+
+
+func _format_ancestry(record: Dictionary) -> String:
+    if record.is_empty():
+        return "-"
+
+    var lines: PackedStringArray = []
+    var frontier: Array = [{
+        "id": int(record.get("individual_id", 0)),
+        "depth": 0,
+    }]
+    var seen: Dictionary = {}
+
+    while not frontier.is_empty() and lines.size() < 64:
+        var item: Dictionary = frontier.pop_front()
+        var individual_id := int(item.get("id", 0))
+        var depth := int(item.get("depth", 0))
+        if seen.has(individual_id):
+            continue
+        seen[individual_id] = true
+
+        var ancestor := _result_lineage_record_by_id(individual_id)
+        if ancestor.is_empty():
+            lines.append("%s#%s" % ["  ".repeat(depth), str(individual_id)])
+            continue
+
+        lines.append(
+            "%s#%s  G%s  fit %.4f"
+            % [
+                "  ".repeat(depth),
+                str(individual_id),
+                str(ancestor.get("generation", 0)),
+                float(ancestor.get("fitness", 0.0)),
+            ]
+        )
+
+        if depth >= 6:
+            continue
+
+        var parents = ancestor.get("parent_ids", [])
+        if typeof(parents) != TYPE_ARRAY:
+            continue
+        for parent_id in parents:
+            frontier.append({
+                "id": int(parent_id),
+                "depth": depth + 1,
+            })
+
+    return "\n".join(lines)
+
+
 func _format_mutation_records(value) -> String:
     if typeof(value) != TYPE_ARRAY:
         return "None recorded"
@@ -1456,7 +1548,8 @@ func _on_result_lineage_selected(index: int) -> void:
         + "[cell]Brain nodes[/cell][cell]%s[/cell]"
         + "[cell]Trial seeds[/cell][cell]%s[/cell]"
         + "[/table]\n\n"
-        + "[b]Mutations from parent[/b]\n%s"
+        + "[b]Mutations from parent[/b]\n%s\n\n"
+        + "[b]Ancestry (up to 6 generations)[/b]\n%s"
         % [
             str(record.get("individual_id", 0)),
             str(record.get("generation", 0)),
@@ -1473,6 +1566,7 @@ func _on_result_lineage_selected(index: int) -> void:
             str(record.get("brain_nodes", 0)),
             _format_trial_seeds(record.get("trial_seeds", [])),
             _format_mutation_records(record.get("mutations", [])),
+            _format_ancestry(record),
         ]
     )
 
@@ -1482,6 +1576,70 @@ func _selected_lineage_record() -> Dictionary:
     if selected.is_empty():
         return {}
     return _result_lineage_record_at(int(selected[0]))
+
+
+func _on_replay_lineage_creature() -> void:
+    if _job_pid > 0:
+        return
+
+    var record := _selected_lineage_record()
+    if record.is_empty():
+        return
+
+    var genome_value = record.get("genome", {})
+    if typeof(genome_value) != TYPE_DICTIONARY:
+        _set_status("This results file does not retain that creature genome.")
+        return
+
+    var summary := _result_generation_summary(int(record.get("generation", 0)))
+    var settings: Dictionary = summary.get("effective_settings", {})
+    var simulation: Dictionary = settings.get("simulation", {})
+    var world: Dictionary = simulation.get("world", {})
+
+    var temp_path := ProjectSettings.globalize_path(
+        "user://historical_replay_creature.json"
+    )
+    if not _write_genome_file(temp_path, genome_value):
+        _set_status("Could not prepare historical creature replay.")
+        return
+
+    _current_genome = genome_value.duplicate(true)
+    _current_genome_source = "generation %s creature #%s" % [
+        str(record.get("generation", 0)),
+        str(record.get("individual_id", 0)),
+    ]
+
+    _prepare_creature_run()
+    var args := PackedStringArray([
+        "creature-stream",
+        "--event-port", str(_event_port),
+        "--seconds", str(float(
+            simulation.get("duration_seconds", _seconds_spin.value)
+        )),
+        "--dt", str(float(simulation.get("dt", _dt_spin.value))),
+        "--frame-hz", "60",
+        "--playback-speed", "%.2f" % _playback_speed,
+        "--seed", "1",
+        "--max-segments", str(maxi(
+            int(_max_segments_spin.value),
+            int(record.get("segments", 2))
+        )),
+        "--world-json", JSON.stringify(world),
+        "--motor-strength", str(float(
+            simulation.get("motor_strength_multiplier", 1.0)
+        )),
+        "--genome", temp_path,
+    ])
+
+    _results_window.hide()
+    if _start_job("creature", args):
+        _set_status(
+            "Replaying generation %s creature #%s in its recorded environment..."
+            % [
+                str(record.get("generation", 0)),
+                str(record.get("individual_id", 0)),
+            ]
+        )
 
 
 func _on_load_lineage_creature() -> void:
