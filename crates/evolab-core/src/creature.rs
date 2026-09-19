@@ -2,7 +2,10 @@ use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::{BrainContext, BrainGenome, SimulationConfig, legacy_expression};
+use crate::{
+    BrainContext, BrainGenome, JointSensorState, SegmentSensorState, SimulationConfig,
+    legacy_expression,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SegmentGene {
@@ -162,7 +165,7 @@ impl CreatureGenome {
             }
         }
 
-        self.brain.validate(&self.joints)?;
+        self.brain.validate(&self.joints, &self.segments)?;
         Ok(())
     }
 }
@@ -312,27 +315,21 @@ impl CreatureSimulator {
 
         for step in 1..=total_steps {
             let time_seconds = (step - 1) as f32 * config.dt;
-            let root = rigid_bodies
-                .get(root_body_handle)
-                .ok_or_else(|| "root body disappeared".to_string())?;
-            let p = root.translation();
-            let q = root.rotation();
-            let v = root.linvel();
-            let w = root.angvel();
-            let context = BrainContext {
+            let context = Self::brain_context(
+                genome,
+                &handles,
+                &rigid_bodies,
+                root_body_handle,
                 time_seconds,
-                root_position: [p.x, p.y, p.z],
-                root_linear_velocity: [v.x, v.y, v.z],
-                root_angular_velocity: [w.x, w.y, w.z],
-                root_rotation_xyzw: [q.x, q.y, q.z, q.w],
-            };
+                config.ground_half_extents[1],
+            )?;
 
             for (joint_handle, gene) in &motor_handles {
                 let target = genome
                     .brain
                     .output_for_joint(gene.child_id)
-                    .map(|expression| expression.evaluate(context))
-                    .unwrap_or_else(|| legacy_expression(gene).evaluate(context))
+                    .map(|expression| expression.evaluate(&context))
+                    .unwrap_or_else(|| legacy_expression(gene).evaluate(&context))
                     .clamp(gene.limits_radians[0], gene.limits_radians[1]);
 
                 if let Some(joint) = impulse_joints.get_mut(*joint_handle, true) {
@@ -383,6 +380,89 @@ impl CreatureSimulator {
             steps: total_steps,
             simulated_seconds: total_steps as f32 * config.dt,
             final_root_position: [p.x, p.y, p.z],
+        })
+    }
+
+    fn brain_context(
+        genome: &CreatureGenome,
+        handles: &HashMap<u32, RigidBodyHandle>,
+        rigid_bodies: &RigidBodySet,
+        root_body_handle: RigidBodyHandle,
+        time_seconds: f32,
+        ground_top_y: f32,
+    ) -> Result<BrainContext, String> {
+        let root = rigid_bodies
+            .get(root_body_handle)
+            .ok_or_else(|| "root body disappeared".to_string())?;
+        let p = root.translation();
+        let q = root.rotation();
+        let v = root.linvel();
+        let w = root.angvel();
+
+        let mut joints = Vec::with_capacity(genome.joints.len());
+        for gene in &genome.joints {
+            let parent_handle = handles
+                .get(&gene.parent_id)
+                .ok_or_else(|| format!("missing parent body {}", gene.parent_id))?;
+            let child_handle = handles
+                .get(&gene.child_id)
+                .ok_or_else(|| format!("missing child body {}", gene.child_id))?;
+            let parent = rigid_bodies
+                .get(*parent_handle)
+                .ok_or_else(|| format!("parent body {} disappeared", gene.parent_id))?;
+            let child = rigid_bodies
+                .get(*child_handle)
+                .ok_or_else(|| format!("child body {} disappeared", gene.child_id))?;
+
+            let local_axis = Vector::new(gene.axis[0], gene.axis[1], gene.axis[2]).normalize();
+            let relative_rotation = parent.rotation().inverse() * child.rotation();
+            let angle = relative_rotation.scaled_axis().dot(&local_axis);
+            let world_axis = parent.rotation() * local_axis;
+            let relative_angular_velocity = child.angvel() - parent.angvel();
+            let velocity = relative_angular_velocity.dot(&world_axis);
+
+            joints.push(JointSensorState {
+                child_id: gene.child_id,
+                angle_radians: angle,
+                velocity_radians_per_second: velocity,
+            });
+        }
+
+        let mut segments = Vec::with_capacity(genome.segments.len());
+        for segment in &genome.segments {
+            let handle = handles
+                .get(&segment.id)
+                .ok_or_else(|| format!("missing body {}", segment.id))?;
+            let body = rigid_bodies
+                .get(*handle)
+                .ok_or_else(|| format!("body {} disappeared", segment.id))?;
+
+            let rotation = body.rotation().to_rotation_matrix();
+            let matrix = rotation.matrix();
+            let projected_half_height = matrix[(1, 0)].abs() * segment.half_extents[0]
+                + matrix[(1, 1)].abs() * segment.half_extents[1]
+                + matrix[(1, 2)].abs() * segment.half_extents[2];
+            let bottom_y = body.translation().y - projected_half_height;
+            let ground_contact = if bottom_y <= ground_top_y + 0.02 {
+                1.0
+            } else {
+                0.0
+            };
+
+            segments.push(SegmentSensorState {
+                segment_id: segment.id,
+                ground_contact,
+            });
+        }
+
+        Ok(BrainContext {
+            time_seconds,
+            root_position: [p.x, p.y, p.z],
+            root_linear_velocity: [v.x, v.y, v.z],
+            root_angular_velocity: [w.x, w.y, w.z],
+            root_rotation_xyzw: [q.x, q.y, q.z, q.w],
+            joints,
+            segments,
         })
     }
 
