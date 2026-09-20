@@ -35,8 +35,11 @@ pub use brain::{
 pub use checkpoint::{CHECKPOINT_FORMAT_VERSION, CheckpointCandidate, EvolutionCheckpoint};
 pub use config::SimulationConfig;
 pub use creature::{
-    CreatureBodySnapshot, CreatureGenome, CreatureReport, CreatureSimulator, CreatureSnapshot,
-    JointGene, SegmentGene,
+    BIOLOGICAL_MAX_CONTACT_FRICTION, BIOLOGICAL_MAX_CYCLIC_POWER_W_PER_KG,
+    BIOLOGICAL_MAX_DENSITY_KG_M3, BIOLOGICAL_MAX_MUSCLE_STRESS_PA,
+    BIOLOGICAL_MIN_DENSITY_KG_M3, BiologicalMaterial, CreatureBodySnapshot, CreatureGenome,
+    CreatureReport, CreatureSimulator, CreatureSnapshot, JointGene, MUSCLE_DENSITY_KG_M3,
+    SegmentGene,
 };
 pub use cuda_probe::{CudaProbeBatchReport, discover_cuda_devices, run_cuda_probe_batch};
 pub use evolution::{
