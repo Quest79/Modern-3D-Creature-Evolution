@@ -1701,6 +1701,18 @@ fn parse_experiment_json(raw: &str) -> Result<ExperimentFile, serde_json::Error>
     serde_json::from_value(value)
 }
 
+fn parse_world_config_json(raw: &str) -> Result<WorldConfig, serde_json::Error> {
+    let mut value: Value = serde_json::from_str(raw)?;
+    normalize_integral_json_numbers(&mut value);
+    serde_json::from_value(value)
+}
+
+fn parse_timeline_config_json(raw: &str) -> Result<TimelineConfig, serde_json::Error> {
+    let mut value: Value = serde_json::from_str(raw)?;
+    normalize_integral_json_numbers(&mut value);
+    serde_json::from_value(value)
+}
+
 fn parse_gpu_ids(value: &str) -> Result<Vec<u32>, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
@@ -1728,10 +1740,10 @@ fn load_world_config(
     let world = if let Some(path) = world_file {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read world file {}: {err}", path.display()))?;
-        serde_json::from_str::<WorldConfig>(&raw)
+        parse_world_config_json(&raw)
             .map_err(|err| format!("invalid --world-file {}: {err}", path.display()))?
     } else if let Some(raw) = world_json {
-        serde_json::from_str::<WorldConfig>(raw)
+        parse_world_config_json(raw)
             .map_err(|err| format!("invalid --world-json: {err}"))?
     } else {
         WorldConfig::default()
@@ -1751,10 +1763,10 @@ fn load_timeline_config(
     if let Some(path) = timeline_file {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read timeline file {}: {err}", path.display()))?;
-        serde_json::from_str::<TimelineConfig>(&raw)
+        parse_timeline_config_json(&raw)
             .map_err(|err| format!("invalid --timeline-file {}: {err}", path.display()))
     } else if let Some(raw) = timeline_json {
-        serde_json::from_str::<TimelineConfig>(raw)
+        parse_timeline_config_json(raw)
             .map_err(|err| format!("invalid --timeline-json: {err}"))
     } else {
         Ok(TimelineConfig::default())
@@ -1906,6 +1918,17 @@ mod cli_tests {
         let raw = serde_json::to_string(&value).unwrap();
 
         let parsed = parse_creature_genome_json(&raw).unwrap();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn godot_round_tripped_world_accepts_integral_float_fields() {
+        let expected = WorldConfig::default();
+        let mut value = serde_json::to_value(&expected).unwrap();
+        floatify_integer_numbers(&mut value);
+        let raw = serde_json::to_string(&value).unwrap();
+
+        let parsed = parse_world_config_json(&raw).unwrap();
         assert_eq!(parsed, expected);
     }
 }
