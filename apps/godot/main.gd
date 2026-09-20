@@ -3,9 +3,9 @@ extends Node
 const EVENT_PORT_START := 47821
 const EVENT_PORT_TRIES := 32
 const SETTINGS_PATH := "user://settings.cfg"
-const DEFAULT_HUD_WIDTH := 510.0
-const MIN_HUD_WIDTH := 320.0
-const MAX_HUD_WIDTH := 900.0
+const DEFAULT_HUD_WIDTH := 400.0
+const MIN_HUD_WIDTH := 160.0
+const MAX_HUD_WIDTH := 400.0
 const HUD_RESIZE_HANDLE_WIDTH := 8.0
 
 var _batch_spin: SpinBox
@@ -2226,7 +2226,7 @@ func _build_settings_window() -> void:
     heading.text = "Interface & Camera"
     column.add_child(heading)
 
-    _font_size_spin = _add_number_row(column, "Font size", 10, 32, _font_size, 1)
+    _font_size_spin = _add_number_row(column, "Font size", 7, 20, _font_size, 1)
     _font_size_spin.value_changed.connect(_on_font_size_changed)
 
     _camera_speed_spin = _add_number_row(
@@ -2775,7 +2775,7 @@ func _load_settings() -> void:
         return
 
     _font_size = int(config.get_value("ui", "font_size", _font_size))
-    _font_size = clampi(_font_size, 10, 32)
+    _font_size = clampi(_font_size, 7, 20)
     _walkthrough_completed = bool(
         config.get_value("ui", "walkthrough_completed", _walkthrough_completed)
     )
