@@ -2576,7 +2576,8 @@ func _write_runtime_json(file_name: String, value) -> String:
     var file := FileAccess.open(path, FileAccess.WRITE)
     if file == null:
         return ""
-    file.store_string(JSON.stringify(value))
+    var normalized = _normalize_integral_json_numbers(value)
+    file.store_string(JSON.stringify(normalized))
     file.close()
     return path
 
