@@ -7,14 +7,93 @@ use crate::{
     legacy_expression,
 };
 
+/// Broad observed range for dense biological structural materials represented as
+/// bulk segment density. The low end covers very porous woods such as balsa;
+/// the high end covers highly mineralized tissues such as enamel.
+pub const BIOLOGICAL_MIN_DENSITY_KG_M3: f32 = 40.0;
+pub const BIOLOGICAL_MAX_DENSITY_KG_M3: f32 = 3_000.0;
+pub const BIOLOGICAL_MAX_CONTACT_FRICTION: f32 = 2.1;
+
+/// Upper envelopes for direct biological muscle actuation. The stress ceiling
+/// intentionally includes unusually strong invertebrate muscle; the power
+/// ceiling is the highest measured cycle-average muscle power scale.
+pub const BIOLOGICAL_MAX_MUSCLE_STRESS_PA: f32 = 1_400_000.0;
+pub const BIOLOGICAL_MAX_CYCLIC_POWER_W_PER_KG: f32 = 400.0;
+pub const MUSCLE_DENSITY_KG_M3: f32 = 1_060.0;
+
+const JOINT_ANCHOR_SPAWN_TOLERANCE_M: f32 = 1.0e-4;
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BiologicalMaterial {
+    PorousPlant,
+    Adipose,
+    #[default]
+    SoftTissue,
+    FibrousTissue,
+    TrabecularBone,
+    CorticalBone,
+    MineralizedTissue,
+}
+
+impl BiologicalMaterial {
+    pub fn density_range_kg_m3(self) -> (f32, f32) {
+        match self {
+            Self::PorousPlant => (40.0, 400.0),
+            Self::Adipose => (850.0, 1_000.0),
+            Self::SoftTissue => (950.0, 1_150.0),
+            Self::FibrousTissue => (1_050.0, 1_500.0),
+            Self::TrabecularBone => (400.0, 1_600.0),
+            Self::CorticalBone => (1_800.0, 2_200.0),
+            Self::MineralizedTissue => (2_000.0, 3_000.0),
+        }
+    }
+
+    pub fn representative_density_kg_m3(self) -> f32 {
+        match self {
+            Self::PorousPlant => 180.0,
+            Self::Adipose => 950.0,
+            Self::SoftTissue => 1_050.0,
+            Self::FibrousTissue => 1_130.0,
+            Self::TrabecularBone => 800.0,
+            Self::CorticalBone => 2_000.0,
+            Self::MineralizedTissue => 2_500.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SegmentGene {
     pub id: u32,
     pub name: String,
     pub half_extents: [f32; 3],
     pub initial_position: [f32; 3],
+    #[serde(default)]
+    pub material: BiologicalMaterial,
     pub density: f32,
     pub friction: f32,
+}
+
+impl SegmentGene {
+    pub fn volume_m3(&self) -> f32 {
+        8.0 * self.half_extents[0] * self.half_extents[1] * self.half_extents[2]
+    }
+
+    pub fn mass_kg(&self) -> f32 {
+        self.volume_m3() * self.density
+    }
+
+    fn contractile_cross_section_and_lever(&self) -> (f32, f32) {
+        let longest_axis = (0..3)
+            .max_by(|&a, &b| self.half_extents[a].total_cmp(&self.half_extents[b]))
+            .unwrap_or(0);
+        let transverse: Vec<usize> = (0..3).filter(|axis| *axis != longest_axis).collect();
+        let a = transverse[0];
+        let b = transverse[1];
+        let area_m2 = (2.0 * self.half_extents[a]) * (2.0 * self.half_extents[b]);
+        let lever_m = self.half_extents[a].min(self.half_extents[b]);
+        (area_m2, lever_m)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -50,25 +129,28 @@ impl CreatureGenome {
                 SegmentGene {
                     id: 0,
                     name: "torso".to_string(),
-                    half_extents: [0.60, 0.25, 0.30],
-                    initial_position: [0.0, 1.85, 0.0],
-                    density: 1.0,
-                    friction: 0.9,
+                    half_extents: [0.30, 0.125, 0.15],
+                    initial_position: [0.0, 0.735, 0.0],
+                    material: BiologicalMaterial::SoftTissue,
+                    density: 1_050.0,
+                    friction: 0.6,
                 },
                 SegmentGene {
                     id: 1,
                     name: "left_leg".to_string(),
-                    half_extents: [0.15, 0.60, 0.15],
-                    initial_position: [-0.38, 1.0, 0.0],
-                    density: 1.0,
+                    half_extents: [0.075, 0.30, 0.075],
+                    initial_position: [-0.19, 0.31, 0.0],
+                    material: BiologicalMaterial::SoftTissue,
+                    density: 1_050.0,
                     friction: 1.2,
                 },
                 SegmentGene {
                     id: 2,
                     name: "right_leg".to_string(),
-                    half_extents: [0.15, 0.60, 0.15],
-                    initial_position: [0.38, 1.0, 0.0],
-                    density: 1.0,
+                    half_extents: [0.075, 0.30, 0.075],
+                    initial_position: [0.19, 0.31, 0.0],
+                    material: BiologicalMaterial::SoftTissue,
+                    density: 1_050.0,
                     friction: 1.2,
                 },
             ],
@@ -76,8 +158,8 @@ impl CreatureGenome {
                 JointGene {
                     parent_id: 0,
                     child_id: 1,
-                    parent_anchor: [-0.38, -0.25, 0.0],
-                    child_anchor: [0.0, 0.60, 0.0],
+                    parent_anchor: [-0.19, -0.125, 0.0],
+                    child_anchor: [0.0, 0.30, 0.0],
                     axis: [0.0, 0.0, 1.0],
                     limits_radians: [-0.95, 0.95],
                     motor_amplitude_radians: 0.65,
@@ -90,8 +172,8 @@ impl CreatureGenome {
                 JointGene {
                     parent_id: 0,
                     child_id: 2,
-                    parent_anchor: [0.38, -0.25, 0.0],
-                    child_anchor: [0.0, 0.60, 0.0],
+                    parent_anchor: [0.19, -0.125, 0.0],
+                    child_anchor: [0.0, 0.30, 0.0],
                     axis: [0.0, 0.0, 1.0],
                     limits_radians: [-0.95, 0.95],
                     motor_amplitude_radians: 0.65,
@@ -135,16 +217,21 @@ impl CreatureGenome {
             {
                 return Err(format!("segment {} position must be finite", segment.id));
             }
-            if !segment.density.is_finite() || segment.density <= 0.0 {
+            if !segment.density.is_finite()
+                || !(BIOLOGICAL_MIN_DENSITY_KG_M3..=BIOLOGICAL_MAX_DENSITY_KG_M3)
+                    .contains(&segment.density)
+            {
                 return Err(format!(
-                    "segment {} density must be greater than 0",
-                    segment.id
+                    "segment {} density must be between {} and {} kg/m^3",
+                    segment.id, BIOLOGICAL_MIN_DENSITY_KG_M3, BIOLOGICAL_MAX_DENSITY_KG_M3
                 ));
             }
-            if !segment.friction.is_finite() || segment.friction < 0.0 {
+            if !segment.friction.is_finite()
+                || !(0.0..=BIOLOGICAL_MAX_CONTACT_FRICTION).contains(&segment.friction)
+            {
                 return Err(format!(
-                    "segment {} friction must be non-negative",
-                    segment.id
+                    "segment {} friction must be between 0 and {}",
+                    segment.id, BIOLOGICAL_MAX_CONTACT_FRICTION
                 ));
             }
         }
@@ -156,17 +243,120 @@ impl CreatureGenome {
             if joint.parent_id == joint.child_id {
                 return Err("joint cannot connect a segment to itself".into());
             }
+
+            let parent = self
+                .segments
+                .iter()
+                .find(|segment| segment.id == joint.parent_id)
+                .ok_or_else(|| "joint parent segment is missing".to_string())?;
+            let child = self
+                .segments
+                .iter()
+                .find(|segment| segment.id == joint.child_id)
+                .ok_or_else(|| "joint child segment is missing".to_string())?;
+
+            for axis in 0..3 {
+                if !joint.parent_anchor[axis].is_finite()
+                    || joint.parent_anchor[axis].abs()
+                        > parent.half_extents[axis] + JOINT_ANCHOR_SPAWN_TOLERANCE_M
+                {
+                    return Err(format!(
+                        "joint {}→{} parent anchor lies outside segment {}",
+                        joint.parent_id, joint.child_id, parent.id
+                    ));
+                }
+                if !joint.child_anchor[axis].is_finite()
+                    || joint.child_anchor[axis].abs()
+                        > child.half_extents[axis] + JOINT_ANCHOR_SPAWN_TOLERANCE_M
+                {
+                    return Err(format!(
+                        "joint {}→{} child anchor lies outside segment {}",
+                        joint.parent_id, joint.child_id, child.id
+                    ));
+                }
+            }
+
+            let anchor_error_sq = (0..3)
+                .map(|axis| {
+                    let parent_world = parent.initial_position[axis] + joint.parent_anchor[axis];
+                    let child_world = child.initial_position[axis] + joint.child_anchor[axis];
+                    let error = parent_world - child_world;
+                    error * error
+                })
+                .sum::<f32>();
+            if anchor_error_sq > JOINT_ANCHOR_SPAWN_TOLERANCE_M.powi(2) {
+                return Err(format!(
+                    "joint {}→{} anchors do not coincide at spawn",
+                    joint.parent_id, joint.child_id
+                ));
+            }
+
             let axis_len_sq = joint.axis.iter().map(|value| value * value).sum::<f32>();
             if !axis_len_sq.is_finite() || axis_len_sq <= 1.0e-8 {
                 return Err("joint axis must be non-zero and finite".into());
             }
-            if joint.limits_radians[0] >= joint.limits_radians[1] {
-                return Err("joint minimum limit must be less than maximum limit".into());
+            if joint
+                .limits_radians
+                .iter()
+                .any(|value| !value.is_finite())
+                || joint.limits_radians[0] >= joint.limits_radians[1]
+            {
+                return Err("joint limits must be finite and increasing".into());
+            }
+            if joint.limits_radians[1] - joint.limits_radians[0] > std::f32::consts::PI {
+                return Err("revolute biological joint span must not exceed 180 degrees".into());
+            }
+            if !joint.motor_amplitude_radians.is_finite()
+                || joint.motor_amplitude_radians < 0.0
+                || !joint.motor_frequency_hz.is_finite()
+                || joint.motor_frequency_hz < 0.0
+                || !joint.motor_phase_radians.is_finite()
+                || !joint.motor_stiffness.is_finite()
+                || joint.motor_stiffness < 0.0
+                || !joint.motor_damping.is_finite()
+                || joint.motor_damping < 0.0
+                || !joint.motor_max_torque.is_finite()
+                || joint.motor_max_torque < 0.0
+            {
+                return Err("joint motor parameters must be finite and non-negative".into());
             }
         }
 
         self.brain.validate(&self.joints, &self.segments)?;
         Ok(())
+    }
+
+    /// Returns generous biological upper bounds for joint torque and continuous
+    /// actuator power from the geometry of the two connected segments.
+    ///
+    /// The torque bound assumes the entire limiting transverse section could be
+    /// active contractile tissue, so it is deliberately an upper envelope rather
+    /// than a human-specific value.
+    pub fn biological_joint_limits(&self, joint: &JointGene) -> Result<(f32, f32), String> {
+        let parent = self
+            .segments
+            .iter()
+            .find(|segment| segment.id == joint.parent_id)
+            .ok_or_else(|| format!("missing parent segment {}", joint.parent_id))?;
+        let child = self
+            .segments
+            .iter()
+            .find(|segment| segment.id == joint.child_id)
+            .ok_or_else(|| format!("missing child segment {}", joint.child_id))?;
+
+        let (parent_area, parent_lever) = parent.contractile_cross_section_and_lever();
+        let (child_area, child_lever) = child.contractile_cross_section_and_lever();
+        let torque_limit = BIOLOGICAL_MAX_MUSCLE_STRESS_PA
+            * (parent_area * parent_lever).min(child_area * child_lever);
+
+        let parent_contractile_mass =
+            parent.mass_kg().min(parent.volume_m3() * MUSCLE_DENSITY_KG_M3);
+        let child_contractile_mass =
+            child.mass_kg().min(child.volume_m3() * MUSCLE_DENSITY_KG_M3);
+        let power_limit = BIOLOGICAL_MAX_CYCLIC_POWER_W_PER_KG
+            * parent_contractile_mass.min(child_contractile_mass);
+
+        Ok((torque_limit.max(0.0), power_limit.max(0.0)))
     }
 }
 
@@ -249,8 +439,8 @@ impl CreatureSimulator {
                     segment.initial_position[1],
                     segment.initial_position[2],
                 ))
-                .linear_damping(0.05)
-                .angular_damping(0.05)
+                .linear_damping(0.0)
+                .angular_damping(0.0)
                 .build();
             let body_handle = rigid_bodies.insert(body);
 
@@ -271,7 +461,7 @@ impl CreatureSimulator {
             .ok_or_else(|| "missing root body handle".to_string())?;
 
         let mut impulse_joints = ImpulseJointSet::new();
-        let mut motor_handles: Vec<(ImpulseJointHandle, JointGene)> = Vec::new();
+        let mut motor_handles: Vec<(ImpulseJointHandle, JointGene, f32, f32)> = Vec::new();
 
         for joint_gene in &genome.joints {
             let parent = *handles
@@ -282,6 +472,9 @@ impl CreatureSimulator {
                 .ok_or_else(|| "missing child body handle".to_string())?;
 
             let axis = Vector::new(joint_gene.axis[0], joint_gene.axis[1], joint_gene.axis[2]);
+
+            let (biological_torque_limit, biological_power_limit) =
+                genome.biological_joint_limits(joint_gene)?;
 
             let joint = RevoluteJointBuilder::new(axis)
                 .local_anchor1(Vector::new(
@@ -301,7 +494,12 @@ impl CreatureSimulator {
                 .build();
 
             let handle = impulse_joints.insert(parent, child, joint, true);
-            motor_handles.push((handle, joint_gene.clone()));
+            motor_handles.push((
+                handle,
+                joint_gene.clone(),
+                biological_torque_limit,
+                biological_power_limit,
+            ));
         }
 
         let gravity = Vector::new(
@@ -331,6 +529,12 @@ impl CreatureSimulator {
         let sample_every_steps = sample_every_steps.max(1);
         let total_steps = config.step_count();
         let mut motor_effort = 0.0_f32;
+        let max_actuator_power = motor_handles
+            .iter()
+            .map(|(_, _, _, power_limit)| *power_limit * config.motor_strength_multiplier)
+            .sum::<f32>();
+        let mut previous_mechanical_energy =
+            Self::mechanical_energy(&handles, &rigid_bodies, gravity, config.dt)?;
 
         for step in 1..=total_steps {
             let time_seconds = (step - 1) as f32 * config.dt;
@@ -343,13 +547,19 @@ impl CreatureSimulator {
                 &config.world,
             )?;
 
-            for (joint_handle, gene) in &motor_handles {
+            for (joint_handle, gene, biological_torque_limit, biological_power_limit) in
+                &motor_handles
+            {
                 let target = genome
                     .brain
                     .output_for_joint(gene.child_id)
                     .map(|expression| expression.evaluate(&context))
                     .unwrap_or_else(|| legacy_expression(gene).evaluate(&context))
                     .clamp(gene.limits_radians[0], gene.limits_radians[1]);
+
+                let strength = config.motor_strength_multiplier;
+                let mut effective_max_torque =
+                    gene.motor_max_torque.min(*biological_torque_limit) * strength;
 
                 if let Some(sensor) = context
                     .joints
@@ -358,10 +568,15 @@ impl CreatureSimulator {
                 {
                     let position_error = (target - sensor.angle_radians).abs();
                     let angular_speed = sensor.velocity_radians_per_second.abs();
-                    let strength = config.motor_strength_multiplier;
+                    let power_limit = *biological_power_limit * strength;
+                    if angular_speed > 1.0e-4 && power_limit > 0.0 {
+                        effective_max_torque =
+                            effective_max_torque.min(power_limit / angular_speed);
+                    }
+
                     let torque_proxy = (position_error * gene.motor_stiffness * strength
                         + angular_speed * gene.motor_damping * strength)
-                        .min(gene.motor_max_torque * strength);
+                        .min(effective_max_torque);
                     motor_effort += torque_proxy * angular_speed * config.dt;
                 }
 
@@ -369,13 +584,12 @@ impl CreatureSimulator {
                     joint.data.set_motor_position(
                         JointAxis::AngX,
                         target,
-                        gene.motor_stiffness * config.motor_strength_multiplier,
-                        gene.motor_damping * config.motor_strength_multiplier,
+                        gene.motor_stiffness * strength,
+                        gene.motor_damping * strength,
                     );
-                    joint.data.set_motor_max_force(
-                        JointAxis::AngX,
-                        gene.motor_max_torque * config.motor_strength_multiplier,
-                    );
+                    joint
+                        .data
+                        .set_motor_max_force(JointAxis::AngX, effective_max_torque);
                 }
             }
 
@@ -393,6 +607,19 @@ impl CreatureSimulator {
                 &(),
                 &(),
             );
+
+            let mechanical_energy =
+                Self::mechanical_energy(&handles, &rigid_bodies, gravity, config.dt)?;
+            let numerical_tolerance_j = previous_mechanical_energy.abs().max(1.0) * 0.10 + 1.0;
+            let maximum_explained_gain_j =
+                max_actuator_power * config.dt * 2.0 + numerical_tolerance_j;
+            if mechanical_energy - previous_mechanical_energy > maximum_explained_gain_j {
+                return Err(format!(
+                    "unstable physics: mechanical energy jumped from {:.3} J to {:.3} J in one step",
+                    previous_mechanical_energy, mechanical_energy
+                ));
+            }
+            previous_mechanical_energy = mechanical_energy;
 
             if step % sample_every_steps == 0 || step == total_steps {
                 observer(&Self::snapshot(
@@ -416,6 +643,25 @@ impl CreatureSimulator {
             final_root_position: [p.x, p.y, p.z],
             motor_effort,
         })
+    }
+
+    fn mechanical_energy(
+        handles: &HashMap<u32, RigidBodyHandle>,
+        rigid_bodies: &RigidBodySet,
+        gravity: Vector,
+        dt: f32,
+    ) -> Result<f32, String> {
+        let mut total = 0.0_f32;
+        for handle in handles.values() {
+            let body = rigid_bodies
+                .get(*handle)
+                .ok_or_else(|| "creature body disappeared while checking energy".to_string())?;
+            total += body.kinetic_energy() + body.gravitational_potential_energy(dt, gravity);
+        }
+        if !total.is_finite() {
+            return Err("unstable physics: non-finite mechanical energy".into());
+        }
+        Ok(total)
     }
 
     fn brain_context(
