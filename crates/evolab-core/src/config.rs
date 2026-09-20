@@ -47,9 +47,9 @@ impl SimulationConfig {
         }
         self.world.validate()?;
         if !self.motor_strength_multiplier.is_finite()
-            || !(0.0..=20.0).contains(&self.motor_strength_multiplier)
+            || !(0.0..=1.0).contains(&self.motor_strength_multiplier)
         {
-            return Err("motor_strength_multiplier must be between 0 and 20".into());
+            return Err("motor_strength_multiplier is biological activation and must be between 0 and 1".into());
         }
         Ok(())
     }
@@ -74,6 +74,15 @@ mod tests {
     fn rejects_zero_timestep() {
         let config = SimulationConfig {
             dt: 0.0,
+            ..SimulationConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_super_biological_motor_activation() {
+        let config = SimulationConfig {
+            motor_strength_multiplier: 1.01,
             ..SimulationConfig::default()
         };
         assert!(config.validate().is_err());
