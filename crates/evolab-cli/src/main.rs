@@ -1743,8 +1743,7 @@ fn load_world_config(
         parse_world_config_json(&raw)
             .map_err(|err| format!("invalid --world-file {}: {err}", path.display()))?
     } else if let Some(raw) = world_json {
-        parse_world_config_json(raw)
-            .map_err(|err| format!("invalid --world-json: {err}"))?
+        parse_world_config_json(raw).map_err(|err| format!("invalid --world-json: {err}"))?
     } else {
         WorldConfig::default()
     };
@@ -1766,8 +1765,7 @@ fn load_timeline_config(
         parse_timeline_config_json(&raw)
             .map_err(|err| format!("invalid --timeline-file {}: {err}", path.display()))
     } else if let Some(raw) = timeline_json {
-        parse_timeline_config_json(raw)
-            .map_err(|err| format!("invalid --timeline-json: {err}"))
+        parse_timeline_config_json(raw).map_err(|err| format!("invalid --timeline-json: {err}"))
     } else {
         Ok(TimelineConfig::default())
     }
