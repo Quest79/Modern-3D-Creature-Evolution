@@ -184,6 +184,8 @@ var _camera_yaw := 0.0
 var _camera_pitch := 0.0
 var _walkthrough_step := 0
 var _walkthrough_completed := false
+var _walkthrough_version := 0
+var _walkthrough_guided_run_active := false
 
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
@@ -2082,7 +2084,10 @@ func _build_walkthrough_window() -> void:
 
 
 func _maybe_show_first_run_walkthrough() -> void:
-    if not _walkthrough_completed:
+    # Versioned so an already-completed older walkthrough is shown once again
+    # when the walkthrough itself changes materially.
+    if _walkthrough_version < 2:
+        _walkthrough_completed = false
         _show_walkthrough()
 
 
@@ -2151,6 +2156,7 @@ func _on_walkthrough_back() -> void:
 func _on_walkthrough_next() -> void:
     if _walkthrough_step >= 4:
         _walkthrough_completed = true
+        _walkthrough_version = 2
         _save_settings()
         _walkthrough_window.hide()
         return
@@ -2184,8 +2190,7 @@ func _on_walkthrough_run_test() -> void:
 
     _walkthrough_step = 3
     _refresh_walkthrough()
-    _walkthrough_completed = true
-    _save_settings()
+    _walkthrough_guided_run_active = true
     _walkthrough_window.hide()
     _set_status("Guided first test starting • watch the 3D view and Status / Results.")
     _on_seed_creature_pressed()
@@ -2764,6 +2769,9 @@ func _load_settings() -> void:
     _walkthrough_completed = bool(
         config.get_value("ui", "walkthrough_completed", _walkthrough_completed)
     )
+    _walkthrough_version = int(
+        config.get_value("ui", "walkthrough_version", _walkthrough_version)
+    )
     _hud_width = float(config.get_value("ui", "hud_width", _hud_width))
     _hud_width = clampf(_hud_width, MIN_HUD_WIDTH, MAX_HUD_WIDTH)
     _playback_speed = float(
@@ -2895,6 +2903,7 @@ func _save_settings() -> void:
     config.set_value("ui", "font_size", _font_size)
     config.set_value("ui", "hud_width", _hud_width)
     config.set_value("ui", "walkthrough_completed", _walkthrough_completed)
+    config.set_value("ui", "walkthrough_version", _walkthrough_version)
     config.set_value("viewer", "playback_speed", _playback_speed)
     config.set_value("fitness", "distance", _fitness_distance_weight)
     config.set_value("fitness", "average_speed", _fitness_speed_weight)
@@ -4105,6 +4114,7 @@ func _handle_event(event: Dictionary) -> void:
         _job_kind = ""
         _dead_process_since_ms = -1
         _job_started_ms = -1
+        _walkthrough_guided_run_active = false
         _reset_replay()
         _set_status("Creature simulator error: %s" % str(event.get("message", "unknown error")))
         _metrics.text = (
@@ -4456,6 +4466,11 @@ func _finish_replay() -> void:
             "Creature replay complete • %s s • genome ready to save/mutate"
             % _format_float(completed_time, 3)
         )
+        if _walkthrough_guided_run_active:
+            _walkthrough_guided_run_active = false
+            _walkthrough_step = 4
+            _refresh_walkthrough()
+            call_deferred("_resume_walkthrough_after_test")
     else:
         _set_status(
             "Single-box replay complete • %s s"
@@ -4463,6 +4478,11 @@ func _finish_replay() -> void:
         )
 
     _finish_job_controls()
+
+
+func _resume_walkthrough_after_test() -> void:
+    if _walkthrough_window != null:
+        _walkthrough_window.popup_centered()
 
 
 func _interpolate_world_state(
