@@ -264,11 +264,11 @@ func _process(delta: float) -> void:
                 and Time.get_ticks_msec() - _job_started_ms >= 5000
             ):
                 OS.kill(_job_pid)
+                var timed_out_kind := _job_kind
                 _job_pid = 0
                 _job_kind = ""
                 _job_started_ms = -1
                 _reset_replay()
-                var timed_out_kind := _job_kind
                 _set_status(
                     "%s started but sent no events for 5 seconds."
                     % (timed_out_kind if not timed_out_kind.is_empty() else "Simulator")
@@ -2479,10 +2479,15 @@ func _on_throughput_selected(index: int) -> void:
     _save_settings()
 
 
+func _gpu_ids_for_cli() -> String:
+    var value := _gpu_ids_edit.text.strip_edges() if _gpu_ids_edit != null else _gpu_ids.strip_edges()
+    return "all" if value.is_empty() else value
+
+
 func _accelerator_cli_args() -> PackedStringArray:
     var args := PackedStringArray([
         "--accelerator", _accelerator_mode,
-        "--gpus", _gpu_ids,
+        "--gpus", _gpu_ids_for_cli(),
         "--gpu-batch-size", str(int(_gpu_batch_spin.value)),
         "--gpu-max-parts", str(int(_gpu_max_parts_spin.value)),
         "--gpu-max-joints", str(int(_gpu_max_joints_spin.value)),
@@ -4013,7 +4018,7 @@ func _on_batch_pressed() -> void:
         "--dt", str(_dt_spin.value),
         "--world-file", world_file,
         "--backend", _accelerator_mode,
-        "--gpus", _gpu_ids_edit.text.strip_edges(),
+        "--gpus", _gpu_ids_for_cli(),
         "--event-port", str(_event_port),
     ])
 
