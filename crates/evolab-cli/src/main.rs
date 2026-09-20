@@ -1870,7 +1870,6 @@ fn send_event(socket: &UdpSocket, value: &Value) {
     }
 }
 
-
 #[cfg(test)]
 mod cli_tests {
     use super::*;
