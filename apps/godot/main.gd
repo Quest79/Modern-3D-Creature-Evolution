@@ -268,10 +268,14 @@ func _process(delta: float) -> void:
                 _job_kind = ""
                 _job_started_ms = -1
                 _reset_replay()
-                _set_status("Simulator started but sent no events for 5 seconds.")
+                var timed_out_kind := _job_kind
+                _set_status(
+                    "%s started but sent no events for 5 seconds."
+                    % (timed_out_kind if not timed_out_kind.is_empty() else "Simulator")
+                )
                 _metrics.text = (
-                    "[color=#ff8a8a][b]Test failed:[/b] "
-                    + "the simulator sent no data back to the GUI.[/color]"
+                    "[color=#ff8a8a][b]Run failed:[/b] "
+                    + "the backend sent no data back to the GUI.[/color]"
                 )
                 _finish_job_controls()
         elif _dead_process_since_ms < 0:
@@ -3290,7 +3294,7 @@ func _on_random_pressed() -> void:
 
 
 func _on_evolve_pressed() -> void:
-    if _job_pid > 0:
+    if not _can_start_action("evolution"):
         return
 
     if int(_tournament_spin.value) > int(_population_spin.value):
@@ -3363,8 +3367,9 @@ func _on_evolve_pressed() -> void:
             return
         args.append_array(PackedStringArray(["--genome", parent_path]))
 
+    _set_status("Starting evolution process...")
     if _start_job("evolution", args):
-        _set_status("Evolution running • weighted fitness enabled")
+        _set_status("Evolution process started • waiting for generation 1")
 
 
 func _on_resume_evolution_pressed() -> void:
@@ -3986,7 +3991,7 @@ func _on_live_pressed() -> void:
 
 
 func _on_batch_pressed() -> void:
-    if _job_pid > 0:
+    if not _can_start_action("benchmark"):
         return
 
     _clear_creature_meshes()
@@ -4012,8 +4017,32 @@ func _on_batch_pressed() -> void:
         "--event-port", str(_event_port),
     ])
 
+    _set_status("Starting benchmark process...")
     if _start_job("batch", args):
-        _set_status("Parallel benchmark running...")
+        _set_status("Benchmark process started • waiting for backend")
+
+
+func _can_start_action(action_name: String) -> bool:
+    if _job_pid <= 0:
+        return true
+
+    if OS.is_process_running(_job_pid):
+        var running_name := _job_kind if not _job_kind.is_empty() else "simulation"
+        _set_status(
+            "Cannot start %s while %s is still running."
+            % [action_name, running_name]
+        )
+        return false
+
+    # Do not let a stale process ID make a button silently do nothing.
+    _job_pid = 0
+    _job_kind = ""
+    _dead_process_since_ms = -1
+    _job_started_ms = -1
+    _job_received_event = false
+    _reset_replay()
+    _finish_job_controls()
+    return true
 
 
 func _start_job(kind: String, args: PackedStringArray) -> bool:
@@ -4108,6 +4137,20 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
 func _handle_event(event: Dictionary) -> void:
     _job_received_event = true
     var kind := str(event.get("kind", ""))
+
+    if kind == "batch_error":
+        _job_pid = 0
+        _job_kind = ""
+        _dead_process_since_ms = -1
+        _job_started_ms = -1
+        _progress_bar.value = 0
+        _set_status("Benchmark error: %s" % str(event.get("message", "unknown error")))
+        _metrics.text = (
+            "[color=#ff8a8a][b]Benchmark failed:[/b] %s[/color]"
+            % str(event.get("message", "unknown error"))
+        )
+        _finish_job_controls()
+        return
 
     if kind == "creature_stream_error":
         _job_pid = 0
