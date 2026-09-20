@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BrainGenome, CreatureGenome, Expression, JointGene, SegmentGene, SensorKind};
+use crate::{
+    BIOLOGICAL_MAX_CONTACT_FRICTION, BiologicalMaterial, BrainGenome, CreatureGenome, Expression,
+    JointGene, SegmentGene, SensorKind,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MutationConfig {
@@ -18,8 +21,10 @@ impl Default for MutationConfig {
         Self {
             min_segments: 2,
             max_segments: 12,
-            min_half_extent: 0.10,
-            max_half_extent: 0.85,
+            // Numerical macro-life scale: 1 cm to 10 m full segment dimension.
+            // This is a solver/world-scale bound, not a human anatomy bound.
+            min_half_extent: 0.005,
+            max_half_extent: 5.0,
             structural_mutation_chance: 0.30,
         }
     }
@@ -200,10 +205,11 @@ pub fn random_creature(
         segments: vec![SegmentGene {
             id: 0,
             name: "root".to_string(),
-            half_extents: [0.50, 0.28, 0.34],
-            initial_position: [0.0, 2.4, 0.0],
-            density: 1.0,
-            friction: 0.9,
+            half_extents: [0.25, 0.14, 0.17],
+            initial_position: [0.0, 0.80, 0.0],
+            material: BiologicalMaterial::SoftTissue,
+            density: BiologicalMaterial::SoftTissue.representative_density_kg_m3(),
+            friction: 0.6,
         }],
         joints: Vec::new(),
         brain: BrainGenome::default(),
@@ -274,11 +280,26 @@ fn resize_segment(
 ) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.segments.len());
     let axis = rng.range_usize(3);
+    let segment_id = genome.segments.get(index)?.id;
+    let anchor_floor = genome
+        .joints
+        .iter()
+        .filter_map(|joint| {
+            if joint.parent_id == segment_id {
+                Some(joint.parent_anchor[axis].abs())
+            } else if joint.child_id == segment_id {
+                Some(joint.child_anchor[axis].abs())
+            } else {
+                None
+            }
+        })
+        .fold(config.min_half_extent, f32::max);
+
     let segment = genome.segments.get_mut(index)?;
     let old = segment.half_extents[axis];
     let factor = rng.range_f32(0.70, 1.35);
     segment.half_extents[axis] =
-        (old * factor).clamp(config.min_half_extent, config.max_half_extent);
+        (old * factor).clamp(anchor_floor, config.max_half_extent);
 
     Some(MutationRecord {
         kind: MutationKind::ResizeSegment,
@@ -292,35 +313,59 @@ fn resize_segment(
 fn change_material(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.segments.len());
     let segment = genome.segments.get_mut(index)?;
-    segment.density = (segment.density * rng.range_f32(0.80, 1.25)).clamp(0.25, 4.0);
-    segment.friction = (segment.friction + rng.signed(0.25)).clamp(0.05, 2.5);
+
+    if rng.chance(0.35) {
+        segment.material = random_biological_material(rng);
+        let (min_density, max_density) = segment.material.density_range_kg_m3();
+        segment.density = rng.range_f32(min_density, max_density);
+    } else {
+        let (min_density, max_density) = segment.material.density_range_kg_m3();
+        segment.density =
+            (segment.density * rng.range_f32(0.80, 1.25)).clamp(min_density, max_density);
+    }
+    segment.friction =
+        (segment.friction + rng.signed(0.20)).clamp(0.0, BIOLOGICAL_MAX_CONTACT_FRICTION);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMaterial,
         description: format!(
-            "changed {} density/friction to {:.2}/{:.2}",
-            segment.name, segment.density, segment.friction
+            "changed {} material to {:?}, density {:.1} kg/m^3, friction {:.2}",
+            segment.name, segment.material, segment.density, segment.friction
         ),
     })
 }
 
+fn random_biological_material(rng: &mut GenomeRng) -> BiologicalMaterial {
+    match rng.range_usize(7) {
+        0 => BiologicalMaterial::PorousPlant,
+        1 => BiologicalMaterial::Adipose,
+        2 => BiologicalMaterial::SoftTissue,
+        3 => BiologicalMaterial::FibrousTissue,
+        4 => BiologicalMaterial::TrabecularBone,
+        5 => BiologicalMaterial::CorticalBone,
+        _ => BiologicalMaterial::MineralizedTissue,
+    }
+}
+
 fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
+    let biological_torque_limit = {
+        let joint = genome.joints.get(index)?;
+        genome.biological_joint_limits(joint).ok()?.0
+    };
     let joint = genome.joints.get_mut(index)?;
 
-    joint.motor_stiffness = (joint.motor_stiffness * rng.range_f32(0.75, 1.30)).clamp(4.0, 100.0);
-    joint.motor_damping = (joint.motor_damping * rng.range_f32(0.75, 1.30)).clamp(0.5, 20.0);
-    joint.motor_max_torque = (joint.motor_max_torque * rng.range_f32(0.75, 1.35)).clamp(2.0, 80.0);
+    // Stiffness and damping are solver/controller gains, not biological strength
+    // traits. Strength evolution changes requested torque, while runtime enforces
+    // geometry-scaled muscle stress and power ceilings.
+    joint.motor_max_torque = (joint.motor_max_torque * rng.range_f32(0.70, 1.40))
+        .clamp(0.0, biological_torque_limit);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMotor,
         description: format!(
-            "changed actuator {}→{}: stiffness {:.1}, damping {:.1}, torque {:.1}",
-            joint.parent_id,
-            joint.child_id,
-            joint.motor_stiffness,
-            joint.motor_damping,
-            joint.motor_max_torque
+            "changed actuator {}→{} requested torque to {:.2} N·m (biological ceiling {:.2} N·m)",
+            joint.parent_id, joint.child_id, joint.motor_max_torque, biological_torque_limit
         ),
     })
 }
@@ -328,19 +373,18 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
 fn change_joint_limits(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
-    let center = (joint.limits_radians[0] + joint.limits_radians[1]) * 0.5 + rng.signed(0.12);
-    let half_width =
-        ((joint.limits_radians[1] - joint.limits_radians[0]) * 0.5 * rng.range_f32(0.75, 1.25))
-            .clamp(0.15, 1.45);
+    let half_width = ((joint.limits_radians[1] - joint.limits_radians[0])
+        * 0.5
+        * rng.range_f32(0.70, 1.30))
+    .clamp(0.005, std::f32::consts::FRAC_PI_2);
+    let center = ((joint.limits_radians[0] + joint.limits_radians[1]) * 0.5
+        + rng.signed(0.12))
+    .clamp(
+        -std::f32::consts::PI + half_width,
+        std::f32::consts::PI - half_width,
+    );
 
-    joint.limits_radians = [
-        (center - half_width).clamp(-1.55, 1.40),
-        (center + half_width).clamp(-1.40, 1.55),
-    ];
-
-    if joint.limits_radians[1] - joint.limits_radians[0] < 0.20 {
-        joint.limits_radians = [-0.25, 0.25];
-    }
+    joint.limits_radians = [center - half_width, center + half_width];
 
     Some(MutationRecord {
         kind: MutationKind::ChangeJointLimits,
@@ -353,16 +397,57 @@ fn change_joint_limits(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Opti
 
 fn move_joint_anchor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
+    let (parent_id, child_id, parent_anchor, child_anchor) = {
+        let joint = genome.joints.get(index)?;
+        (
+            joint.parent_id,
+            joint.child_id,
+            joint.parent_anchor,
+            joint.child_anchor,
+        )
+    };
+    let parent = genome
+        .segments
+        .iter()
+        .find(|segment| segment.id == parent_id)?
+        .clone();
+    let child = genome
+        .segments
+        .iter()
+        .find(|segment| segment.id == child_id)?
+        .clone();
+
+    // Identify the attachment face and move only along that face. Applying the
+    // exact same local delta to both anchors keeps their world positions
+    // coincident at spawn, eliminating solver-created launch energy.
+    let normal_axis = (0..3)
+        .max_by(|&a, &b| {
+            let a_ratio = parent_anchor[a].abs() / parent.half_extents[a].max(1.0e-6);
+            let b_ratio = parent_anchor[b].abs() / parent.half_extents[b].max(1.0e-6);
+            a_ratio.total_cmp(&b_ratio)
+        })
+        .unwrap_or(0);
+    let tangent_axes: Vec<usize> = (0..3).filter(|axis| *axis != normal_axis).collect();
+    let axis = tangent_axes[rng.range_usize(tangent_axes.len())];
+
+    let maximum_step =
+        parent.half_extents[axis].min(child.half_extents[axis]) * 0.10;
+    let requested_delta = rng.signed(maximum_step);
+    let minimum_delta = (-parent.half_extents[axis] - parent_anchor[axis])
+        .max(-child.half_extents[axis] - child_anchor[axis]);
+    let maximum_delta = (parent.half_extents[axis] - parent_anchor[axis])
+        .min(child.half_extents[axis] - child_anchor[axis]);
+    let delta = requested_delta.clamp(minimum_delta, maximum_delta);
+
     let joint = genome.joints.get_mut(index)?;
-    let axis = rng.range_usize(3);
-    joint.parent_anchor[axis] += rng.signed(0.08);
-    joint.child_anchor[axis] += rng.signed(0.08);
+    joint.parent_anchor[axis] += delta;
+    joint.child_anchor[axis] += delta;
 
     Some(MutationRecord {
         kind: MutationKind::MoveJointAnchor,
         description: format!(
-            "moved joint {}→{} attachment on axis {}",
-            joint.parent_id, joint.child_id, axis
+            "moved joint {}→{} attachment {:.4} m along local axis {}",
+            joint.parent_id, joint.child_id, delta, axis
         ),
     })
 }
@@ -632,11 +717,11 @@ fn add_segment(
         + 1;
 
     let half_extents = [
-        rng.range_f32(0.12, 0.40)
+        (parent.half_extents[0] * rng.range_f32(0.45, 1.20))
             .clamp(config.min_half_extent, config.max_half_extent),
-        rng.range_f32(0.18, 0.62)
+        (parent.half_extents[1] * rng.range_f32(0.45, 1.20))
             .clamp(config.min_half_extent, config.max_half_extent),
-        rng.range_f32(0.12, 0.36)
+        (parent.half_extents[2] * rng.range_f32(0.45, 1.20))
             .clamp(config.min_half_extent, config.max_half_extent),
     ];
 
@@ -652,17 +737,20 @@ fn add_segment(
     initial_position[axis_index] +=
         sign * (parent.half_extents[axis_index] + half_extents[axis_index]);
 
-    // Lift generated descendants slightly so they do not begin buried in the
-    // floor. Physics will settle the morphology immediately.
-    initial_position[1] = initial_position[1].max(0.35 + half_extents[1]);
+    // Keep generated descendants just above the floor without imposing a
+    // human-sized fixed clearance.
+    initial_position[1] = initial_position[1].max(half_extents[1] + 0.01);
 
+    let material = random_biological_material(rng);
+    let (min_density, max_density) = material.density_range_kg_m3();
     let child = SegmentGene {
         id,
         name: format!("segment_{id}"),
         half_extents,
         initial_position,
-        density: rng.range_f32(0.7, 1.4),
-        friction: rng.range_f32(0.55, 1.45),
+        material,
+        density: rng.range_f32(min_density, max_density),
+        friction: rng.range_f32(0.10, BIOLOGICAL_MAX_CONTACT_FRICTION),
     };
 
     let mut parent_anchor = [0.0_f32; 3];
@@ -677,7 +765,7 @@ fn add_segment(
     };
 
     genome.segments.push(child);
-    genome.joints.push(JointGene {
+    let mut joint = JointGene {
         parent_id: parent.id,
         child_id: id,
         parent_anchor,
@@ -687,10 +775,15 @@ fn add_segment(
         motor_amplitude_radians: rng.range_f32(0.25, 0.85),
         motor_frequency_hz: rng.range_f32(0.45, 2.0),
         motor_phase_radians: rng.range_f32(0.0, std::f32::consts::TAU),
-        motor_stiffness: rng.range_f32(18.0, 42.0),
-        motor_damping: rng.range_f32(2.5, 7.0),
-        motor_max_torque: rng.range_f32(8.0, 30.0),
-    });
+        // Numerical position-controller gains; biological strength is enforced
+        // separately by torque/stress and power limits.
+        motor_stiffness: 32.0,
+        motor_damping: 4.5,
+        motor_max_torque: 0.0,
+    };
+    let biological_torque_limit = genome.biological_joint_limits(&joint).ok()?.0;
+    joint.motor_max_torque = biological_torque_limit * rng.range_f32(0.05, 0.15);
+    genome.joints.push(joint);
     genome
         .brain
         .sync_with_structure(&genome.joints, &genome.segments);
