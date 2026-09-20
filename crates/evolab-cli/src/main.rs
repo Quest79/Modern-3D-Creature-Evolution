@@ -56,6 +56,10 @@ enum Command {
         #[arg(long)]
         world_json: Option<String>,
 
+        /// Read WorldConfig JSON from a file. Preferred for GUI launches on Windows.
+        #[arg(long)]
+        world_file: Option<PathBuf>,
+
         /// Physics backend: cpu, cuda, or auto.
         #[arg(long, default_value = "cpu")]
         backend: String,
@@ -110,6 +114,10 @@ enum Command {
         /// Serialized WorldConfig JSON.
         #[arg(long)]
         world_json: Option<String>,
+
+        /// Read WorldConfig JSON from a file. Preferred for GUI launches on Windows.
+        #[arg(long)]
+        world_file: Option<PathBuf>,
     },
 
     /// Stream the default three-segment creature with motorized joints.
@@ -165,6 +173,10 @@ enum Command {
         /// Serialized WorldConfig JSON.
         #[arg(long)]
         world_json: Option<String>,
+
+        /// Read WorldConfig JSON from a file. Preferred for GUI launches on Windows.
+        #[arg(long)]
+        world_file: Option<PathBuf>,
 
         /// Global actuator strength multiplier.
         #[arg(long, default_value_t = 1.0)]
@@ -238,6 +250,10 @@ enum Command {
         #[arg(long)]
         world_json: Option<String>,
 
+        /// Read WorldConfig JSON from a file. Preferred for GUI launches on Windows.
+        #[arg(long)]
+        world_file: Option<PathBuf>,
+
         /// Global actuator strength multiplier.
         #[arg(long, default_value_t = 1.0)]
         motor_strength: f32,
@@ -253,6 +269,10 @@ enum Command {
         /// Serialized TimelineConfig JSON.
         #[arg(long)]
         timeline_json: Option<String>,
+
+        /// Read TimelineConfig JSON from a file. Preferred for GUI launches on Windows.
+        #[arg(long)]
+        timeline_file: Option<PathBuf>,
 
         /// Weight for horizontal distance traveled.
         #[arg(long, default_value_t = 1.0)]
@@ -369,6 +389,10 @@ enum Command {
         /// Serialized WorldConfig JSON.
         #[arg(long)]
         world_json: Option<String>,
+
+        /// Read WorldConfig JSON from a file.
+        #[arg(long)]
+        world_file: Option<PathBuf>,
     },
 
     /// Report backend and machine capabilities.
@@ -398,6 +422,7 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json,
+            world_file,
             backend,
             gpus,
             json: json_output,
@@ -409,6 +434,7 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json: world_json.as_deref(),
+            world_file: world_file.as_ref(),
             backend: &backend,
             gpu_ids: parse_gpu_ids(&gpus)?,
             json_output,
@@ -424,6 +450,7 @@ fn run() -> Result<(), String> {
             max_speed,
             playback_speed,
             world_json,
+            world_file,
         } => run_stream(StreamRequest {
             event_host: &event_host,
             event_port,
@@ -433,6 +460,7 @@ fn run() -> Result<(), String> {
             realtime: !max_speed,
             playback_speed,
             world_json: world_json.as_deref(),
+            world_file: world_file.as_ref(),
         }),
         Command::CreatureStream {
             event_port,
@@ -448,6 +476,7 @@ fn run() -> Result<(), String> {
             random_segments,
             max_segments,
             world_json,
+            world_file,
             motor_strength,
         } => run_creature_stream(CreatureStreamRequest {
             event_host: &event_host,
@@ -463,6 +492,7 @@ fn run() -> Result<(), String> {
             random_segments,
             max_segments,
             world_json: world_json.as_deref(),
+            world_file: world_file.as_ref(),
             motor_strength,
         }),
         Command::GenomeGenerate {
@@ -487,10 +517,12 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json,
+            world_file,
             motor_strength,
             trials,
             trial_aggregation,
             timeline_json,
+            timeline_file,
             fitness_distance,
             fitness_speed,
             fitness_upright,
@@ -526,10 +558,12 @@ fn run() -> Result<(), String> {
             seconds,
             dt,
             world_json: world_json.as_deref(),
+            world_file: world_file.as_ref(),
             motor_strength,
             trials,
             trial_aggregation: &trial_aggregation,
             timeline_json: timeline_json.as_deref(),
+            timeline_file: timeline_file.as_ref(),
             fitness_distance,
             fitness_speed,
             fitness_upright,
@@ -568,7 +602,10 @@ fn run() -> Result<(), String> {
             resume_checkpoint.as_ref(),
             json,
         ),
-        Command::WorldGeometry { world_json } => run_world_geometry(world_json.as_deref()),
+        Command::WorldGeometry {
+            world_json,
+            world_file,
+        } => run_world_geometry(world_json.as_deref(), world_file.as_ref()),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
     }
 }
@@ -579,6 +616,7 @@ struct BatchRequest<'a> {
     seconds: f32,
     dt: f32,
     world_json: Option<&'a str>,
+    world_file: Option<&'a PathBuf>,
     backend: &'a str,
     gpu_ids: Vec<u32>,
     json_output: bool,
@@ -593,6 +631,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
         seconds,
         dt,
         world_json,
+        world_file,
         backend,
         gpu_ids,
         json_output,
@@ -604,7 +643,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
         return Err("batch size must be greater than 0".into());
     }
 
-    let config = simulation_config(seconds, dt, world_json)?;
+    let config = simulation_config(seconds, dt, world_json, world_file)?;
     let backend_name = backend.trim().to_ascii_lowercase();
     let event_socket = make_event_socket(event_host, event_port)?;
 
@@ -777,6 +816,7 @@ struct StreamRequest<'a> {
     realtime: bool,
     playback_speed: f32,
     world_json: Option<&'a str>,
+    world_file: Option<&'a PathBuf>,
 }
 
 fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
@@ -789,6 +829,7 @@ fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
         realtime,
         playback_speed,
         world_json,
+        world_file,
     } = request;
 
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
@@ -798,7 +839,7 @@ fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let config = simulation_config(seconds, dt, world_json)?;
+    let config = simulation_config(seconds, dt, world_json, world_file)?;
 
     let socket = make_event_socket(event_host, Some(event_port))?
         .ok_or_else(|| "streaming requires an event port".to_string())?;
@@ -881,6 +922,7 @@ struct CreatureStreamRequest<'a> {
     random_segments: usize,
     max_segments: usize,
     world_json: Option<&'a str>,
+    world_file: Option<&'a PathBuf>,
     motor_strength: f32,
 }
 
@@ -920,6 +962,7 @@ fn run_creature_stream_inner(
         random_segments,
         max_segments,
         world_json,
+        world_file,
         motor_strength,
     } = request;
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
@@ -929,7 +972,7 @@ fn run_creature_stream_inner(
         return Err("playback_speed must be between 0.01 and 2.0".into());
     }
 
-    let mut config = simulation_config(seconds, dt, world_json)?;
+    let mut config = simulation_config(seconds, dt, world_json, world_file)?;
     config.motor_strength_multiplier = motor_strength;
     config.validate()?;
 
@@ -1089,10 +1132,12 @@ struct EvolveRequest<'a> {
     seconds: f32,
     dt: f32,
     world_json: Option<&'a str>,
+    world_file: Option<&'a PathBuf>,
     motor_strength: f32,
     trials: usize,
     trial_aggregation: &'a str,
     timeline_json: Option<&'a str>,
+    timeline_file: Option<&'a PathBuf>,
     fitness_distance: f32,
     fitness_speed: f32,
     fitness_upright: f32,
@@ -1150,15 +1195,15 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         CreatureGenome::three_segment_walker()
     };
 
-    let mut simulation = simulation_config(request.seconds, request.dt, request.world_json)?;
+    let mut simulation = simulation_config(
+        request.seconds,
+        request.dt,
+        request.world_json,
+        request.world_file,
+    )?;
     simulation.motor_strength_multiplier = request.motor_strength;
 
-    let timeline = if let Some(raw) = request.timeline_json {
-        serde_json::from_str::<TimelineConfig>(raw)
-            .map_err(|err| format!("invalid --timeline-json: {err}"))?
-    } else {
-        TimelineConfig::default()
-    };
+    let timeline = load_timeline_config(request.timeline_json, request.timeline_file)?;
 
     let trial_aggregation = parse_trial_aggregation(request.trial_aggregation)?;
 
@@ -1610,17 +1655,57 @@ fn parse_gpu_ids(value: &str) -> Result<Vec<u32>, String> {
         .collect()
 }
 
-fn simulation_config(
-    seconds: f32,
-    dt: f32,
+fn load_world_config(
     world_json: Option<&str>,
-) -> Result<SimulationConfig, String> {
-    let world = if let Some(raw) = world_json {
+    world_file: Option<&PathBuf>,
+) -> Result<WorldConfig, String> {
+    if world_json.is_some() && world_file.is_some() {
+        return Err("use only one of --world-json or --world-file".into());
+    }
+
+    let world = if let Some(path) = world_file {
+        let raw = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read world file {}: {err}", path.display()))?;
+        serde_json::from_str::<WorldConfig>(&raw)
+            .map_err(|err| format!("invalid --world-file {}: {err}", path.display()))?
+    } else if let Some(raw) = world_json {
         serde_json::from_str::<WorldConfig>(raw)
             .map_err(|err| format!("invalid --world-json: {err}"))?
     } else {
         WorldConfig::default()
     };
+    world.validate()?;
+    Ok(world)
+}
+
+fn load_timeline_config(
+    timeline_json: Option<&str>,
+    timeline_file: Option<&PathBuf>,
+) -> Result<TimelineConfig, String> {
+    if timeline_json.is_some() && timeline_file.is_some() {
+        return Err("use only one of --timeline-json or --timeline-file".into());
+    }
+
+    if let Some(path) = timeline_file {
+        let raw = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read timeline file {}: {err}", path.display()))?;
+        serde_json::from_str::<TimelineConfig>(&raw)
+            .map_err(|err| format!("invalid --timeline-file {}: {err}", path.display()))
+    } else if let Some(raw) = timeline_json {
+        serde_json::from_str::<TimelineConfig>(raw)
+            .map_err(|err| format!("invalid --timeline-json: {err}"))
+    } else {
+        Ok(TimelineConfig::default())
+    }
+}
+
+fn simulation_config(
+    seconds: f32,
+    dt: f32,
+    world_json: Option<&str>,
+    world_file: Option<&PathBuf>,
+) -> Result<SimulationConfig, String> {
+    let world = load_world_config(world_json, world_file)?;
 
     let config = SimulationConfig {
         duration_seconds: seconds,
@@ -1632,14 +1717,11 @@ fn simulation_config(
     Ok(config)
 }
 
-fn run_world_geometry(world_json: Option<&str>) -> Result<(), String> {
-    let world = if let Some(raw) = world_json {
-        serde_json::from_str::<WorldConfig>(raw)
-            .map_err(|err| format!("invalid --world-json: {err}"))?
-    } else {
-        WorldConfig::default()
-    };
-    world.validate()?;
+fn run_world_geometry(
+    world_json: Option<&str>,
+    world_file: Option<&PathBuf>,
+) -> Result<(), String> {
+    let world = load_world_config(world_json, world_file)?;
 
     println!(
         "{}",
