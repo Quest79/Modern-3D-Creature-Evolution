@@ -1744,7 +1744,7 @@ func _on_replay_lineage_creature() -> void:
             int(_max_segments_spin.value),
             int(record.get("segments", 2))
         )),
-        "--world-json", JSON.stringify(world),
+        "--world-file", _write_runtime_json("runtime_replay_world.json", world),
         "--motor-strength", str(float(
             simulation.get("motor_strength_multiplier", 1.0)
         )),
@@ -2557,6 +2557,28 @@ func _world_json() -> String:
     return JSON.stringify(_world_config_dictionary())
 
 
+func _write_runtime_json(file_name: String, value) -> String:
+    var path := ProjectSettings.globalize_path("user://" + file_name)
+    var file := FileAccess.open(path, FileAccess.WRITE)
+    if file == null:
+        return ""
+    file.store_string(JSON.stringify(value))
+    file.close()
+    return path
+
+
+func _world_file_for_cli(world_override = null) -> String:
+    _sync_world_state_from_controls()
+    var world := _world_config_dictionary()
+    if typeof(world_override) == TYPE_DICTIONARY and not world_override.is_empty():
+        world = world_override
+    return _write_runtime_json("runtime_world.json", world)
+
+
+func _timeline_file_for_cli() -> String:
+    return _write_runtime_json("runtime_timeline.json", _timeline_config_dictionary())
+
+
 func _refresh_world_preview() -> void:
     _render_world_config(_world_config_dictionary())
 
@@ -2574,13 +2596,17 @@ func _render_world_config(world_config: Dictionary) -> void:
     if not _backend_exists():
         return
 
+    var world_file := _write_runtime_json("runtime_world_preview.json", world_config)
+    if world_file.is_empty():
+        return
+
     var output: Array = []
     var exit_code := OS.execute(
         _backend_path(),
         PackedStringArray([
             "world-geometry",
-            "--world-json",
-            world_json,
+            "--world-file",
+            world_file,
         ]),
         output,
         true,
@@ -3181,9 +3207,7 @@ func _base_creature_args(
     world_override = null,
     motor_strength_override := -1.0
 ) -> PackedStringArray:
-    var world_json := _world_json()
-    if typeof(world_override) == TYPE_DICTIONARY and not world_override.is_empty():
-        world_json = JSON.stringify(world_override)
+    var world_file := _world_file_for_cli(world_override)
 
     var motor_strength := float(_motor_strength_spin.value)
     if motor_strength_override >= 0.0:
@@ -3198,7 +3222,7 @@ func _base_creature_args(
         "--playback-speed", "%.2f" % _playback_speed,
         "--seed", str(int(_seed_spin.value)),
         "--max-segments", str(int(_max_segments_spin.value)),
-        "--world-json", world_json,
+        "--world-file", world_file,
         "--motor-strength", str(motor_strength),
     ])
 
@@ -3285,6 +3309,12 @@ func _on_evolve_pressed() -> void:
     if FileAccess.file_exists(checkpoint_path):
         DirAccess.remove_absolute(checkpoint_path)
 
+    var world_file := _world_file_for_cli()
+    var timeline_file := _timeline_file_for_cli()
+    if world_file.is_empty() or timeline_file.is_empty():
+        _set_status("Could not write runtime experiment configuration.")
+        return
+
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
@@ -3302,13 +3332,13 @@ func _on_evolve_pressed() -> void:
         "--motor-strength", str(_motor_strength_spin.value),
         "--trials", str(int(_trials_spin.value)),
         "--trial-aggregation", _trial_aggregation_value(),
-        "--timeline-json", _timeline_json(),
+        "--timeline-file", timeline_file,
         "--fitness-distance", str(_fitness_distance_spin.value),
         "--fitness-speed", str(_fitness_speed_spin.value),
         "--fitness-upright", str(_fitness_upright_spin.value),
         "--fitness-stability", str(_fitness_stability_spin.value),
         "--fitness-energy", str(_fitness_energy_spin.value),
-        "--world-json", _world_json(),
+        "--world-file", world_file,
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
         "--result-output", results_path,
@@ -3351,6 +3381,11 @@ func _on_resume_evolution_pressed() -> void:
 
     var champion_path := _evolution_champion_path()
     var results_path := _evolution_results_path()
+    var world_file := _world_file_for_cli()
+    var timeline_file := _timeline_file_for_cli()
+    if world_file.is_empty() or timeline_file.is_empty():
+        _set_status("Could not write runtime experiment configuration.")
+        return
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
@@ -3368,13 +3403,13 @@ func _on_resume_evolution_pressed() -> void:
         "--motor-strength", str(_motor_strength_spin.value),
         "--trials", str(int(_trials_spin.value)),
         "--trial-aggregation", _trial_aggregation_value(),
-        "--timeline-json", _timeline_json(),
+        "--timeline-file", timeline_file,
         "--fitness-distance", str(_fitness_distance_spin.value),
         "--fitness-speed", str(_fitness_speed_spin.value),
         "--fitness-upright", str(_fitness_upright_spin.value),
         "--fitness-stability", str(_fitness_stability_spin.value),
         "--fitness-energy", str(_fitness_energy_spin.value),
-        "--world-json", _world_json(),
+        "--world-file", world_file,
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
         "--result-output", results_path,
@@ -3922,6 +3957,11 @@ func _on_live_pressed() -> void:
     _progress_bar.value = 0
     _metrics.text = "[color=#9aa7bd]Receiving live world-state snapshots...[/color]"
 
+    var world_file := _world_file_for_cli()
+    if world_file.is_empty():
+        _set_status("Could not write runtime world configuration.")
+        return
+
     var args := PackedStringArray([
         "stream",
         "--event-port", str(_event_port),
@@ -3929,7 +3969,7 @@ func _on_live_pressed() -> void:
         "--dt", str(_dt_spin.value),
         "--frame-hz", "60",
         "--playback-speed", "%.2f" % _playback_speed,
-        "--world-json", _world_json(),
+        "--world-file", world_file,
     ])
 
     if _start_job("live", args):
@@ -3946,13 +3986,18 @@ func _on_batch_pressed() -> void:
     _progress_bar.value = 0
     _metrics.text = "[color=#9aa7bd]Evaluating independent simulations in parallel...[/color]"
 
+    var world_file := _world_file_for_cli()
+    if world_file.is_empty():
+        _set_status("Could not write runtime world configuration.")
+        return
+
     var args := PackedStringArray([
         "probe",
         "--batch", str(int(_batch_spin.value)),
         "--workers", str(int(_workers_spin.value)),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
-        "--world-json", _world_json(),
+        "--world-file", world_file,
         "--backend", _accelerator_mode,
         "--gpus", _gpu_ids_edit.text.strip_edges(),
         "--event-port", str(_event_port),
