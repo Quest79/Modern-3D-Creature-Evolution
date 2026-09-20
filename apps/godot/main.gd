@@ -3957,11 +3957,37 @@ func _load_genome_file(path: String) -> bool:
     return true
 
 
+func _normalize_integral_json_numbers(value):
+    match typeof(value):
+        TYPE_DICTIONARY:
+            var result := {}
+            for key in value.keys():
+                result[key] = _normalize_integral_json_numbers(value[key])
+            return result
+        TYPE_ARRAY:
+            var result: Array = []
+            for item in value:
+                result.append(_normalize_integral_json_numbers(item))
+            return result
+        TYPE_FLOAT:
+            var float_value := float(value)
+            if (
+                is_finite(float_value)
+                and float_value == floor(float_value)
+                and absf(float_value) <= 9007199254740991.0
+            ):
+                return int(float_value)
+            return float_value
+        _:
+            return value
+
+
 func _write_genome_file(path: String, genome: Dictionary) -> bool:
     var file := FileAccess.open(path, FileAccess.WRITE)
     if file == null:
         return false
-    file.store_string(JSON.stringify(genome, "\t"))
+    var normalized = _normalize_integral_json_numbers(genome)
+    file.store_string(JSON.stringify(normalized, "\t"))
     file.close()
     return true
 
