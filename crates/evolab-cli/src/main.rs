@@ -436,7 +436,7 @@ fn run() -> Result<(), String> {
             world_json: world_json.as_deref(),
             world_file: world_file.as_ref(),
             backend: &backend,
-            gpu_ids: parse_gpu_ids(&gpus)?,
+            gpu_ids_raw: &gpus,
             json_output,
             event_host: &event_host,
             event_port,
@@ -570,7 +570,7 @@ fn run() -> Result<(), String> {
             fitness_stability,
             fitness_energy,
             accelerator: &accelerator,
-            gpu_ids: parse_gpu_ids(&gpus)?,
+            gpu_ids_raw: &gpus,
             gpu_batch_size,
             gpu_max_parts,
             gpu_max_joints,
@@ -618,38 +618,70 @@ struct BatchRequest<'a> {
     world_json: Option<&'a str>,
     world_file: Option<&'a PathBuf>,
     backend: &'a str,
-    gpu_ids: Vec<u32>,
+    gpu_ids_raw: &'a str,
     json_output: bool,
     event_host: &'a str,
     event_port: Option<u16>,
 }
 
 fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
-    let BatchRequest {
-        batch,
-        workers,
-        seconds,
-        dt,
-        world_json,
-        world_file,
-        backend,
-        gpu_ids,
-        json_output,
-        event_host,
-        event_port,
-    } = request;
+    let event_socket = make_event_socket(request.event_host, request.event_port)?;
+    let result = run_batch_inner(&request, event_socket);
+
+    if let Err(err) = &result
+        && let Some(socket) = event_socket
+    {
+        send_event(
+            socket,
+            &json!({
+                "protocol_version": 1,
+                "kind": "batch_error",
+                "message": err,
+            }),
+        );
+    }
+
+    result
+}
+
+fn run_batch_inner(
+    request: &BatchRequest<'_>,
+    event_socket: Option<&UdpSocket>,
+) -> Result<(), String> {
+    let batch = request.batch;
+    let workers = request.workers;
+    let backend = request.backend;
+    let gpu_ids = parse_gpu_ids(request.gpu_ids_raw)?;
 
     if batch == 0 {
         return Err("batch size must be greater than 0".into());
     }
 
-    let config = simulation_config(seconds, dt, world_json, world_file)?;
+    let config = simulation_config(
+        request.seconds,
+        request.dt,
+        request.world_json,
+        request.world_file,
+    )?;
     let backend_name = backend.trim().to_ascii_lowercase();
-    let event_socket = make_event_socket(event_host, event_port)?;
 
     if backend_name == "cuda" || backend_name == "auto" {
         let cuda_devices = discover_cuda_devices().unwrap_or_default();
         if !cuda_devices.is_empty() {
+            if let Some(socket) = event_socket {
+                send_event(
+                    socket,
+                    &json!({
+                        "protocol_version": 1,
+                        "kind": "batch_started",
+                        "total": batch,
+                        "backend": "cuda-probe",
+                        "world": config.world,
+                        "world_geometry": config.world.geometry(),
+                    }),
+                );
+            }
+
             let report = run_cuda_probe_batch(&config, &ProbeSpec::default(), batch, &gpu_ids)?;
             let result = json!({
                 "protocol_version": 1,
@@ -670,18 +702,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
                 "deterministic": true,
             });
 
-            if let Some(socket) = event_socket.as_ref() {
-                send_event(
-                    socket,
-                    &json!({
-                        "protocol_version": 1,
-                        "kind": "batch_started",
-                        "total": batch,
-                        "backend": result["backend"],
-                        "world": config.world,
-                        "world_geometry": config.world.geometry(),
-                    }),
-                );
+            if let Some(socket) = event_socket {
                 send_event(socket, &result);
             }
 
@@ -714,7 +735,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
     let runner = BatchRunner { threads: workers };
     let backend = RapierCpuBackend;
 
-    if let Some(socket) = event_socket.as_ref() {
+    if let Some(socket) = event_socket {
         send_event(
             socket,
             &json!({
@@ -731,7 +752,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
     let progress_interval = (batch / 100).max(1);
     let started = Instant::now();
 
-    let reports = if let Some(socket) = event_socket.as_ref() {
+    let reports = if let Some(socket) = event_socket {
         runner.run_identical_with_progress(
             &backend,
             &config,
@@ -779,7 +800,7 @@ fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
         "deterministic": config.deterministic,
     });
 
-    if let Some(socket) = event_socket.as_ref() {
+    if let Some(socket) = event_socket {
         send_event(socket, &result);
     }
 
@@ -1144,7 +1165,7 @@ struct EvolveRequest<'a> {
     fitness_stability: f32,
     fitness_energy: f32,
     accelerator: &'a str,
-    gpu_ids: Vec<u32>,
+    gpu_ids_raw: &'a str,
     gpu_batch_size: usize,
     gpu_max_parts: usize,
     gpu_max_joints: usize,
@@ -1235,7 +1256,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         trial_aggregation,
         accelerator: AcceleratorConfig {
             mode: parse_accelerator_mode(request.accelerator)?,
-            gpu_ids: request.gpu_ids.clone(),
+            gpu_ids: parse_gpu_ids(request.gpu_ids_raw)?,
             batch_size: request.gpu_batch_size,
             max_parts: request.gpu_max_parts,
             max_joints: request.gpu_max_joints,
@@ -1641,11 +1662,12 @@ fn parse_trial_aggregation(value: &str) -> Result<TrialAggregation, String> {
 }
 
 fn parse_gpu_ids(value: &str) -> Result<Vec<u32>, String> {
-    if value.trim().is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
         return Ok(Vec::new());
     }
 
-    value
+    trimmed
         .split(',')
         .map(|part| {
             part.trim()
