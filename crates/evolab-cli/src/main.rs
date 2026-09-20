@@ -626,10 +626,10 @@ struct BatchRequest<'a> {
 
 fn run_batch(request: BatchRequest<'_>) -> Result<(), String> {
     let event_socket = make_event_socket(request.event_host, request.event_port)?;
-    let result = run_batch_inner(&request, event_socket);
+    let result = run_batch_inner(&request, event_socket.as_ref());
 
     if let Err(err) = &result
-        && let Some(socket) = event_socket
+        && let Some(socket) = event_socket.as_ref()
     {
         send_event(
             socket,
@@ -706,7 +706,7 @@ fn run_batch_inner(
                 send_event(socket, &result);
             }
 
-            if json_output {
+            if request.json_output {
                 println!("{result}");
             } else if event_socket.is_none() {
                 println!("backend              : {}", report.backend);
@@ -804,7 +804,7 @@ fn run_batch_inner(
         send_event(socket, &result);
     }
 
-    if json_output {
+    if request.json_output {
         println!("{result}");
     } else if event_socket.is_none() {
         println!("backend              : {}", first.backend);
