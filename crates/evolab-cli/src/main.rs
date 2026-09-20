@@ -1007,7 +1007,7 @@ fn run_creature_stream_inner(
     let (base_genome, mut mutation_log, mut genome_source) = if let Some(path) = genome_path {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
-        let genome: CreatureGenome = serde_json::from_str(&raw)
+        let genome = parse_creature_genome_json(&raw)
             .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
         genome.validate()?;
         (genome, Vec::new(), format!("file:{}", path.display()))
@@ -1205,7 +1205,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     let ancestor = if let Some(path) = request.genome_path {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
-        let mut genome: CreatureGenome = serde_json::from_str(&raw)
+        let mut genome = parse_creature_genome_json(&raw)
             .map_err(|err| format!("invalid genome JSON {}: {err}", path.display()))?;
         genome
             .brain
@@ -1483,7 +1483,7 @@ fn run_experiment(
 ) -> Result<(), String> {
     let raw = fs::read_to_string(path)
         .map_err(|err| format!("failed to read experiment {}: {err}", path.display()))?;
-    let mut experiment: ExperimentFile = serde_json::from_str(&raw)
+    let mut experiment = parse_experiment_json(&raw)
         .map_err(|err| format!("invalid experiment JSON {}: {err}", path.display()))?;
     experiment.validate()?;
 
@@ -1661,6 +1661,46 @@ fn parse_trial_aggregation(value: &str) -> Result<TrialAggregation, String> {
     }
 }
 
+fn normalize_integral_json_numbers(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                normalize_integral_json_numbers(item);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                normalize_integral_json_numbers(item);
+            }
+        }
+        Value::Number(number) if !number.is_i64() && !number.is_u64() => {
+            if let Some(float_value) = number.as_f64()
+                && float_value.is_finite()
+                && float_value.fract() == 0.0
+            {
+                if float_value >= 0.0 && float_value <= u64::MAX as f64 {
+                    *number = serde_json::Number::from(float_value as u64);
+                } else if float_value >= i64::MIN as f64 && float_value <= i64::MAX as f64 {
+                    *number = serde_json::Number::from(float_value as i64);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_creature_genome_json(raw: &str) -> Result<CreatureGenome, serde_json::Error> {
+    let mut value: Value = serde_json::from_str(raw)?;
+    normalize_integral_json_numbers(&mut value);
+    serde_json::from_value(value)
+}
+
+fn parse_experiment_json(raw: &str) -> Result<ExperimentFile, serde_json::Error> {
+    let mut value: Value = serde_json::from_str(raw)?;
+    normalize_integral_json_numbers(&mut value);
+    serde_json::from_value(value)
+}
+
 fn parse_gpu_ids(value: &str) -> Result<Vec<u32>, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
@@ -1827,5 +1867,46 @@ fn make_event_socket(host: &str, port: Option<u16>) -> Result<Option<UdpSocket>,
 fn send_event(socket: &UdpSocket, value: &Value) {
     if let Ok(payload) = serde_json::to_vec(value) {
         let _ = socket.send(&payload);
+    }
+}
+
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn floatify_integer_numbers(value: &mut Value) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    floatify_integer_numbers(item);
+                }
+            }
+            Value::Object(map) => {
+                for item in map.values_mut() {
+                    floatify_integer_numbers(item);
+                }
+            }
+            Value::Number(number) if number.is_i64() || number.is_u64() => {
+                let float_value = number
+                    .as_i64()
+                    .map(|value| value as f64)
+                    .or_else(|| number.as_u64().map(|value| value as f64))
+                    .unwrap();
+                *number = serde_json::Number::from_f64(float_value).unwrap();
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn godot_round_tripped_genome_accepts_integral_float_ids() {
+        let expected = CreatureGenome::three_segment_walker();
+        let mut value = serde_json::to_value(&expected).unwrap();
+        floatify_integer_numbers(&mut value);
+        let raw = serde_json::to_string(&value).unwrap();
+
+        let parsed = parse_creature_genome_json(&raw).unwrap();
+        assert_eq!(parsed, expected);
     }
 }
