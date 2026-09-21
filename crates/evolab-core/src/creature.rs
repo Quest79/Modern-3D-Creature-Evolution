@@ -315,10 +315,7 @@ impl CreatureGenome {
             if !axis_len_sq.is_finite() || axis_len_sq <= 1.0e-8 {
                 return Err("joint axis must be non-zero and finite".into());
             }
-            if joint
-                .limits_radians
-                .iter()
-                .any(|value| !value.is_finite())
+            if joint.limits_radians.iter().any(|value| !value.is_finite())
                 || joint.limits_radians[0] >= joint.limits_radians[1]
             {
                 return Err("joint limits must be finite and increasing".into());
@@ -369,10 +366,12 @@ impl CreatureGenome {
         let torque_limit = BIOLOGICAL_MAX_MUSCLE_STRESS_PA
             * (parent_area * parent_lever).min(child_area * child_lever);
 
-        let parent_contractile_mass =
-            parent.mass_kg().min(parent.volume_m3() * MUSCLE_DENSITY_KG_M3);
-        let child_contractile_mass =
-            child.mass_kg().min(child.volume_m3() * MUSCLE_DENSITY_KG_M3);
+        let parent_contractile_mass = parent
+            .mass_kg()
+            .min(parent.volume_m3() * MUSCLE_DENSITY_KG_M3);
+        let child_contractile_mass = child
+            .mass_kg()
+            .min(child.volume_m3() * MUSCLE_DENSITY_KG_M3);
         let power_limit = BIOLOGICAL_MAX_CYCLIC_POWER_W_PER_KG
             * parent_contractile_mass.min(child_contractile_mass);
 
