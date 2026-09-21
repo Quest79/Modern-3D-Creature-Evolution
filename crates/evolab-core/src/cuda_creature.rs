@@ -461,8 +461,8 @@ mod platform {
     const CUDA_SUCCESS: CuResult = 0;
     const NVRTC_SUCCESS: NvrtcResult = 0;
 
-    type PtxCacheKey = (i32, i32, bool);
-    static PTX_CACHE: OnceLock<Mutex<HashMap<PtxCacheKey, Vec<u8>>>> = OnceLock::new();
+    type KernelCacheKey = (i32, i32, bool);
+    static KERNEL_CACHE: OnceLock<Mutex<HashMap<KernelCacheKey, Vec<u8>>>> = OnceLock::new();
 
     type CuInit = unsafe extern "system" fn(u32) -> CuResult;
     type CuDeviceGet = unsafe extern "system" fn(*mut CuDevice, i32) -> CuResult;
@@ -501,8 +501,8 @@ mod platform {
     ) -> NvrtcResult;
     type NvrtcCompileProgram =
         unsafe extern "system" fn(NvrtcProgram, i32, *const *const c_char) -> NvrtcResult;
-    type NvrtcGetPtxSize = unsafe extern "system" fn(NvrtcProgram, *mut usize) -> NvrtcResult;
-    type NvrtcGetPtx = unsafe extern "system" fn(NvrtcProgram, *mut c_char) -> NvrtcResult;
+    type NvrtcGetCubinSize = unsafe extern "system" fn(NvrtcProgram, *mut usize) -> NvrtcResult;
+    type NvrtcGetCubin = unsafe extern "system" fn(NvrtcProgram, *mut c_char) -> NvrtcResult;
     type NvrtcGetProgramLogSize =
         unsafe extern "system" fn(NvrtcProgram, *mut usize) -> NvrtcResult;
     type NvrtcGetProgramLog = unsafe extern "system" fn(NvrtcProgram, *mut c_char) -> NvrtcResult;
@@ -601,8 +601,8 @@ mod platform {
         library: *mut c_void,
         create_program: NvrtcCreateProgram,
         compile_program: NvrtcCompileProgram,
-        get_ptx_size: NvrtcGetPtxSize,
-        get_ptx: NvrtcGetPtx,
+        get_cubin_size: NvrtcGetCubinSize,
+        get_cubin: NvrtcGetCubin,
         get_log_size: NvrtcGetProgramLogSize,
         get_log: NvrtcGetProgramLog,
         destroy_program: NvrtcDestroyProgram,
@@ -636,8 +636,8 @@ mod platform {
                 library,
                 create_program: load!("nvrtcCreateProgram", NvrtcCreateProgram),
                 compile_program: load!("nvrtcCompileProgram", NvrtcCompileProgram),
-                get_ptx_size: load!("nvrtcGetPTXSize", NvrtcGetPtxSize),
-                get_ptx: load!("nvrtcGetPTX", NvrtcGetPtx),
+                get_cubin_size: load!("nvrtcGetCUBINSize", NvrtcGetCubinSize),
+                get_cubin: load!("nvrtcGetCUBIN", NvrtcGetCubin),
                 get_log_size: load!("nvrtcGetProgramLogSize", NvrtcGetProgramLogSize),
                 get_log: load!("nvrtcGetProgramLog", NvrtcGetProgramLog),
                 destroy_program: load!("nvrtcDestroyProgram", NvrtcDestroyProgram),
@@ -826,14 +826,14 @@ mod platform {
             minor,
             throughput_mode == ThroughputMode::MaxThroughput,
         );
-        let cache = PTX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(ptx) = cache
+        let cache = KERNEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(image) = cache
             .lock()
-            .map_err(|_| "CUDA PTX cache mutex was poisoned".to_string())?
+            .map_err(|_| "CUDA kernel cache mutex was poisoned".to_string())?
             .get(&cache_key)
             .cloned()
         {
-            return Ok(ptx);
+            return Ok(image);
         }
 
         let api = NvrtcApi::load()?;
@@ -855,7 +855,10 @@ mod platform {
         }
         let guard = NvrtcProgramGuard { api: &api, program };
 
-        let arch = CString::new(format!("--gpu-architecture=compute_{major}{minor}"))
+        // Compile directly to native SASS/cubin for the selected GPU instead
+        // of emitting PTX. This avoids CUDA error 222 when a newer Toolkit
+        // emits a PTX ISA revision that the installed display driver cannot JIT.
+        let arch = CString::new(format!("--gpu-architecture=sm_{major}{minor}"))
             .map_err(|_| "invalid CUDA architecture".to_string())?;
         let std = CString::new("--std=c++14").expect("static option");
         let fast_math = CString::new("--use_fast_math").expect("static option");
@@ -889,25 +892,26 @@ mod platform {
             ));
         }
 
-        let mut ptx_size = 0usize;
-        let ptx_size_result = unsafe { (api.get_ptx_size)(program, &mut ptx_size) };
-        if ptx_size_result != NVRTC_SUCCESS {
+        let mut cubin_size = 0usize;
+        let cubin_size_result = unsafe { (api.get_cubin_size)(program, &mut cubin_size) };
+        if cubin_size_result != NVRTC_SUCCESS {
             return Err(format!(
-                "nvrtcGetPTXSize failed with code {ptx_size_result}"
+                "nvrtcGetCUBINSize failed with code {cubin_size_result}"
             ));
         }
-        let mut ptx = vec![0_u8; ptx_size.max(1)];
-        let ptx_result = unsafe { (api.get_ptx)(program, ptx.as_mut_ptr().cast::<c_char>()) };
-        if ptx_result != NVRTC_SUCCESS {
-            return Err(format!("nvrtcGetPTX failed with code {ptx_result}"));
+        let mut cubin = vec![0_u8; cubin_size.max(1)];
+        let cubin_result =
+            unsafe { (api.get_cubin)(program, cubin.as_mut_ptr().cast::<c_char>()) };
+        if cubin_result != NVRTC_SUCCESS {
+            return Err(format!("nvrtcGetCUBIN failed with code {cubin_result}"));
         }
         drop(guard);
 
         cache
             .lock()
-            .map_err(|_| "CUDA PTX cache mutex was poisoned".to_string())?
-            .insert(cache_key, ptx.clone());
-        Ok(ptx)
+            .map_err(|_| "CUDA kernel cache mutex was poisoned".to_string())?
+            .insert(cache_key, cubin.clone());
+        Ok(cubin)
     }
 
     pub fn run_batch(
