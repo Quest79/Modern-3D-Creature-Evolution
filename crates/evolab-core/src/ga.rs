@@ -622,7 +622,6 @@ fn expand_evaluation_pool(
     Ok(expanded)
 }
 
-
 fn evaluate_population(
     pool: &rayon::ThreadPool,
     population: &[Candidate],
