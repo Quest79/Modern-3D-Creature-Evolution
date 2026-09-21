@@ -10,7 +10,7 @@ use crate::{
 /// Broad observed range for dense biological structural materials represented as
 /// bulk segment density. The low end covers very porous woods such as balsa;
 /// the high end covers highly mineralized tissues such as enamel.
-pub const BIOLOGICAL_MIN_DENSITY_KG_M3: f32 = 60.0;
+pub const BIOLOGICAL_MIN_DENSITY_KG_M3: f32 = 40.0;
 pub const BIOLOGICAL_MAX_DENSITY_KG_M3: f32 = 3_000.0;
 pub const BIOLOGICAL_MAX_CONTACT_FRICTION: f32 = 2.1;
 
@@ -39,14 +39,14 @@ pub enum BiologicalMaterial {
 impl BiologicalMaterial {
     pub fn density_range_kg_m3(self) -> (f32, f32) {
         match self {
-            Self::PorousPlant => (60.0, 400.0),
+            Self::PorousPlant => (40.0, 400.0),
             Self::DensePlant => (400.0, 1_400.0),
             Self::Adipose => (900.0, 1_000.0),
             Self::SoftTissue => (1_000.0, 1_150.0),
             Self::FibrousTissue => (1_050.0, 1_300.0),
-            Self::TrabecularBone => (300.0, 1_600.0),
-            Self::CorticalBone => (1_600.0, 2_200.0),
-            Self::Exoskeleton => (1_100.0, 1_600.0),
+            Self::TrabecularBone => (400.0, 1_600.0),
+            Self::CorticalBone => (1_800.0, 2_200.0),
+            Self::Exoskeleton => (1_000.0, 1_300.0),
             Self::MineralizedTissue => (2_000.0, 3_000.0),
         }
     }
@@ -59,8 +59,8 @@ impl BiologicalMaterial {
             Self::SoftTissue => 1_050.0,
             Self::FibrousTissue => 1_130.0,
             Self::TrabecularBone => 800.0,
-            Self::CorticalBone => 1_900.0,
-            Self::Exoskeleton => 1_300.0,
+            Self::CorticalBone => 2_000.0,
+            Self::Exoskeleton => 1_150.0,
             Self::MineralizedTissue => 2_500.0,
         }
     }
