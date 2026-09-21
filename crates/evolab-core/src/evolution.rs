@@ -21,9 +21,9 @@ impl Default for MutationConfig {
         Self {
             min_segments: 2,
             max_segments: 12,
-            // Broad macroscopic biological scale: 2 mm to 30 m full segment
+            // Broad articulated-animal scale: 0.2 mm to 30 m full segment
             // dimension. This is a solver/world-scale bound, not an anatomy bound.
-            min_half_extent: 0.001,
+            min_half_extent: 0.0001,
             max_half_extent: 15.0,
             structural_mutation_chance: 0.30,
         }
