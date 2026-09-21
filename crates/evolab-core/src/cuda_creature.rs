@@ -1207,8 +1207,8 @@ mod platform {
         // Do not let a small UI batch setting split a saturation-sized generation
         // into underfilled launches. The 8-lane creature kernel needs roughly
         // 128 creatures per SM to keep enough independent warps ready.
-        let saturation_batch = (device_info.multiprocessor_count.max(1) as usize)
-            .saturating_mul(128);
+        let saturation_batch =
+            (device_info.multiprocessor_count.max(1) as usize).saturating_mul(128);
         let batch_size = accelerator
             .batch_size
             .max(saturation_batch)
