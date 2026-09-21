@@ -1,8 +1,10 @@
 use crate::{
-    AcceleratorConfig, CreatureGenome, DeviceWorkAssignment, ExecutionPerformance, Expression,
-    FitnessConfig, FitnessMetrics, FitnessResult, SensorKind, SimulationConfig, TerrainKind,
-    discover_cuda_devices, legacy_expression, schedule_gpu_work,
+    AcceleratorConfig, CreatureGenome, ExecutionPerformance, FitnessConfig, FitnessResult,
+    SimulationConfig, TerrainKind, discover_cuda_devices, schedule_gpu_work,
 };
+
+#[cfg(windows)]
+use crate::{DeviceWorkAssignment, Expression, FitnessMetrics, SensorKind, legacy_expression};
 
 #[derive(Clone, Debug)]
 pub struct CudaCreatureBatchResult {
@@ -72,6 +74,7 @@ fn validate_cuda_creature_world(config: &SimulationConfig) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(windows)]
 #[derive(Default)]
 struct PackedCreatureBatch {
     world_count: usize,
@@ -102,6 +105,7 @@ struct PackedCreatureBatch {
     op_b: Vec<f32>,
 }
 
+#[cfg(windows)]
 impl PackedCreatureBatch {
     fn pack(
         genomes: &[CreatureGenome],
@@ -222,6 +226,7 @@ impl PackedCreatureBatch {
     }
 }
 
+#[cfg(windows)]
 fn push_op(
     code: u32,
     index: u32,
@@ -238,6 +243,7 @@ fn push_op(
     op_b.push(b);
 }
 
+#[cfg(windows)]
 fn flatten_expression(
     expression: &Expression,
     joint_index: &std::collections::HashMap<u32, u32>,
