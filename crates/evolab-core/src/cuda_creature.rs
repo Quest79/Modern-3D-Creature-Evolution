@@ -430,10 +430,11 @@ mod platform {
 mod platform {
     use std::{
         collections::HashMap,
-        ffi::{CString, c_char, c_void},
+        ffi::{CString, OsStr, c_char, c_void},
         marker::PhantomData,
         mem::{size_of, transmute},
-        path::PathBuf,
+        os::windows::ffi::OsStrExt,
+        path::{Path, PathBuf},
         ptr::{null, null_mut},
         sync::{Mutex, OnceLock},
         thread,
@@ -510,9 +511,10 @@ mod platform {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+        fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
         fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
         fn FreeLibrary(module: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
     }
 
     unsafe fn load_symbol(
@@ -529,10 +531,26 @@ mod platform {
     }
 
     fn load_library(path: &str) -> Result<*mut c_void, String> {
-        let path = CString::new(path).map_err(|_| "GPU library path contains NUL".to_string())?;
-        let library = unsafe { LoadLibraryA(path.as_ptr()) };
+        const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
+
+        let wide_path = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let flags = if Path::new(path).is_absolute() {
+            // NVRTC has companion DLLs in the same CUDA bin directory.
+            // Make Windows search that directory for dependencies as well.
+            LOAD_WITH_ALTERED_SEARCH_PATH
+        } else {
+            0
+        };
+
+        let library = unsafe { LoadLibraryExW(wide_path.as_ptr(), null_mut(), flags) };
         if library.is_null() {
-            Err("could not load GPU library".into())
+            let error = unsafe { GetLastError() };
+            Err(format!(
+                "could not load GPU library '{path}' (Windows error {error})"
+            ))
         } else {
             Ok(library)
         }
