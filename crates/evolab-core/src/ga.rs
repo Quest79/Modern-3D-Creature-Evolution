@@ -9,8 +9,8 @@ use crate::{
     EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
     MutationRecord, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
-    run_cuda_creature_batch,
+    TrialAggregation, crossover_brain_subtree, discover_cuda_devices, evaluate_fitness,
+    mutate_genome, run_cuda_creature_batch,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -152,6 +152,7 @@ pub struct GenerationSummary {
     pub best_brain_unique_sensors: usize,
     pub best_brain_outputs: usize,
     pub evaluations_completed: usize,
+    pub evaluation_pool_size: usize,
     pub execution: ExecutionPerformance,
     pub effective_settings: EffectiveEvolutionSettings,
     pub active_timeline_events: Vec<String>,
@@ -222,6 +223,8 @@ where
             .build()
             .map_err(|err| format!("failed to create evolution worker pool: {err}"))?
     };
+
+    let evaluation_pool_target = cuda_saturation_pool_target(config);
 
     let (
         start_generation,
@@ -319,7 +322,7 @@ where
 
         let evaluation_pool = expand_evaluation_pool(
             &population,
-            config.effective_evaluation_pool_size(),
+            evaluation_pool_target,
             config,
             &settings,
             &mut rng,
@@ -391,6 +394,7 @@ where
             best_brain_unique_sensors: best.genome.brain.unique_sensor_count(),
             best_brain_outputs: best.genome.brain.outputs.len(),
             evaluations_completed,
+            evaluation_pool_size: evaluated.len(),
             execution,
             effective_settings: settings.clone(),
             active_timeline_events,
@@ -561,6 +565,35 @@ fn initial_population(
 
     Ok(population)
 }
+
+fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
+    let requested = config.effective_evaluation_pool_size();
+    if config.accelerator.mode != AcceleratorMode::Cuda {
+        return requested;
+    }
+
+    let Ok(devices) = discover_cuda_devices() else {
+        return requested;
+    };
+    let Ok(selected) = config.accelerator.selected_gpu_ids(&devices) else {
+        return requested;
+    };
+
+    // The CUDA kernel packs four 8-lane creature groups into each hardware warp.
+    // Queue about 32 warps per SM so the scheduler has enough independent work
+    // to hide memory / transcendental latency without changing the survivor population.
+    let sm_count = devices
+        .iter()
+        .filter(|device| selected.contains(&device.id))
+        .map(|device| device.multiprocessor_count.max(0) as usize)
+        .sum::<usize>();
+    let saturation_target = sm_count.saturating_mul(32).saturating_mul(4);
+
+    requested
+        .max(saturation_target)
+        .min(1_000_000)
+}
+
 
 fn expand_evaluation_pool(
     population: &[Candidate],
