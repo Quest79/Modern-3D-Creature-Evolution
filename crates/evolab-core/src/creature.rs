@@ -192,6 +192,20 @@ impl CreatureGenome {
             ],
             brain: BrainGenome::default(),
         };
+        let torque_limits: Vec<f32> = creature
+            .joints
+            .iter()
+            .map(|joint| {
+                creature
+                    .biological_joint_limits(joint)
+                    .map(|(torque, _)| torque * 0.08)
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        for (joint, torque_limit) in creature.joints.iter_mut().zip(torque_limits) {
+            joint.motor_max_torque = torque_limit;
+        }
+
         creature.brain.sync_with_joints(&creature.joints);
         creature
     }
