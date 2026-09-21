@@ -127,7 +127,7 @@ for /f "delims=" %%C in ('git rev-parse HEAD 2^>nul') do set "PRE_SYNC_HEAD=%%C"
 rem If an older bootstrap already reset us to the new HEAD and then restarted
 rem this freshly updated script, ORIG_HEAD still points at the version we came from.
 set "RESTART_FROM_HEAD="
-if /i "%~1"=="--bootstrap-synced" (
+if /i "%~1"=="--bootstrap-synced" if not defined BOOTSTRAP_UPDATE_ALREADY_SHOWN (
     for /f "delims=" %%C in ('git rev-parse ORIG_HEAD 2^>nul') do set "RESTART_FROM_HEAD=%%C"
 )
 
@@ -174,6 +174,7 @@ if defined UPDATE_FROM_HEAD if defined POST_SYNC_HEAD if /i not "%UPDATE_FROM_HE
 
 if "%UPDATE_FOUND%"=="1" (
     call :ShowUpdateSummary "%UPDATE_FROM_HEAD%" "%POST_SYNC_HEAD%"
+    set "BOOTSTRAP_UPDATE_ALREADY_SHOWN=1"
 ) else (
     for /f "delims=" %%C in ('git rev-parse --short HEAD') do (
         echo [UPDATE] Already current at %%C - no files changed.
