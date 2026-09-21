@@ -69,6 +69,31 @@ if errorlevel 1 (
 )
 set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 
+rem The articulated CUDA solver compiles its GPU kernel with NVRTC at runtime.
+rem If this PC has an NVIDIA GPU, make sure the CUDA Toolkit/NVRTC is present.
+set "CUDA_NVRTC_FOUND="
+if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
+    for /d %%D in ("%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*") do (
+        for %%F in ("%%~fD\bin\nvrtc64_*.dll") do (
+            if exist "%%~fF" set "CUDA_NVRTC_FOUND=%%~fF"
+        )
+    )
+)
+
+where nvidia-smi >nul 2>&1
+if not errorlevel 1 if not defined CUDA_NVRTC_FOUND (
+    echo.
+    echo [SETUP] NVIDIA GPU detected. Installing CUDA Toolkit for GPU physics...
+    winget install --id Nvidia.CUDA -e --source winget --accept-package-agreements --accept-source-agreements
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] CUDA Toolkit installation failed.
+        echo CUDA evolution requires NVRTC from the CUDA Toolkit.
+        pause
+        exit /b 1
+    )
+)
+
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VC_TOOLS_FOUND="
 if exist "%VSWHERE%" (
