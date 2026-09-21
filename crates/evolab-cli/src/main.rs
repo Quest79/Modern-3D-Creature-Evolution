@@ -211,6 +211,12 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         population: usize,
 
+        /// Candidates evaluated per generation. 0 means population size.
+        /// CUDA can use a much wider pool to fill the GPU while keeping the
+        /// survivor population unchanged.
+        #[arg(long, default_value_t = 0)]
+        evaluation_pool: usize,
+
         #[arg(long, default_value_t = 100)]
         generations: usize,
 
@@ -505,6 +511,7 @@ fn run() -> Result<(), String> {
         Command::Evolve {
             genome,
             population,
+            evaluation_pool,
             generations,
             tournament,
             elite,
@@ -546,6 +553,7 @@ fn run() -> Result<(), String> {
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
             population,
+            evaluation_pool,
             generations,
             tournament,
             elite,
@@ -1141,6 +1149,7 @@ fn run_genome_generate(
 struct EvolveRequest<'a> {
     genome_path: Option<&'a PathBuf>,
     population: usize,
+    evaluation_pool: usize,
     generations: usize,
     tournament: usize,
     elite: usize,
@@ -1230,6 +1239,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
 
     let config = EvolutionConfig {
         population_size: request.population,
+        evaluation_pool_size: request.evaluation_pool,
         generations: request.generations,
         tournament_size: request.tournament,
         elite_count: request.elite,
@@ -1289,6 +1299,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "protocol_version": 1,
                 "kind": "evolution_started",
                 "population": config.population_size,
+                "evaluation_pool": config.effective_evaluation_pool_size(),
                 "generations": config.generations,
                 "tournament": config.tournament_size,
                 "elite": config.elite_count,
