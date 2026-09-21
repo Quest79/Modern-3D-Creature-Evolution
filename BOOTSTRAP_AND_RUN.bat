@@ -161,32 +161,40 @@ for /f "delims=" %%C in ('git rev-parse --short HEAD') do (
 )
 
 rem The articulated CUDA solver compiles its GPU kernel with NVRTC at runtime.
-rem Detect NVRTC from CUDA_PATH, the standard Toolkit tree, or PATH.
+rem Detect NVRTC first. If CUDA is registered with WinGet but the NVRTC files
+rem are missing, force the installer to run again instead of looping forever.
 call :FindNvrtc
 
 where nvidia-smi >nul 2>&1
 if not errorlevel 1 if not defined CUDA_NVRTC_FOUND (
     echo.
-    echo [SETUP] NVIDIA GPU detected. Installing CUDA Toolkit for GPU physics...
-    winget install --id Nvidia.CUDA -e --source winget --accept-package-agreements --accept-source-agreements
+    echo [SETUP] NVIDIA GPU detected, but NVRTC is missing.
+    echo [SETUP] Repairing the CUDA Toolkit installation...
+    winget install --id Nvidia.CUDA -e --source winget --force --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
     if errorlevel 1 (
         echo.
-        echo [ERROR] CUDA Toolkit installation failed.
-        echo CUDA evolution requires NVRTC from the CUDA Toolkit.
+        echo [ERROR] CUDA Toolkit repair/reinstall failed.
         pause
         exit /b 1
     )
 
     call :FindNvrtc
-    if not defined CUDA_NVRTC_FOUND (
-        echo.
-        echo [ERROR] CUDA Toolkit installation completed, but NVRTC was not found.
-        echo Close this window and run this bootstrap again once.
-        pause
-        exit /b 1
-    )
 )
 
+if not defined CUDA_NVRTC_FOUND (
+    echo.
+    echo [ERROR] NVRTC is still missing after a forced CUDA Toolkit reinstall.
+    echo [ERROR] Expected a file named nvrtc64_*.dll inside the CUDA Toolkit.
+    echo [ERROR] The bootstrap will stop here instead of telling you to run it again.
+    pause
+    exit /b 1
+)
+
+for %%D in ("%CUDA_NVRTC_FOUND%") do (
+    set "CUDA_BIN=%%~dpD"
+)
+set "PATH=!CUDA_BIN!;%PATH%"
+echo [SETUP] NVRTC: %CUDA_NVRTC_FOUND%
 
 echo.
 echo [BUILD] Building release backend...
@@ -268,25 +276,25 @@ exit /b 0
 :FindNvrtc
 set "CUDA_NVRTC_FOUND="
 
-if defined CUDA_PATH (
-    for %%F in ("%CUDA_PATH%\bin\nvrtc64_*.dll") do (
-        if exist "%%~fF" set "CUDA_NVRTC_FOUND=%%~fF"
+rem CUDA_PATH is the fastest/most reliable path when NVIDIA configured it.
+if defined CUDA_PATH if exist "%CUDA_PATH%\bin" (
+    for /f "delims=" %%N in ('dir /b /s /a-d "%CUDA_PATH%\bin\nvrtc64_*.dll" 2^>nul') do (
+        if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
     )
 )
 
+rem Search every installed Toolkit version recursively. This also handles
+rem layouts that differ from the usual vXX.X\bin location.
 if not defined CUDA_NVRTC_FOUND if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
-    for /d %%D in ("%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*") do (
-        for %%F in ("%%~fD\bin\nvrtc64_*.dll") do (
-            if exist "%%~fF" set "CUDA_NVRTC_FOUND=%%~fF"
-        )
+    for /f "delims=" %%N in ('dir /b /s /a-d "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\nvrtc64_*.dll" 2^>nul') do (
+        if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
     )
 )
 
+rem Fall back to PATH.
 if not defined CUDA_NVRTC_FOUND (
-    for %%F in (nvrtc64_*.dll) do (
-        for /f "delims=" %%N in ('where %%F 2^>nul') do (
-            if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
-        )
+    for /f "delims=" %%N in ('where nvrtc64_*.dll 2^>nul') do (
+        if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
     )
 )
 
