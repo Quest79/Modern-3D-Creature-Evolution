@@ -298,8 +298,7 @@ fn resize_segment(
     let segment = genome.segments.get_mut(index)?;
     let old = segment.half_extents[axis];
     let factor = rng.range_f32(0.70, 1.35);
-    segment.half_extents[axis] =
-        (old * factor).clamp(anchor_floor, config.max_half_extent);
+    segment.half_extents[axis] = (old * factor).clamp(anchor_floor, config.max_half_extent);
 
     Some(MutationRecord {
         kind: MutationKind::ResizeSegment,
@@ -360,8 +359,8 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
     // Stiffness and damping are solver/controller gains, not biological strength
     // traits. Strength evolution changes requested torque, while runtime enforces
     // geometry-scaled muscle stress and power ceilings.
-    joint.motor_max_torque = (joint.motor_max_torque * rng.range_f32(0.70, 1.40))
-        .clamp(0.0, biological_torque_limit);
+    joint.motor_max_torque =
+        (joint.motor_max_torque * rng.range_f32(0.70, 1.40)).clamp(0.0, biological_torque_limit);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMotor,
@@ -375,16 +374,14 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
 fn change_joint_limits(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
-    let half_width = ((joint.limits_radians[1] - joint.limits_radians[0])
-        * 0.5
-        * rng.range_f32(0.70, 1.30))
-    .clamp(0.005, std::f32::consts::FRAC_PI_2);
-    let center = ((joint.limits_radians[0] + joint.limits_radians[1]) * 0.5
-        + rng.signed(0.12))
-    .clamp(
-        -std::f32::consts::PI + half_width,
-        std::f32::consts::PI - half_width,
-    );
+    let half_width =
+        ((joint.limits_radians[1] - joint.limits_radians[0]) * 0.5 * rng.range_f32(0.70, 1.30))
+            .clamp(0.005, std::f32::consts::FRAC_PI_2);
+    let center = ((joint.limits_radians[0] + joint.limits_radians[1]) * 0.5 + rng.signed(0.12))
+        .clamp(
+            -std::f32::consts::PI + half_width,
+            std::f32::consts::PI - half_width,
+        );
 
     joint.limits_radians = [center - half_width, center + half_width];
 
@@ -432,8 +429,7 @@ fn move_joint_anchor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option
     let tangent_axes: Vec<usize> = (0..3).filter(|axis| *axis != normal_axis).collect();
     let axis = tangent_axes[rng.range_usize(tangent_axes.len())];
 
-    let maximum_step =
-        parent.half_extents[axis].min(child.half_extents[axis]) * 0.10;
+    let maximum_step = parent.half_extents[axis].min(child.half_extents[axis]) * 0.10;
     let requested_delta = rng.signed(maximum_step);
     let minimum_delta = (-parent.half_extents[axis] - parent_anchor[axis])
         .max(-child.half_extents[axis] - child_anchor[axis]);
