@@ -113,8 +113,14 @@ impl PackedCreatureBatch {
         _max_joints: usize,
     ) -> Result<Self, String> {
         let world_count = genomes.len();
-        let part_slots = genomes.iter().map(|genome| genome.segments.len()).sum::<usize>();
-        let joint_slots = genomes.iter().map(|genome| genome.joints.len()).sum::<usize>();
+        let part_slots = genomes
+            .iter()
+            .map(|genome| genome.segments.len())
+            .sum::<usize>();
+        let joint_slots = genomes
+            .iter()
+            .map(|genome| genome.joints.len())
+            .sum::<usize>();
         let mut packed = Self {
             world_count,
             part_count: vec![0; world_count],
@@ -1326,8 +1332,7 @@ mod platform {
                 (&mut weight_energy as *mut f32).cast::<c_void>(),
             ];
 
-            let grid_size =
-                (launch_count as u32).div_ceil(CUDA_CREATURES_PER_BLOCK);
+            let grid_size = (launch_count as u32).div_ceil(CUDA_CREATURES_PER_BLOCK);
             check_cuda(
                 unsafe {
                     (api.launch_kernel)(
