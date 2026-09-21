@@ -469,7 +469,9 @@ mod platform {
     type CuDeviceGet = unsafe extern "system" fn(*mut CuDevice, i32) -> CuResult;
     type CuCtxCreate = unsafe extern "system" fn(*mut CuContext, u32, CuDevice) -> CuResult;
     type CuCtxDestroy = unsafe extern "system" fn(CuContext) -> CuResult;
-    type CuCtxSynchronize = unsafe extern "system" fn() -> CuResult;
+    type CuStreamCreate = unsafe extern "system" fn(*mut CuStream, u32) -> CuResult;
+    type CuStreamDestroy = unsafe extern "system" fn(CuStream) -> CuResult;
+    type CuStreamSynchronize = unsafe extern "system" fn(CuStream) -> CuResult;
     type CuMemAlloc = unsafe extern "system" fn(*mut CuDevicePtr, usize) -> CuResult;
     type CuMemFree = unsafe extern "system" fn(CuDevicePtr) -> CuResult;
     type CuMemcpyHtoD = unsafe extern "system" fn(CuDevicePtr, *const c_void, usize) -> CuResult;
@@ -562,7 +564,9 @@ mod platform {
         device_get: CuDeviceGet,
         ctx_create: CuCtxCreate,
         ctx_destroy: CuCtxDestroy,
-        ctx_synchronize: CuCtxSynchronize,
+        stream_create: CuStreamCreate,
+        stream_destroy: CuStreamDestroy,
+        stream_synchronize: CuStreamSynchronize,
         mem_alloc: CuMemAlloc,
         mem_free: CuMemFree,
         memcpy_htod: CuMemcpyHtoD,
@@ -600,7 +604,9 @@ mod platform {
                 device_get: load!("cuDeviceGet", CuDeviceGet),
                 ctx_create: load!("cuCtxCreate_v2", CuCtxCreate),
                 ctx_destroy: load!("cuCtxDestroy_v2", CuCtxDestroy),
-                ctx_synchronize: load!("cuCtxSynchronize", CuCtxSynchronize),
+                stream_create: load!("cuStreamCreate", CuStreamCreate),
+                stream_destroy: load!("cuStreamDestroy_v2", CuStreamDestroy),
+                stream_synchronize: load!("cuStreamSynchronize", CuStreamSynchronize),
                 mem_alloc: load!("cuMemAlloc_v2", CuMemAlloc),
                 mem_free: load!("cuMemFree_v2", CuMemFree),
                 memcpy_htod: load!("cuMemcpyHtoD_v2", CuMemcpyHtoD),
@@ -757,6 +763,21 @@ mod platform {
             if !self.context.is_null() {
                 unsafe {
                     let _ = (self.api.ctx_destroy)(self.context);
+                }
+            }
+        }
+    }
+
+    struct StreamGuard<'a> {
+        api: &'a CudaApi,
+        stream: CuStream,
+    }
+
+    impl Drop for StreamGuard<'_> {
+        fn drop(&mut self) {
+            if !self.stream.is_null() {
+                unsafe {
+                    let _ = (self.api.stream_destroy)(self.stream);
                 }
             }
         }
@@ -1194,7 +1215,6 @@ mod platform {
         let mut p_out_energy = d_out_energy.pointer;
         let mut p_out_unstable = d_out_unstable.pointer;
 
-        let mut world_count_arg = world_count as u32;
         let mut max_parts_arg = packed.max_parts as u32;
         let mut max_joints_arg = packed.max_joints as u32;
         let mut dt = simulation.dt;
@@ -1208,78 +1228,113 @@ mod platform {
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
 
-        let mut params = [
-            (&mut p_part_count as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_joint_count as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_mass as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_inv_mass as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_friction as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_parent as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_child as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_axis as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_rest_relative as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_limit_min as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_limit_max as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_inertia as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_biological_torque as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_biological_power as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_requested_torque as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_brain_start as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_brain_count as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_op_code as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_op_index as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_op_a as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_op_b as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_state_position as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_state_velocity as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_state_contact as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_state_angle as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_state_angvel as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_score as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_distance as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_speed as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_upright as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut world_count_arg as *mut u32).cast::<c_void>(),
-            (&mut max_parts_arg as *mut u32).cast::<c_void>(),
-            (&mut max_joints_arg as *mut u32).cast::<c_void>(),
-            (&mut dt as *mut f32).cast::<c_void>(),
-            (&mut steps as *mut u32).cast::<c_void>(),
-            (&mut gravity_y as *mut f32).cast::<c_void>(),
-            (&mut ground_y as *mut f32).cast::<c_void>(),
-            (&mut activation as *mut f32).cast::<c_void>(),
-            (&mut weight_distance as *mut f32).cast::<c_void>(),
-            (&mut weight_speed as *mut f32).cast::<c_void>(),
-            (&mut weight_upright as *mut f32).cast::<c_void>(),
-            (&mut weight_stability as *mut f32).cast::<c_void>(),
-            (&mut weight_energy as *mut f32).cast::<c_void>(),
-        ];
+        // One CUDA thread simulates one creature. With the old 128-thread
+        // blocks, a 1000-creature population produced only eight blocks, leaving
+        // much of a large GPU idle. Use one-warp blocks and keep three independent
+        // kernel ranges in flight so the driver can fill otherwise-idle SMs.
+        const CUDA_CONCURRENT_LANES: usize = 3;
+        const CUDA_BLOCK_SIZE: u32 = 32;
 
-        let block_size = 128_u32;
-        let grid_size = (world_count as u32).div_ceil(block_size);
-        check_cuda(
-            unsafe {
-                (api.launch_kernel)(
-                    function,
-                    grid_size,
-                    1,
-                    1,
-                    block_size,
-                    1,
-                    1,
-                    0,
-                    null_mut(),
-                    params.as_mut_ptr(),
-                    null_mut(),
-                )
-            },
-            "cuLaunchKernel(simulate_creatures)",
-        )?;
-        check_cuda(unsafe { (api.ctx_synchronize)() }, "cuCtxSynchronize")?;
+        let lane_count = world_count.min(CUDA_CONCURRENT_LANES).max(1);
+        let mut streams = Vec::with_capacity(lane_count);
+        for _ in 0..lane_count {
+            let mut stream = null_mut();
+            check_cuda(
+                unsafe { (api.stream_create)(&mut stream, 0) },
+                "cuStreamCreate",
+            )?;
+            streams.push(StreamGuard { api, stream });
+        }
+
+        for (lane, stream) in streams.iter().enumerate() {
+            let start = world_count * lane / lane_count;
+            let end = world_count * (lane + 1) / lane_count;
+            let launch_count = end - start;
+            if launch_count == 0 {
+                continue;
+            }
+
+            let mut world_start_arg = start as u32;
+            let mut launch_count_arg = launch_count as u32;
+            let mut params = [
+                (&mut p_part_count as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_joint_count as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_mass as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_inv_mass as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_friction as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_parent as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_child as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_axis as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_rest_relative as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_limit_min as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_limit_max as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_inertia as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_biological_torque as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_biological_power as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_requested_torque as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_brain_start as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_brain_count as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_op_code as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_op_index as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_op_a as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_op_b as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_position as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_velocity as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_contact as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_angle as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_angvel as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_score as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_distance as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_speed as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_upright as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut world_start_arg as *mut u32).cast::<c_void>(),
+                (&mut launch_count_arg as *mut u32).cast::<c_void>(),
+                (&mut max_parts_arg as *mut u32).cast::<c_void>(),
+                (&mut max_joints_arg as *mut u32).cast::<c_void>(),
+                (&mut dt as *mut f32).cast::<c_void>(),
+                (&mut steps as *mut u32).cast::<c_void>(),
+                (&mut gravity_y as *mut f32).cast::<c_void>(),
+                (&mut ground_y as *mut f32).cast::<c_void>(),
+                (&mut activation as *mut f32).cast::<c_void>(),
+                (&mut weight_distance as *mut f32).cast::<c_void>(),
+                (&mut weight_speed as *mut f32).cast::<c_void>(),
+                (&mut weight_upright as *mut f32).cast::<c_void>(),
+                (&mut weight_stability as *mut f32).cast::<c_void>(),
+                (&mut weight_energy as *mut f32).cast::<c_void>(),
+            ];
+
+            let grid_size = (launch_count as u32).div_ceil(CUDA_BLOCK_SIZE);
+            check_cuda(
+                unsafe {
+                    (api.launch_kernel)(
+                        function,
+                        grid_size,
+                        1,
+                        1,
+                        CUDA_BLOCK_SIZE,
+                        1,
+                        1,
+                        0,
+                        stream.stream,
+                        params.as_mut_ptr(),
+                        null_mut(),
+                    )
+                },
+                "cuLaunchKernel(simulate_creatures)",
+            )?;
+        }
+
+        for stream in &streams {
+            check_cuda(
+                unsafe { (api.stream_synchronize)(stream.stream) },
+                "cuStreamSynchronize",
+            )?;
+        }
 
         let mut score = vec![0.0; world_count];
         let mut distance = vec![0.0; world_count];
@@ -1412,7 +1467,8 @@ extern "C" __global__ void simulate_creatures(
     float* out_stability,
     float* out_energy,
     unsigned* out_unstable,
-    unsigned world_count,
+    unsigned world_start,
+    unsigned launch_world_count,
     unsigned max_parts,
     unsigned max_joints,
     float dt,
@@ -1426,8 +1482,9 @@ extern "C" __global__ void simulate_creatures(
     float weight_stability,
     float weight_energy
 ) {
-    unsigned world = blockIdx.x * blockDim.x + threadIdx.x;
-    if (world >= world_count) return;
+    unsigned local_world = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local_world >= launch_world_count) return;
+    unsigned world = world_start + local_world;
 
     unsigned pc = part_count[world];
     unsigned jc = joint_count[world];
