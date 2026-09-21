@@ -771,9 +771,8 @@ mod platform {
     }
 
     type RuntimeCacheKey = (u32, i32, i32, bool);
-    static CUDA_RUNTIME_CACHE: OnceLock<
-        Mutex<HashMap<RuntimeCacheKey, Arc<Mutex<CudaRuntime>>>>,
-    > = OnceLock::new();
+    static CUDA_RUNTIME_CACHE: OnceLock<Mutex<HashMap<RuntimeCacheKey, Arc<Mutex<CudaRuntime>>>>> =
+        OnceLock::new();
 
     struct CudaRuntime {
         api: CudaApi,
@@ -1194,8 +1193,7 @@ mod platform {
         device_info: &CudaDeviceInfo,
         global_start: usize,
     ) -> Result<DeviceAssignmentResult, String> {
-        let runtime =
-            get_or_create_runtime(device_info, accelerator.throughput_mode)?;
+        let runtime = get_or_create_runtime(device_info, accelerator.throughput_mode)?;
         let mut runtime = runtime
             .lock()
             .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
@@ -1210,8 +1208,7 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_results =
-                run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            let chunk_results = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
             all_results.extend(
                 chunk_results
                     .into_iter()
@@ -1264,8 +1261,7 @@ mod platform {
         let mut p_parent = workspace.upload(api, "parent", &packed.parent)?;
         let mut p_child = workspace.upload(api, "child", &packed.child)?;
         let mut p_axis = workspace.upload(api, "axis", &packed.axis)?;
-        let mut p_rest_relative =
-            workspace.upload(api, "rest_relative", &packed.rest_relative)?;
+        let mut p_rest_relative = workspace.upload(api, "rest_relative", &packed.rest_relative)?;
         let mut p_limit_min = workspace.upload(api, "limit_min", &packed.limit_min)?;
         let mut p_limit_max = workspace.upload(api, "limit_max", &packed.limit_max)?;
         let mut p_inertia = workspace.upload(api, "inertia", &packed.inertia)?;
