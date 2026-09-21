@@ -8,7 +8,7 @@ use crate::{
     CheckpointCandidate, ConditionContext, CreatureGenome, DiversitySummary,
     EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
-    MutationRecord, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
+    MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
     TrialAggregation, crossover_brain_subtree, discover_cuda_devices, evaluate_fitness,
     mutate_genome, run_cuda_creature_batch,
 };
@@ -321,6 +321,7 @@ where
         }
 
         let evaluation_pool = expand_evaluation_pool(
+            &pool,
             &population,
             evaluation_pool_target,
             config,
@@ -426,6 +427,7 @@ where
                 .apply_to(generation + 1, &active_condition_ids, &mut next_settings);
             validate_effective_settings(&next_settings)?;
             population = breed_next_generation(
+                &pool,
                 &evaluated,
                 config,
                 &next_settings,
@@ -592,7 +594,38 @@ fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
     requested.max(saturation_target).min(1_000_000)
 }
 
+#[derive(Clone)]
+struct MutationPlan {
+    parent_ids: Vec<u64>,
+    base: CreatureGenome,
+    seeds: [u64; 5],
+}
+
+fn execute_mutation_plans(
+    pool: &rayon::ThreadPool,
+    plans: &[MutationPlan],
+    mutations_per_child: usize,
+    mutation: &MutationConfig,
+) -> Vec<Option<MutationResult>> {
+    pool.install(|| {
+        plans
+            .par_iter()
+            .map(|plan| {
+                for seed in plan.seeds {
+                    if let Ok(result) =
+                        mutate_genome(&plan.base, seed, mutations_per_child, mutation)
+                    {
+                        return Some(result);
+                    }
+                }
+                None
+            })
+            .collect()
+    })
+}
+
 fn expand_evaluation_pool(
+    pool: &rayon::ThreadPool,
     population: &[Candidate],
     target_size: usize,
     config: &EvolutionConfig,
@@ -609,49 +642,77 @@ fn expand_evaluation_pool(
     expanded.extend(population.iter().cloned());
 
     while expanded.len() < target_size {
-        let parent = &population[rng.range_usize(population.len())];
-        let mut parent_ids = vec![parent.individual_id];
+        let needed = target_size - expanded.len();
+        let mut plans = Vec::with_capacity(needed);
 
-        let base = if population.len() > 1 && rng.chance(config.crossover_chance) {
-            let donor = &population[rng.range_usize(population.len())];
-            if donor.individual_id != parent.individual_id {
-                parent_ids.push(donor.individual_id);
-            }
-            crossover_brain_subtree(&parent.genome, &donor.genome, rng)
-        } else {
-            parent.genome.clone()
-        };
+        // Selection/crossover planning remains serial so a fixed seed produces
+        // the exact same parent choices and seed stream. The expensive mutation
+        // and validation work is executed in parallel below.
+        for _ in 0..needed {
+            let parent = &population[rng.range_usize(population.len())];
+            let mut parent_ids = vec![parent.individual_id];
 
-        let mut accepted = None;
-        for _ in 0..5 {
-            if let Ok(mutation_result) = mutate_genome(
-                &base,
-                rng.next_seed(),
-                settings.mutations_per_child,
-                &settings.mutation,
-            ) {
-                accepted = Some(mutation_result);
+            let base = if population.len() > 1 && rng.chance(config.crossover_chance) {
+                let donor = &population[rng.range_usize(population.len())];
+                if donor.individual_id != parent.individual_id {
+                    parent_ids.push(donor.individual_id);
+                }
+                crossover_brain_subtree(&parent.genome, &donor.genome, rng)
+            } else {
+                parent.genome.clone()
+            };
+
+            plans.push(MutationPlan {
+                parent_ids,
+                base,
+                seeds: [
+                    rng.next_seed(),
+                    rng.next_seed(),
+                    rng.next_seed(),
+                    rng.next_seed(),
+                    rng.next_seed(),
+                ],
+            });
+        }
+
+        let results = execute_mutation_plans(
+            pool,
+            &plans,
+            settings.mutations_per_child,
+            &settings.mutation,
+        );
+
+        let mut accepted_any = false;
+        for (plan, result) in plans.into_iter().zip(results) {
+            let Some(mutation_result) = result else {
+                continue;
+            };
+            accepted_any = true;
+
+            let individual_id = *next_individual_id;
+            *next_individual_id += 1;
+            expanded.push(Candidate {
+                individual_id,
+                parent_ids: plan.parent_ids,
+                genome: mutation_result.genome,
+                mutations: mutation_result.mutations,
+            });
+
+            if expanded.len() == target_size {
                 break;
             }
         }
 
-        let Some(mutation_result) = accepted else {
-            continue;
-        };
-
-        let individual_id = *next_individual_id;
-        *next_individual_id += 1;
-        expanded.push(Candidate {
-            individual_id,
-            parent_ids,
-            genome: mutation_result.genome,
-            mutations: mutation_result.mutations,
-        });
+        if !accepted_any {
+            return Err(
+                "could not generate any valid CUDA evaluation offspring after five retries each"
+                    .into(),
+            );
+        }
     }
 
     Ok(expanded)
 }
-
 fn evaluate_population(
     pool: &rayon::ThreadPool,
     population: &[Candidate],
@@ -895,6 +956,7 @@ fn validate_effective_settings(settings: &EffectiveEvolutionSettings) -> Result<
 }
 
 fn breed_next_generation(
+    pool: &rayon::ThreadPool,
     evaluated: &[EvaluatedCreature],
     config: &EvolutionConfig,
     next_settings: &EffectiveEvolutionSettings,
@@ -920,53 +982,75 @@ fn breed_next_generation(
     }
 
     while next.len() < next_settings.population_size {
-        let parent_index = tournament_select(evaluated, tournament_size, rng);
-        let parent = &evaluated[parent_index];
-        let mut parent_ids = vec![parent.individual_id];
+        let needed = next_settings.population_size - next.len();
+        let mut plans = Vec::with_capacity(needed);
 
-        let base = if rng.chance(config.crossover_chance) {
-            let donor_index = tournament_select(evaluated, tournament_size, rng);
-            let donor = &evaluated[donor_index];
-            if donor.individual_id != parent.individual_id {
-                parent_ids.push(donor.individual_id);
-            }
-            crossover_brain_subtree(&parent.genome, &donor.genome, rng)
-        } else {
-            parent.genome.clone()
-        };
+        for _ in 0..needed {
+            let parent_index = tournament_select(evaluated, tournament_size, rng);
+            let parent = &evaluated[parent_index];
+            let mut parent_ids = vec![parent.individual_id];
 
-        let mut accepted = None;
-        for _ in 0..5 {
-            if let Ok(mutation_result) = mutate_genome(
-                &base,
-                rng.next_seed(),
-                next_settings.mutations_per_child,
-                &next_settings.mutation,
-            ) {
-                accepted = Some(mutation_result);
+            let base = if rng.chance(config.crossover_chance) {
+                let donor_index = tournament_select(evaluated, tournament_size, rng);
+                let donor = &evaluated[donor_index];
+                if donor.individual_id != parent.individual_id {
+                    parent_ids.push(donor.individual_id);
+                }
+                crossover_brain_subtree(&parent.genome, &donor.genome, rng)
+            } else {
+                parent.genome.clone()
+            };
+
+            plans.push(MutationPlan {
+                parent_ids,
+                base,
+                seeds: [
+                    rng.next_seed(),
+                    rng.next_seed(),
+                    rng.next_seed(),
+                    rng.next_seed(),
+                    rng.next_seed(),
+                ],
+            });
+        }
+
+        let results = execute_mutation_plans(
+            pool,
+            &plans,
+            next_settings.mutations_per_child,
+            &next_settings.mutation,
+        );
+
+        let mut accepted_any = false;
+        for (plan, result) in plans.into_iter().zip(results) {
+            let Some(mutation_result) = result else {
+                continue;
+            };
+            accepted_any = true;
+
+            let individual_id = *next_individual_id;
+            *next_individual_id += 1;
+            next.push(Candidate {
+                individual_id,
+                parent_ids: plan.parent_ids,
+                genome: mutation_result.genome,
+                mutations: mutation_result.mutations,
+            });
+
+            if next.len() == next_settings.population_size {
                 break;
             }
         }
 
-        let Some(mutation_result) = accepted else {
-            // Five invalid variants from this parent/base: discard this
-            // offspring and start a fresh selection without aborting the run.
-            continue;
-        };
-
-        let individual_id = *next_individual_id;
-        *next_individual_id += 1;
-        next.push(Candidate {
-            individual_id,
-            parent_ids,
-            genome: mutation_result.genome,
-            mutations: mutation_result.mutations,
-        });
+        if !accepted_any {
+            return Err(
+                "could not generate any valid offspring after five retries each".into(),
+            );
+        }
     }
 
     Ok(next)
 }
-
 fn analysis_species_id(genome: &CreatureGenome) -> u64 {
     let segment_count = genome.segments.len() as u64;
     let brain_bucket = (genome.brain.node_count() / 8) as u64;
