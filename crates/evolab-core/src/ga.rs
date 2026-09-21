@@ -9,8 +9,8 @@ use crate::{
     EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
     MutationRecord, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    TrialAggregation, crossover_brain_subtree, discover_cuda_devices, evaluate_fitness,
-    mutate_genome,
+    TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
+    run_cuda_creature_batch,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -531,28 +531,58 @@ fn evaluate_population(
     accelerator: &AcceleratorConfig,
 ) -> Result<(Vec<EvaluatedCreature>, ExecutionPerformance), String> {
     let requested_mode = accelerator.mode;
-    let cuda_devices = match requested_mode {
-        AcceleratorMode::Cpu => Vec::new(),
-        AcceleratorMode::Auto | AcceleratorMode::Cuda => {
-            discover_cuda_devices().unwrap_or_default()
+
+    if requested_mode != AcceleratorMode::Cpu {
+        let mut gpu_genomes =
+            Vec::with_capacity(population.len() * settings.trials_per_creature);
+        for candidate in population {
+            for _ in 0..settings.trials_per_creature {
+                gpu_genomes.push(candidate.genome.clone());
+            }
         }
-    };
 
-    if requested_mode == AcceleratorMode::Cuda
-        && cuda_devices.is_empty()
-        && !accelerator.cpu_fallback
-    {
-        return Err("CUDA evolution was requested but no CUDA device is available".into());
-    }
+        match run_cuda_creature_batch(
+            &gpu_genomes,
+            &settings.simulation,
+            &settings.fitness,
+            accelerator,
+        ) {
+            Ok(batch) => {
+                let mut evaluated = Vec::with_capacity(population.len());
+                for (candidate_index, candidate) in population.iter().enumerate() {
+                    let start = candidate_index * settings.trials_per_creature;
+                    let end = start + settings.trials_per_creature;
+                    let result = aggregate_trials(
+                        &batch.fitness[start..end],
+                        settings.trial_aggregation,
+                    );
 
-    // The CUDA probe backend is real GPU compute, but full articulated-creature
-    // physics still uses the Rapier reference solver. Until the creature CUDA
-    // solver lands, accelerator modes explicitly fall back here rather than
-    // silently pretending the population ran on the GPU.
-    if requested_mode == AcceleratorMode::Cuda && !accelerator.cpu_fallback {
-        return Err(
-            "CUDA articulated-creature physics is not implemented yet; enable CPU fallback".into(),
-        );
+                    let mut trial_seeds = Vec::with_capacity(settings.trials_per_creature);
+                    for trial_index in 0..settings.trials_per_creature {
+                        let seed = if trial_index == 0 {
+                            settings.simulation.world.seed
+                        } else {
+                            trial_seed(settings.simulation.world.seed, trial_index)
+                        };
+                        trial_seeds.push(seed);
+                    }
+
+                    evaluated.push(EvaluatedCreature {
+                        individual_id: candidate.individual_id,
+                        parent_ids: candidate.parent_ids.clone(),
+                        species_id: analysis_species_id(&candidate.genome),
+                        genome: candidate.genome.clone(),
+                        fitness: result.score,
+                        metrics: result.metrics,
+                        trial_seeds,
+                        mutations: candidate.mutations.clone(),
+                    });
+                }
+                return Ok((evaluated, batch.execution));
+            }
+            Err(error) if !accelerator.cpu_fallback => return Err(error),
+            Err(_) => {}
+        }
     }
 
     let started = std::time::Instant::now();
