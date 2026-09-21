@@ -1147,11 +1147,13 @@ mod platform {
         let packed =
             PackedCreatureBatch::pack(genomes, accelerator.max_parts, accelerator.max_joints)?;
         let world_count = packed.world_count;
-        let part_slots = world_count * packed.max_parts;
-        let joint_slots = world_count * packed.max_joints;
+        let part_slots = packed.inv_mass.len();
+        let joint_slots = packed.parent.len();
 
         let d_part_count = DeviceBuffer::copy_from(api, &packed.part_count)?;
         let d_joint_count = DeviceBuffer::copy_from(api, &packed.joint_count)?;
+        let d_part_base = DeviceBuffer::copy_from(api, &packed.part_base)?;
+        let d_joint_base = DeviceBuffer::copy_from(api, &packed.joint_base)?;
         let d_initial_position = DeviceBuffer::copy_from(api, &packed.initial_position)?;
         let d_half_extents = DeviceBuffer::copy_from(api, &packed.half_extents)?;
         let d_mass = DeviceBuffer::copy_from(api, &packed.mass)?;
@@ -1192,6 +1194,8 @@ mod platform {
 
         let mut p_part_count = d_part_count.pointer;
         let mut p_joint_count = d_joint_count.pointer;
+        let mut p_part_base = d_part_base.pointer;
+        let mut p_joint_base = d_joint_base.pointer;
         let mut p_initial_position = d_initial_position.pointer;
         let mut p_half_extents = d_half_extents.pointer;
         let mut p_mass = d_mass.pointer;
@@ -1228,8 +1232,6 @@ mod platform {
         let mut p_out_energy = d_out_energy.pointer;
         let mut p_out_unstable = d_out_unstable.pointer;
 
-        let mut max_parts_arg = packed.max_parts as u32;
-        let mut max_joints_arg = packed.max_joints as u32;
         let mut dt = simulation.dt;
         let mut steps = simulation.step_count() as u32;
         let mut gravity_y = simulation.world.gravity[1];
@@ -1241,12 +1243,13 @@ mod platform {
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
 
-        // One CUDA block now owns one creature. Threads inside that block split
-        // brain evaluation, joint physics, force generation, body integration,
-        // collision handling, and reductions. A 1000-creature generation therefore
-        // launches 1000 independent blocks instead of only ~8 underfilled blocks.
+        // Four 8-lane creature groups fit inside each warp. With a 64-thread
+        // block that is eight creatures per block, so small 6-8 joint/segment
+        // bodies use most SIMD lanes instead of idling ~95% of a 128-thread block.
         const CUDA_CONCURRENT_LANES: usize = 3;
-        const CUDA_BLOCK_SIZE: u32 = 128;
+        const CUDA_GROUP_SIZE: u32 = 8;
+        const CUDA_BLOCK_SIZE: u32 = 64;
+        const CUDA_CREATURES_PER_BLOCK: u32 = CUDA_BLOCK_SIZE / CUDA_GROUP_SIZE;
 
         let lane_count = world_count.min(CUDA_CONCURRENT_LANES).max(1);
         let mut streams = Vec::with_capacity(lane_count);
@@ -1272,6 +1275,8 @@ mod platform {
             let mut params = [
                 (&mut p_part_count as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_joint_count as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_part_base as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_joint_base as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_mass as *mut CuDevicePtr).cast::<c_void>(),
@@ -1309,8 +1314,6 @@ mod platform {
                 (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut world_start_arg as *mut u32).cast::<c_void>(),
                 (&mut launch_count_arg as *mut u32).cast::<c_void>(),
-                (&mut max_parts_arg as *mut u32).cast::<c_void>(),
-                (&mut max_joints_arg as *mut u32).cast::<c_void>(),
                 (&mut dt as *mut f32).cast::<c_void>(),
                 (&mut steps as *mut u32).cast::<c_void>(),
                 (&mut gravity_y as *mut f32).cast::<c_void>(),
@@ -1323,11 +1326,13 @@ mod platform {
                 (&mut weight_energy as *mut f32).cast::<c_void>(),
             ];
 
+            let grid_size =
+                (launch_count as u32).div_ceil(CUDA_CREATURES_PER_BLOCK);
             check_cuda(
                 unsafe {
                     (api.launch_kernel)(
                         function,
-                        launch_count as u32,
+                        grid_size,
                         1,
                         1,
                         CUDA_BLOCK_SIZE,
@@ -1415,7 +1420,7 @@ extern "C" __device__ float eval_brain(
     unsigned joint_base,
     unsigned root_slot
 ) {
-    float stack[64];
+    float stack[16];
     int sp = 0;
     for (unsigned n = 0; n < count; ++n) {
         unsigned i = start + n;
@@ -1440,7 +1445,7 @@ extern "C" __device__ float eval_brain(
         else if (code == 20 && sp >= 1) stack[sp - 1] = sinf(stack[sp - 1]);
         else if (code == 21 && sp >= 1) stack[sp - 1] = cosf(stack[sp - 1]);
         else if (code == 22 && sp >= 1) stack[sp - 1] = clampf(stack[sp - 1], op_a[i], op_b[i]);
-        if (sp > 63) sp = 63;
+        if (sp > 15) sp = 15;
     }
     return sp > 0 ? sane(stack[sp - 1]) : 0.0f;
 }
@@ -1448,6 +1453,8 @@ extern "C" __device__ float eval_brain(
 extern "C" __global__ void simulate_creatures(
     const unsigned* part_count,
     const unsigned* joint_count,
+    const unsigned* part_base_by_world,
+    const unsigned* joint_base_by_world,
     const float* initial_position,
     const float* half_extents,
     const float* mass,
@@ -1485,8 +1492,6 @@ extern "C" __global__ void simulate_creatures(
     unsigned* out_unstable,
     unsigned world_start,
     unsigned launch_world_count,
-    unsigned max_parts,
-    unsigned max_joints,
     float dt,
     unsigned steps,
     float gravity_y,
@@ -1498,23 +1503,28 @@ extern "C" __global__ void simulate_creatures(
     float weight_stability,
     float weight_energy
 ) {
-    // Cooperative layout: exactly one block owns one creature.
-    unsigned local_world = blockIdx.x;
+    // Eight-lane subwarps are a much better fit for the evolved creatures in
+    // this project (typically ~6-8 active joints/segments). Four creatures share
+    // each hardware warp and eight creatures share each 64-thread CUDA block.
+    const unsigned GROUP_SIZE = 8;
+    const unsigned CREATURES_PER_BLOCK = blockDim.x / GROUP_SIZE;
+    unsigned group_in_block = threadIdx.x / GROUP_SIZE;
+    unsigned lane = threadIdx.x & (GROUP_SIZE - 1);
+    unsigned local_world = blockIdx.x * CREATURES_PER_BLOCK + group_in_block;
     if (local_world >= launch_world_count) return;
+
     unsigned world = world_start + local_world;
-    unsigned tid = threadIdx.x;
+    unsigned warp_lane = threadIdx.x & 31u;
+    unsigned subgroup_base = warp_lane & ~(GROUP_SIZE - 1u);
+    unsigned subgroup_mask = 0xFFu << subgroup_base;
 
     unsigned pc = part_count[world];
     unsigned jc = joint_count[world];
-    unsigned part_base = world * max_parts;
-    unsigned joint_base = world * max_joints;
+    unsigned part_base = part_base_by_world[world];
+    unsigned joint_base = joint_base_by_world[world];
     unsigned root_slot = part_base;
 
-    __shared__ float reduction[128];
-    __shared__ unsigned block_unstable;
-
-    if (tid == 0) block_unstable = 0;
-    for (unsigned p = tid; p < pc; p += blockDim.x) {
+    for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
         unsigned slot = part_base + p;
         state_position[slot * 3 + 0] = initial_position[slot * 3 + 0];
         state_position[slot * 3 + 1] = initial_position[slot * 3 + 1];
@@ -1524,7 +1534,7 @@ extern "C" __global__ void simulate_creatures(
         state_velocity[slot * 3 + 2] = 0.0f;
         state_contact[slot] = 0.0f;
     }
-    for (unsigned j = tid; j < jc; j += blockDim.x) {
+    for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
         unsigned js = joint_base + j;
         state_angle[js] = 0.0f;
         state_angvel[js] = 0.0f;
@@ -1533,7 +1543,7 @@ extern "C" __global__ void simulate_creatures(
         joint_force[js * 3 + 1] = 0.0f;
         joint_force[js * 3 + 2] = 0.0f;
     }
-    __syncthreads();
+    __syncwarp(subgroup_mask);
 
     float start_x = state_position[root_slot * 3 + 0];
     float start_z = state_position[root_slot * 3 + 2];
@@ -1546,21 +1556,20 @@ extern "C" __global__ void simulate_creatures(
     float upright_sum = 0.0f;
     float stability_sum = 0.0f;
     float local_motor_work = 0.0f;
+    unsigned group_unstable = 0;
 
     for (unsigned step = 0; step < steps; ++step) {
         float time_seconds = (float)step * dt;
 
-        // Phase 1: gravity is embarrassingly parallel across body segments.
-        for (unsigned p = tid; p < pc; p += blockDim.x) {
+        for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
             unsigned slot = part_base + p;
             state_velocity[slot * 3 + 1] += gravity_y * dt;
         }
-        __syncthreads();
+        __syncwarp(subgroup_mask);
 
-        // Phase 2: evaluate every joint brain independently using the previous
-        // synchronized state. Targets are staged so joint updates cannot race
-        // against other brain reads.
-        for (unsigned j = tid; j < jc; j += blockDim.x) {
+        // Each lane owns one or more joint brains. With normal 6-8 joint
+        // creatures this keeps nearly the entire subgroup busy.
+        for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
             unsigned js = joint_base + j;
             float target = eval_brain(
                 brain_start[js], brain_count[js], op_code, op_index, op_a, op_b,
@@ -1569,11 +1578,9 @@ extern "C" __global__ void simulate_creatures(
             );
             state_target[js] = clampf(target, limit_min[js], limit_max[js]);
         }
-        __syncthreads();
+        __syncwarp(subgroup_mask);
 
-        // Phase 3: solve joint motors and generate one deterministic force vector
-        // per joint. No body velocities are written yet, avoiding write races.
-        for (unsigned j = tid; j < jc; j += blockDim.x) {
+        for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
             unsigned js = joint_base + j;
             unsigned pi = parent[js];
             unsigned ci = child[js];
@@ -1659,16 +1666,16 @@ extern "C" __global__ void simulate_creatures(
             joint_force[js * 3 + 1] = fy;
             joint_force[js * 3 + 2] = fz;
         }
-        __syncthreads();
+        __syncwarp(subgroup_mask);
 
-        // Phase 4: each body thread gathers forces from all connected joints in a
-        // fixed order. This keeps deterministic mode deterministic without atomics.
-        for (unsigned p = tid; p < pc; p += blockDim.x) {
+        int lane_unstable = 0;
+        for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
             unsigned slot = part_base + p;
             float fx = 0.0f;
             float fy = 0.0f;
             float fz = 0.0f;
 
+            // Deterministic fixed-order gather; no global atomics are required.
             for (unsigned j = 0; j < jc; ++j) {
                 unsigned js = joint_base + j;
                 if (parent[js] == p) {
@@ -1687,13 +1694,10 @@ extern "C" __global__ void simulate_creatures(
             state_velocity[slot * 3 + 0] += fx * impulse;
             state_velocity[slot * 3 + 1] += fy * impulse;
             state_velocity[slot * 3 + 2] += fz * impulse;
-
             state_position[slot * 3 + 0] += state_velocity[slot * 3 + 0] * dt;
             state_position[slot * 3 + 1] += state_velocity[slot * 3 + 1] * dt;
             state_position[slot * 3 + 2] += state_velocity[slot * 3 + 2] * dt;
 
-            // Preserve the previous contact value through brain evaluation above,
-            // then update it for the next physics step here.
             state_contact[slot] = 0.0f;
             float floor_y = ground_y + half_extents[slot * 3 + 1];
             if (state_position[slot * 3 + 1] < floor_y) {
@@ -1726,26 +1730,24 @@ extern "C" __global__ void simulate_creatures(
                 || fabsf(vy) > 10000.0f
                 || fabsf(vz) > 10000.0f
             ) {
-                atomicExch(&block_unstable, 1u);
+                lane_unstable = 1;
             }
         }
-        __syncthreads();
+        if (__any_sync(subgroup_mask, lane_unstable)) group_unstable = 1;
+        __syncwarp(subgroup_mask);
 
-        if (block_unstable) break;
+        if (group_unstable) break;
 
-        // Phase 5: deterministic block-wide reduction for stability.
         float omega_partial = 0.0f;
-        for (unsigned j = tid; j < jc; j += blockDim.x)
+        for (unsigned j = lane; j < jc; j += GROUP_SIZE)
             omega_partial += fabsf(state_angvel[joint_base + j]);
-        reduction[tid] = omega_partial;
-        __syncthreads();
 
-        for (unsigned stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-            if (tid < stride) reduction[tid] += reduction[tid + stride];
-            __syncthreads();
-        }
+        for (unsigned offset = GROUP_SIZE / 2; offset > 0; offset >>= 1)
+            omega_partial += __shfl_down_sync(
+                subgroup_mask, omega_partial, offset, GROUP_SIZE
+            );
 
-        if (tid == 0) {
+        if (lane == 0) {
             float rvx = state_velocity[root_slot * 3 + 0];
             float rvz = state_velocity[root_slot * 3 + 2];
             speed_sum += sqrtf(rvx * rvx + rvz * rvz);
@@ -1757,23 +1759,20 @@ extern "C" __global__ void simulate_creatures(
                 1.0f
             );
 
-            float omega_mean = jc > 0 ? reduction[0] / (float)jc : 0.0f;
+            float omega_mean = jc > 0 ? omega_partial / (float)jc : 0.0f;
             stability_sum += 1.0f / (1.0f + omega_mean);
         }
-        __syncthreads();
+        __syncwarp(subgroup_mask);
     }
 
-    // Deterministic reduction of motor work accumulated by each block thread.
-    reduction[tid] = local_motor_work;
-    __syncthreads();
-    for (unsigned stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) reduction[tid] += reduction[tid + stride];
-        __syncthreads();
-    }
+    for (unsigned offset = GROUP_SIZE / 2; offset > 0; offset >>= 1)
+        local_motor_work += __shfl_down_sync(
+            subgroup_mask, local_motor_work, offset, GROUP_SIZE
+        );
 
-    if (tid != 0) return;
+    if (lane != 0) return;
 
-    if (block_unstable) {
+    if (group_unstable) {
         out_unstable[world] = 1;
         out_score[world] = -1.0e30f;
         out_distance[world] = 0.0f;
@@ -1792,7 +1791,7 @@ extern "C" __global__ void simulate_creatures(
     float upright = upright_sum / denom;
     float stability = stability_sum / denom;
     float simulated_seconds = fmaxf((float)steps * dt, 1.0e-8f);
-    float energy = reduction[0] / simulated_seconds;
+    float energy = local_motor_work / simulated_seconds;
     float score = weight_distance * distance
         + weight_speed * average_speed
         + weight_upright * upright
