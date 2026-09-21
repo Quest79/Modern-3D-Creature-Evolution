@@ -911,8 +911,7 @@ mod tests {
             if let Ok(result) = mutate_genome(&source, seed, 100, &config) {
                 for joint in &result.genome.joints {
                     assert!(
-                        joint.limits_radians[1] - joint.limits_radians[0]
-                            <= std::f32::consts::PI
+                        joint.limits_radians[1] - joint.limits_radians[0] <= std::f32::consts::PI
                     );
                 }
             }
