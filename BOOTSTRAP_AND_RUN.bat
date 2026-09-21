@@ -287,25 +287,40 @@ exit /b 0
 :FindNvrtc
 set "CUDA_NVRTC_FOUND="
 
-rem CUDA_PATH is the fastest/most reliable path when NVIDIA configured it.
-if defined CUDA_PATH if exist "%CUDA_PATH%\bin" (
-    for /f "delims=" %%N in ('dir /b /s /a-d "%CUDA_PATH%\bin\nvrtc64_*.dll" 2^>nul') do (
-        if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
-    )
+rem This application is x64. Never select CUDA's ARM64 NVRTC DLL: Windows
+rem reports error 193 (bad executable format) if an ARM64 DLL is loaded here.
+if defined CUDA_PATH (
+    call :FindNvrtcInToolkit "%CUDA_PATH%"
 )
 
-rem Search every installed Toolkit version recursively. This also handles
-rem layouts that differ from the usual vXX.X\bin location.
+rem Search installed Toolkit versions, newest first, but only x64 locations.
 if not defined CUDA_NVRTC_FOUND if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
-    for /f "delims=" %%N in ('dir /b /s /a-d "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\nvrtc64_*.dll" 2^>nul') do (
+    for /f "delims=" %%D in ('dir /b /ad /o-n "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*" 2^>nul') do (
+        if not defined CUDA_NVRTC_FOUND call :FindNvrtcInToolkit "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\%%D"
+    )
+)
+
+rem Fall back to PATH, explicitly rejecting ARM64 paths.
+if not defined CUDA_NVRTC_FOUND (
+    for /f "delims=" %%N in ('where nvrtc64_*.dll 2^>nul ^| findstr /V /I /C:"\arm64\" /C:"\aarch64\"') do (
         if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
     )
 )
 
-rem Fall back to PATH.
+exit /b 0
+
+:FindNvrtcInToolkit
+set "NVRTC_TOOLKIT=%~1"
+
+rem Preferred NVIDIA x64 layout.
+for /f "delims=" %%N in ('dir /b /a-d "%NVRTC_TOOLKIT%\bin\nvrtc64_*.dll" 2^>nul') do (
+    if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%NVRTC_TOOLKIT%\bin\%%N"
+)
+
+rem Some layouts use an explicit x64 subdirectory.
 if not defined CUDA_NVRTC_FOUND (
-    for /f "delims=" %%N in ('where nvrtc64_*.dll 2^>nul') do (
-        if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
+    for /f "delims=" %%N in ('dir /b /a-d "%NVRTC_TOOLKIT%\bin\x64\nvrtc64_*.dll" 2^>nul') do (
+        if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%NVRTC_TOOLKIT%\bin\x64\%%N"
     )
 )
 
