@@ -503,13 +503,25 @@ fn initial_population(
     });
 
     while population.len() < settings.population_size {
-        let seed = rng.next_seed();
-        let mutation_result = mutate_genome(
-            ancestor,
-            seed,
-            settings.mutations_per_child,
-            &settings.mutation,
-        )?;
+        let mut accepted = None;
+        for _ in 0..5 {
+            let seed = rng.next_seed();
+            if let Ok(mutation_result) = mutate_genome(
+                ancestor,
+                seed,
+                settings.mutations_per_child,
+                &settings.mutation,
+            ) {
+                accepted = Some(mutation_result);
+                break;
+            }
+        }
+
+        let Some(mutation_result) = accepted else {
+            // Reject this offspring after five invalid attempts. The outer loop
+            // immediately starts a fresh offspring attempt instead of stopping evolution.
+            continue;
+        };
 
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
@@ -807,12 +819,24 @@ fn breed_next_generation(
             parent.genome.clone()
         };
 
-        let mutation_result = mutate_genome(
-            &base,
-            rng.next_seed(),
-            next_settings.mutations_per_child,
-            &next_settings.mutation,
-        )?;
+        let mut accepted = None;
+        for _ in 0..5 {
+            if let Ok(mutation_result) = mutate_genome(
+                &base,
+                rng.next_seed(),
+                next_settings.mutations_per_child,
+                &next_settings.mutation,
+            ) {
+                accepted = Some(mutation_result);
+                break;
+            }
+        }
+
+        let Some(mutation_result) = accepted else {
+            // Five invalid variants from this parent/base: discard this
+            // offspring and start a fresh selection without aborting the run.
+            continue;
+        };
 
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
