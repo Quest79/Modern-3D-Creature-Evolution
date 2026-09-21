@@ -97,9 +97,9 @@ impl TimelineChanges {
             return Err("timeline structural_mutation_chance must be between 0 and 1".into());
         }
         if let Some(value) = self.motor_strength_multiplier
-            && (!value.is_finite() || !(0.0..=20.0).contains(&value))
+            && (!value.is_finite() || !(0.0..=1.0).contains(&value))
         {
-            return Err("timeline motor_strength_multiplier must be between 0 and 20".into());
+            return Err("timeline motor_strength_multiplier is biological activation and must be between 0 and 1".into());
         }
         if let Some(value) = self.trial_duration_seconds
             && (!value.is_finite() || value <= 0.0)
