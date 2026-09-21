@@ -102,7 +102,7 @@ impl EvolutionConfig {
     }
 
     pub fn effective_evaluation_pool_size(&self) -> usize {
-        if self.accelerator.mode == AcceleratorMode::Cpu || self.evaluation_pool_size == 0 {
+        if self.accelerator.mode != AcceleratorMode::Cuda || self.evaluation_pool_size == 0 {
             self.population_size
         } else {
             self.evaluation_pool_size.max(self.population_size)
