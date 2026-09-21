@@ -1717,8 +1717,7 @@ fn migrate_legacy_biological_genome_value(value: &mut Value) {
                 segment.insert(
                     "density".to_string(),
                     Value::Number(
-                        serde_json::Number::from_f64(1_050.0)
-                            .expect("1050 is a valid JSON number"),
+                        serde_json::Number::from_f64(1_050.0).expect("1050 is a valid JSON number"),
                     ),
                 );
             }
@@ -1729,8 +1728,7 @@ fn migrate_legacy_biological_genome_value(value: &mut Value) {
                 segment.insert(
                     "friction".to_string(),
                     Value::Number(
-                        serde_json::Number::from_f64(2.1)
-                            .expect("2.1 is a valid JSON number"),
+                        serde_json::Number::from_f64(2.1).expect("2.1 is a valid JSON number"),
                     ),
                 );
             }
