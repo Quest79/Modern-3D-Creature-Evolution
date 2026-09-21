@@ -18,3 +18,7 @@ jobs:
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check Windows CUDA path
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo check --workspace --target x86_64-pc-windows-msvc
