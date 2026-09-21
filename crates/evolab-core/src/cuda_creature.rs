@@ -429,11 +429,13 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::{
+        collections::HashMap,
         ffi::{CString, c_char, c_void},
         marker::PhantomData,
         mem::{size_of, transmute},
         path::PathBuf,
         ptr::{null, null_mut},
+        sync::{Mutex, OnceLock},
         thread,
         time::Instant,
     };
@@ -458,6 +460,9 @@ mod platform {
 
     const CUDA_SUCCESS: CuResult = 0;
     const NVRTC_SUCCESS: NvrtcResult = 0;
+
+    type PtxCacheKey = (i32, i32, bool);
+    static PTX_CACHE: OnceLock<Mutex<HashMap<PtxCacheKey, Vec<u8>>>> = OnceLock::new();
 
     type CuInit = unsafe extern "system" fn(u32) -> CuResult;
     type CuDeviceGet = unsafe extern "system" fn(*mut CuDevice, i32) -> CuResult;
@@ -641,7 +646,7 @@ mod platform {
     }
 
     fn find_nvrtc_library() -> Option<PathBuf> {
-        let base = PathBuf::from(r"C:Program FilesNVIDIA GPU Computing ToolkitCUDA");
+        let base = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
         let mut versions = std::fs::read_dir(base)
             .ok()?
             .filter_map(Result::ok)
@@ -798,6 +803,21 @@ mod platform {
         minor: i32,
         throughput_mode: ThroughputMode,
     ) -> Result<Vec<u8>, String> {
+        let cache_key = (
+            major,
+            minor,
+            throughput_mode == ThroughputMode::MaxThroughput,
+        );
+        let cache = PTX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(ptx) = cache
+            .lock()
+            .map_err(|_| "CUDA PTX cache mutex was poisoned".to_string())?
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok(ptx);
+        }
+
         let api = NvrtcApi::load()?;
         let source = CString::new(CUDA_CREATURE_SOURCE).expect("CUDA source has no NUL");
         let name = CString::new("evolab_creature.cu").expect("static name");
@@ -864,6 +884,11 @@ mod platform {
             return Err(format!("nvrtcGetPTX failed with code {ptx_result}"));
         }
         drop(guard);
+
+        cache
+            .lock()
+            .map_err(|_| "CUDA PTX cache mutex was poisoned".to_string())?
+            .insert(cache_key, ptx.clone());
         Ok(ptx)
     }
 
