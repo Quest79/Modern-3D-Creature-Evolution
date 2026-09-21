@@ -418,7 +418,12 @@ impl CreatureGenome {
             .find(|segment| segment.id == joint.child_id)
             .ok_or_else(|| format!("missing child segment {}", joint.child_id))?;
 
-        let axis_length = joint.axis.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let axis_length = joint
+            .axis
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
         if !axis_length.is_finite() || axis_length <= 1.0e-8 {
             return Err("joint axis must be non-zero and finite".into());
         }
@@ -452,8 +457,7 @@ impl CreatureGenome {
             axis[0] * axis[0] * ixx + axis[1] * axis[1] * iyy + axis[2] * axis[2] * izz;
 
         let r_squared = anchor.iter().map(|value| value * value).sum::<f32>();
-        let r_dot_axis =
-            anchor[0] * axis[0] + anchor[1] * axis[1] + anchor[2] * axis[2];
+        let r_dot_axis = anchor[0] * axis[0] + anchor[1] * axis[1] + anchor[2] * axis[2];
         let perpendicular_distance_squared = (r_squared - r_dot_axis * r_dot_axis).max(0.0);
 
         inertia_about_com + mass * perpendicular_distance_squared
@@ -681,15 +685,15 @@ impl CreatureSimulator {
                             effective_max_torque.min(power_limit / angular_speed);
                     }
 
-                    let joint_span =
-                        (gene.limits_radians[1] - gene.limits_radians[0]).abs().max(1.0e-3);
+                    let joint_span = (gene.limits_radians[1] - gene.limits_radians[0])
+                        .abs()
+                        .max(1.0e-3);
                     let characteristic_error = (joint_span * 0.5).max(1.0e-3);
                     let stiffness = effective_max_torque / characteristic_error;
                     let damping = 2.0 * (stiffness * *effective_inertia).sqrt();
 
-                    let torque_proxy =
-                        (position_error * stiffness + angular_speed * damping)
-                            .min(effective_max_torque);
+                    let torque_proxy = (position_error * stiffness + angular_speed * damping)
+                        .min(effective_max_torque);
                     motor_effort += torque_proxy * angular_speed * config.dt;
 
                     if let Some(joint) = impulse_joints.get_mut(*joint_handle, true) {
@@ -720,8 +724,7 @@ impl CreatureSimulator {
 
             let mechanical_energy =
                 Self::mechanical_energy(&handles, &rigid_bodies, gravity, config.dt)?;
-            let numerical_tolerance_j =
-                previous_mechanical_energy.abs() * 1.0e-4 + 1.0e-8;
+            let numerical_tolerance_j = previous_mechanical_energy.abs() * 1.0e-4 + 1.0e-8;
             let maximum_explained_gain_j =
                 max_actuator_power * config.dt * 2.0 + numerical_tolerance_j;
             if mechanical_energy - previous_mechanical_energy > maximum_explained_gain_j {
@@ -838,12 +841,8 @@ impl CreatureSimulator {
                 + axis_z.y.abs() * segment.half_extents[2];
             let bottom_y = body.translation().y - projected_half_height;
             let position = body.translation();
-            let contact_tolerance_m = segment
-                .half_extents
-                .iter()
-                .copied()
-                .fold(0.0_f32, f32::max)
-                * 0.02;
+            let contact_tolerance_m =
+                segment.half_extents.iter().copied().fold(0.0_f32, f32::max) * 0.02;
             let contact_tolerance_m = contact_tolerance_m.max(1.0e-6);
             let ground_contact = match world.surface_height_at(position.x, position.z) {
                 Some(surface_y) if bottom_y <= surface_y + contact_tolerance_m => 1.0,
