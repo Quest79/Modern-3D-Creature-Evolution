@@ -21,8 +21,6 @@ pub const BIOLOGICAL_MAX_MUSCLE_STRESS_PA: f32 = 1_400_000.0;
 pub const BIOLOGICAL_MAX_CYCLIC_POWER_W_PER_KG: f32 = 400.0;
 pub const MUSCLE_DENSITY_KG_M3: f32 = 1_060.0;
 
-const JOINT_ANCHOR_SPAWN_TOLERANCE_M: f32 = 1.0e-4;
-
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BiologicalMaterial {
@@ -293,10 +291,19 @@ impl CreatureGenome {
                 .find(|segment| segment.id == joint.child_id)
                 .ok_or_else(|| "joint child segment is missing".to_string())?;
 
+            let joint_scale_m = parent
+                .half_extents
+                .iter()
+                .chain(child.half_extents.iter())
+                .copied()
+                .fold(0.0_f32, f32::max)
+                .max(1.0e-4);
+            let anchor_tolerance_m = (joint_scale_m * 1.0e-5).max(1.0e-7);
+
             for axis in 0..3 {
                 if !joint.parent_anchor[axis].is_finite()
                     || joint.parent_anchor[axis].abs()
-                        > parent.half_extents[axis] + JOINT_ANCHOR_SPAWN_TOLERANCE_M
+                        > parent.half_extents[axis] + anchor_tolerance_m
                 {
                     return Err(format!(
                         "joint {}→{} parent anchor lies outside segment {}",
@@ -305,7 +312,7 @@ impl CreatureGenome {
                 }
                 if !joint.child_anchor[axis].is_finite()
                     || joint.child_anchor[axis].abs()
-                        > child.half_extents[axis] + JOINT_ANCHOR_SPAWN_TOLERANCE_M
+                        > child.half_extents[axis] + anchor_tolerance_m
                 {
                     return Err(format!(
                         "joint {}→{} child anchor lies outside segment {}",
@@ -322,7 +329,7 @@ impl CreatureGenome {
                     error * error
                 })
                 .sum::<f32>();
-            if anchor_error_sq > JOINT_ANCHOR_SPAWN_TOLERANCE_M.powi(2) {
+            if anchor_error_sq > anchor_tolerance_m.powi(2) {
                 return Err(format!(
                     "joint {}→{} anchors do not coincide at spawn",
                     joint.parent_id, joint.child_id
@@ -713,7 +720,8 @@ impl CreatureSimulator {
 
             let mechanical_energy =
                 Self::mechanical_energy(&handles, &rigid_bodies, gravity, config.dt)?;
-            let numerical_tolerance_j = previous_mechanical_energy.abs().max(1.0) * 0.10 + 1.0;
+            let numerical_tolerance_j =
+                previous_mechanical_energy.abs() * 1.0e-4 + 1.0e-8;
             let maximum_explained_gain_j =
                 max_actuator_power * config.dt * 2.0 + numerical_tolerance_j;
             if mechanical_energy - previous_mechanical_energy > maximum_explained_gain_j {
@@ -830,8 +838,15 @@ impl CreatureSimulator {
                 + axis_z.y.abs() * segment.half_extents[2];
             let bottom_y = body.translation().y - projected_half_height;
             let position = body.translation();
+            let contact_tolerance_m = segment
+                .half_extents
+                .iter()
+                .copied()
+                .fold(0.0_f32, f32::max)
+                * 0.02;
+            let contact_tolerance_m = contact_tolerance_m.max(1.0e-6);
             let ground_contact = match world.surface_height_at(position.x, position.z) {
-                Some(surface_y) if bottom_y <= surface_y + 0.03 => 1.0,
+                Some(surface_y) if bottom_y <= surface_y + contact_tolerance_m => 1.0,
                 _ => 0.0,
             };
 
