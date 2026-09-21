@@ -589,11 +589,8 @@ fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
         .sum::<usize>();
     let saturation_target = sm_count.saturating_mul(32).saturating_mul(4);
 
-    requested
-        .max(saturation_target)
-        .min(1_000_000)
+    requested.max(saturation_target).min(1_000_000)
 }
-
 
 fn expand_evaluation_pool(
     population: &[Candidate],
