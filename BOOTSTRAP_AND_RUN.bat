@@ -1,4 +1,6 @@
 @echo off
+rem CANONICAL BOOTSTRAP: this replaces the old BOOTSTRAP_AND_RUN_FIXED.bat.
+rem Use only this file for setup, updating, CUDA/NVRTC, building, validation, and launch.
 setlocal EnableExtensions EnableDelayedExpansion
 title Modern 3D Creature Evolution - Bootstrap and Run
 
