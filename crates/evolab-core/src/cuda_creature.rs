@@ -1170,6 +1170,8 @@ mod platform {
         let d_state_contact = DeviceBuffer::<f32>::allocate(api, part_slots)?;
         let d_state_angle = DeviceBuffer::<f32>::allocate(api, joint_slots)?;
         let d_state_angvel = DeviceBuffer::<f32>::allocate(api, joint_slots)?;
+        let d_state_target = DeviceBuffer::<f32>::allocate(api, joint_slots)?;
+        let d_joint_force = DeviceBuffer::<f32>::allocate(api, joint_slots * 3)?;
 
         let d_out_score = DeviceBuffer::<f32>::allocate(api, world_count)?;
         let d_out_distance = DeviceBuffer::<f32>::allocate(api, world_count)?;
@@ -1207,6 +1209,8 @@ mod platform {
         let mut p_state_contact = d_state_contact.pointer;
         let mut p_state_angle = d_state_angle.pointer;
         let mut p_state_angvel = d_state_angvel.pointer;
+        let mut p_state_target = d_state_target.pointer;
+        let mut p_joint_force = d_joint_force.pointer;
         let mut p_out_score = d_out_score.pointer;
         let mut p_out_distance = d_out_distance.pointer;
         let mut p_out_speed = d_out_speed.pointer;
@@ -1228,12 +1232,12 @@ mod platform {
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
 
-        // One CUDA thread simulates one creature. With the old 128-thread
-        // blocks, a 1000-creature population produced only eight blocks, leaving
-        // much of a large GPU idle. Use one-warp blocks and keep three independent
-        // kernel ranges in flight so the driver can fill otherwise-idle SMs.
+        // One CUDA block now owns one creature. Threads inside that block split
+        // brain evaluation, joint physics, force generation, body integration,
+        // collision handling, and reductions. A 1000-creature generation therefore
+        // launches 1000 independent blocks instead of only ~8 underfilled blocks.
         const CUDA_CONCURRENT_LANES: usize = 3;
-        const CUDA_BLOCK_SIZE: u32 = 32;
+        const CUDA_BLOCK_SIZE: u32 = 128;
 
         let lane_count = world_count.min(CUDA_CONCURRENT_LANES).max(1);
         let mut streams = Vec::with_capacity(lane_count);
@@ -1285,6 +1289,8 @@ mod platform {
                 (&mut p_state_contact as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_angle as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_angvel as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_target as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_joint_force as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_score as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_distance as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_speed as *mut CuDevicePtr).cast::<c_void>(),
@@ -1308,12 +1314,11 @@ mod platform {
                 (&mut weight_energy as *mut f32).cast::<c_void>(),
             ];
 
-            let grid_size = (launch_count as u32).div_ceil(CUDA_BLOCK_SIZE);
             check_cuda(
                 unsafe {
                     (api.launch_kernel)(
                         function,
-                        grid_size,
+                        launch_count as u32,
                         1,
                         1,
                         CUDA_BLOCK_SIZE,
@@ -1460,6 +1465,8 @@ extern "C" __global__ void simulate_creatures(
     float* state_contact,
     float* state_angle,
     float* state_angvel,
+    float* state_target,
+    float* joint_force,
     float* out_score,
     float* out_distance,
     float* out_speed,
@@ -1482,9 +1489,11 @@ extern "C" __global__ void simulate_creatures(
     float weight_stability,
     float weight_energy
 ) {
-    unsigned local_world = blockIdx.x * blockDim.x + threadIdx.x;
+    // Cooperative layout: exactly one block owns one creature.
+    unsigned local_world = blockIdx.x;
     if (local_world >= launch_world_count) return;
     unsigned world = world_start + local_world;
+    unsigned tid = threadIdx.x;
 
     unsigned pc = part_count[world];
     unsigned jc = joint_count[world];
@@ -1492,18 +1501,30 @@ extern "C" __global__ void simulate_creatures(
     unsigned joint_base = world * max_joints;
     unsigned root_slot = part_base;
 
-    for (unsigned p = 0; p < pc; ++p) {
+    __shared__ float reduction[128];
+    __shared__ unsigned block_unstable;
+
+    if (tid == 0) block_unstable = 0;
+    for (unsigned p = tid; p < pc; p += blockDim.x) {
         unsigned slot = part_base + p;
-        for (unsigned c = 0; c < 3; ++c) {
-            state_position[slot * 3 + c] = initial_position[slot * 3 + c];
-            state_velocity[slot * 3 + c] = 0.0f;
-        }
+        state_position[slot * 3 + 0] = initial_position[slot * 3 + 0];
+        state_position[slot * 3 + 1] = initial_position[slot * 3 + 1];
+        state_position[slot * 3 + 2] = initial_position[slot * 3 + 2];
+        state_velocity[slot * 3 + 0] = 0.0f;
+        state_velocity[slot * 3 + 1] = 0.0f;
+        state_velocity[slot * 3 + 2] = 0.0f;
         state_contact[slot] = 0.0f;
     }
-    for (unsigned j = 0; j < jc; ++j) {
-        state_angle[joint_base + j] = 0.0f;
-        state_angvel[joint_base + j] = 0.0f;
+    for (unsigned j = tid; j < jc; j += blockDim.x) {
+        unsigned js = joint_base + j;
+        state_angle[js] = 0.0f;
+        state_angvel[js] = 0.0f;
+        state_target[js] = 0.0f;
+        joint_force[js * 3 + 0] = 0.0f;
+        joint_force[js * 3 + 1] = 0.0f;
+        joint_force[js * 3 + 2] = 0.0f;
     }
+    __syncthreads();
 
     float start_x = state_position[root_slot * 3 + 0];
     float start_z = state_position[root_slot * 3 + 2];
@@ -1511,35 +1532,46 @@ extern "C" __global__ void simulate_creatures(
         state_position[root_slot * 3 + 1] - ground_y,
         half_extents[root_slot * 3 + 1]
     );
+
     float speed_sum = 0.0f;
     float upright_sum = 0.0f;
     float stability_sum = 0.0f;
-    float motor_work = 0.0f;
-    unsigned unstable = 0;
+    float local_motor_work = 0.0f;
 
     for (unsigned step = 0; step < steps; ++step) {
         float time_seconds = (float)step * dt;
 
-        for (unsigned p = 0; p < pc; ++p) {
+        // Phase 1: gravity is embarrassingly parallel across body segments.
+        for (unsigned p = tid; p < pc; p += blockDim.x) {
             unsigned slot = part_base + p;
             state_velocity[slot * 3 + 1] += gravity_y * dt;
-            state_contact[slot] = 0.0f;
         }
+        __syncthreads();
 
-        for (unsigned j = 0; j < jc; ++j) {
+        // Phase 2: evaluate every joint brain independently using the previous
+        // synchronized state. Targets are staged so joint updates cannot race
+        // against other brain reads.
+        for (unsigned j = tid; j < jc; j += blockDim.x) {
+            unsigned js = joint_base + j;
+            float target = eval_brain(
+                brain_start[js], brain_count[js], op_code, op_index, op_a, op_b,
+                time_seconds, state_position, state_velocity, state_angle, state_angvel,
+                state_contact, part_base, joint_base, root_slot
+            );
+            state_target[js] = clampf(target, limit_min[js], limit_max[js]);
+        }
+        __syncthreads();
+
+        // Phase 3: solve joint motors and generate one deterministic force vector
+        // per joint. No body velocities are written yet, avoiding write races.
+        for (unsigned j = tid; j < jc; j += blockDim.x) {
             unsigned js = joint_base + j;
             unsigned pi = parent[js];
             unsigned ci = child[js];
             unsigned ps = part_base + pi;
             unsigned cs = part_base + ci;
 
-            float target = eval_brain(
-                brain_start[js], brain_count[js], op_code, op_index, op_a, op_b,
-                time_seconds, state_position, state_velocity, state_angle, state_angvel,
-                state_contact, part_base, joint_base, root_slot
-            );
-            target = clampf(target, limit_min[js], limit_max[js]);
-
+            float target = state_target[js];
             float torque_cap = fminf(requested_torque[js], biological_torque[js]) * activation;
             float angle = state_angle[js];
             float omega = state_angvel[js];
@@ -1550,15 +1582,26 @@ extern "C" __global__ void simulate_creatures(
             float span = fmaxf(fabsf(limit_max[js] - limit_min[js]), 1.0e-3f);
             float stiffness = torque_cap / fmaxf(span * 0.5f, 1.0e-3f);
             float damping = 2.0f * sqrtf(fmaxf(stiffness * inertia[js], 0.0f));
-            float torque = clampf(stiffness * (target - angle) - damping * omega, -torque_cap, torque_cap);
+            float torque = clampf(
+                stiffness * (target - angle) - damping * omega,
+                -torque_cap,
+                torque_cap
+            );
+
             float angular_accel = torque / fmaxf(inertia[js], 1.0e-12f);
             omega += angular_accel * dt;
             angle += omega * dt;
-            if (angle < limit_min[js]) { angle = limit_min[js]; if (omega < 0.0f) omega = 0.0f; }
-            if (angle > limit_max[js]) { angle = limit_max[js]; if (omega > 0.0f) omega = 0.0f; }
+            if (angle < limit_min[js]) {
+                angle = limit_min[js];
+                if (omega < 0.0f) omega = 0.0f;
+            }
+            if (angle > limit_max[js]) {
+                angle = limit_max[js];
+                if (omega > 0.0f) omega = 0.0f;
+            }
             state_angle[js] = angle;
             state_angvel[js] = omega;
-            motor_work += fabsf(torque * omega) * dt;
+            local_motor_work += fabsf(torque * omega) * dt;
 
             float ax = axis[js * 3 + 0];
             float ay = axis[js * 3 + 1];
@@ -1567,15 +1610,15 @@ extern "C" __global__ void simulate_creatures(
             float ry = rest_relative[js * 3 + 1];
             float rz = rest_relative[js * 3 + 2];
             float s = sinf(angle);
-            float c = cosf(angle);
+            float co = cosf(angle);
             float dot = ax * rx + ay * ry + az * rz;
             float cross_x = ay * rz - az * ry;
             float cross_y = az * rx - ax * rz;
             float cross_z = ax * ry - ay * rx;
-            float one_minus_c = 1.0f - c;
-            float desired_x = rx * c + cross_x * s + ax * dot * one_minus_c;
-            float desired_y = ry * c + cross_y * s + ay * dot * one_minus_c;
-            float desired_z = rz * c + cross_z * s + az * dot * one_minus_c;
+            float one_minus_c = 1.0f - co;
+            float desired_x = rx * co + cross_x * s + ax * dot * one_minus_c;
+            float desired_y = ry * co + cross_y * s + ay * dot * one_minus_c;
+            float desired_z = rz * co + cross_z * s + az * dot * one_minus_c;
 
             float actual_x = state_position[cs * 3 + 0] - state_position[ps * 3 + 0];
             float actual_y = state_position[cs * 3 + 1] - state_position[ps * 3 + 1];
@@ -1598,29 +1641,56 @@ extern "C" __global__ void simulate_creatures(
             float force_mag = sqrtf(fx * fx + fy * fy + fz * fz);
             if (force_mag > max_force && force_mag > 1.0e-8f) {
                 float scale = max_force / force_mag;
-                fx *= scale; fy *= scale; fz *= scale;
+                fx *= scale;
+                fy *= scale;
+                fz *= scale;
             }
 
-            float parent_impulse = inv_mass[ps] * dt;
-            float child_impulse = inv_mass[cs] * dt;
-            state_velocity[ps * 3 + 0] -= fx * parent_impulse;
-            state_velocity[ps * 3 + 1] -= fy * parent_impulse;
-            state_velocity[ps * 3 + 2] -= fz * parent_impulse;
-            state_velocity[cs * 3 + 0] += fx * child_impulse;
-            state_velocity[cs * 3 + 1] += fy * child_impulse;
-            state_velocity[cs * 3 + 2] += fz * child_impulse;
+            joint_force[js * 3 + 0] = fx;
+            joint_force[js * 3 + 1] = fy;
+            joint_force[js * 3 + 2] = fz;
         }
+        __syncthreads();
 
-        for (unsigned p = 0; p < pc; ++p) {
+        // Phase 4: each body thread gathers forces from all connected joints in a
+        // fixed order. This keeps deterministic mode deterministic without atomics.
+        for (unsigned p = tid; p < pc; p += blockDim.x) {
             unsigned slot = part_base + p;
+            float fx = 0.0f;
+            float fy = 0.0f;
+            float fz = 0.0f;
+
+            for (unsigned j = 0; j < jc; ++j) {
+                unsigned js = joint_base + j;
+                if (parent[js] == p) {
+                    fx -= joint_force[js * 3 + 0];
+                    fy -= joint_force[js * 3 + 1];
+                    fz -= joint_force[js * 3 + 2];
+                }
+                if (child[js] == p) {
+                    fx += joint_force[js * 3 + 0];
+                    fy += joint_force[js * 3 + 1];
+                    fz += joint_force[js * 3 + 2];
+                }
+            }
+
+            float impulse = inv_mass[slot] * dt;
+            state_velocity[slot * 3 + 0] += fx * impulse;
+            state_velocity[slot * 3 + 1] += fy * impulse;
+            state_velocity[slot * 3 + 2] += fz * impulse;
+
             state_position[slot * 3 + 0] += state_velocity[slot * 3 + 0] * dt;
             state_position[slot * 3 + 1] += state_velocity[slot * 3 + 1] * dt;
             state_position[slot * 3 + 2] += state_velocity[slot * 3 + 2] * dt;
 
+            // Preserve the previous contact value through brain evaluation above,
+            // then update it for the next physics step here.
+            state_contact[slot] = 0.0f;
             float floor_y = ground_y + half_extents[slot * 3 + 1];
             if (state_position[slot * 3 + 1] < floor_y) {
                 state_position[slot * 3 + 1] = floor_y;
-                if (state_velocity[slot * 3 + 1] < 0.0f) state_velocity[slot * 3 + 1] = 0.0f;
+                if (state_velocity[slot * 3 + 1] < 0.0f)
+                    state_velocity[slot * 3 + 1] = 0.0f;
                 state_contact[slot] = 1.0f;
 
                 float vx = state_velocity[slot * 3 + 0];
@@ -1640,27 +1710,61 @@ extern "C" __global__ void simulate_creatures(
             float x = state_position[slot * 3 + 0];
             float y = state_position[slot * 3 + 1];
             float z = state_position[slot * 3 + 2];
-            if (!(vx == vx) || !(vy == vy) || !(vz == vz) || !(x == x) || !(y == y) || !(z == z)
-                || fabsf(vx) > 10000.0f || fabsf(vy) > 10000.0f || fabsf(vz) > 10000.0f) {
-                unstable = 1;
+            if (
+                !(vx == vx) || !(vy == vy) || !(vz == vz)
+                || !(x == x) || !(y == y) || !(z == z)
+                || fabsf(vx) > 10000.0f
+                || fabsf(vy) > 10000.0f
+                || fabsf(vz) > 10000.0f
+            ) {
+                atomicExch(&block_unstable, 1u);
             }
         }
+        __syncthreads();
 
-        float rvx = state_velocity[root_slot * 3 + 0];
-        float rvz = state_velocity[root_slot * 3 + 2];
-        speed_sum += sqrtf(rvx * rvx + rvz * rvz);
-        float root_height = state_position[root_slot * 3 + 1] - ground_y;
-        upright_sum += clampf(root_height / fmaxf(start_root_height, 1.0e-6f), 0.0f, 1.0f);
+        if (block_unstable) break;
 
-        float omega_sum = 0.0f;
-        for (unsigned j = 0; j < jc; ++j) omega_sum += fabsf(state_angvel[joint_base + j]);
-        float omega_mean = jc > 0 ? omega_sum / (float)jc : 0.0f;
-        stability_sum += 1.0f / (1.0f + omega_mean);
+        // Phase 5: deterministic block-wide reduction for stability.
+        float omega_partial = 0.0f;
+        for (unsigned j = tid; j < jc; j += blockDim.x)
+            omega_partial += fabsf(state_angvel[joint_base + j]);
+        reduction[tid] = omega_partial;
+        __syncthreads();
 
-        if (unstable) break;
+        for (unsigned stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) reduction[tid] += reduction[tid + stride];
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            float rvx = state_velocity[root_slot * 3 + 0];
+            float rvz = state_velocity[root_slot * 3 + 2];
+            speed_sum += sqrtf(rvx * rvx + rvz * rvz);
+
+            float root_height = state_position[root_slot * 3 + 1] - ground_y;
+            upright_sum += clampf(
+                root_height / fmaxf(start_root_height, 1.0e-6f),
+                0.0f,
+                1.0f
+            );
+
+            float omega_mean = jc > 0 ? reduction[0] / (float)jc : 0.0f;
+            stability_sum += 1.0f / (1.0f + omega_mean);
+        }
+        __syncthreads();
     }
 
-    if (unstable) {
+    // Deterministic reduction of motor work accumulated by each block thread.
+    reduction[tid] = local_motor_work;
+    __syncthreads();
+    for (unsigned stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) reduction[tid] += reduction[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid != 0) return;
+
+    if (block_unstable) {
         out_unstable[world] = 1;
         out_score[world] = -1.0e30f;
         out_distance[world] = 0.0f;
@@ -1679,7 +1783,7 @@ extern "C" __global__ void simulate_creatures(
     float upright = upright_sum / denom;
     float stability = stability_sum / denom;
     float simulated_seconds = fmaxf((float)steps * dt, 1.0e-8f);
-    float energy = motor_work / simulated_seconds;
+    float energy = reduction[0] / simulated_seconds;
     float score = weight_distance * distance
         + weight_speed * average_speed
         + weight_upright * upright
