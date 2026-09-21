@@ -21,10 +21,10 @@ impl Default for MutationConfig {
         Self {
             min_segments: 2,
             max_segments: 12,
-            // Numerical macro-life scale: 1 cm to 10 m full segment dimension.
-            // This is a solver/world-scale bound, not a human anatomy bound.
-            min_half_extent: 0.005,
-            max_half_extent: 5.0,
+            // Broad macroscopic biological scale: 2 mm to 30 m full segment
+            // dimension. This is a solver/world-scale bound, not an anatomy bound.
+            min_half_extent: 0.001,
+            max_half_extent: 15.0,
             structural_mutation_chance: 0.30,
         }
     }
@@ -737,10 +737,6 @@ fn add_segment(
     initial_position[axis_index] +=
         sign * (parent.half_extents[axis_index] + half_extents[axis_index]);
 
-    // Keep generated descendants just above the floor without imposing a
-    // human-sized fixed clearance.
-    initial_position[1] = initial_position[1].max(half_extents[1] + 0.01);
-
     let material = random_biological_material(rng);
     let (min_density, max_density) = material.density_range_kg_m3();
     let child = SegmentGene {
@@ -784,6 +780,12 @@ fn add_segment(
     let biological_torque_limit = genome.biological_joint_limits(&joint).ok()?.0;
     joint.motor_max_torque = biological_torque_limit * rng.range_f32(0.05, 0.15);
     genome.joints.push(joint);
+
+    // If a downward structural mutation would intersect the floor, translate
+    // the entire morphology together. Moving only the new child would separate
+    // the two joint anchors and force the constraint solver to inject energy.
+    lift_genome_above_floor(genome, 0.001);
+
     genome
         .brain
         .sync_with_structure(&genome.joints, &genome.segments);
@@ -792,6 +794,24 @@ fn add_segment(
         kind: MutationKind::AddSegment,
         description: format!("added segment {id} to parent {}", parent.id),
     })
+}
+
+fn lift_genome_above_floor(genome: &mut CreatureGenome, clearance_m: f32) {
+    let minimum_bottom = genome
+        .segments
+        .iter()
+        .map(|segment| segment.initial_position[1] - segment.half_extents[1])
+        .fold(f32::INFINITY, f32::min);
+    if !minimum_bottom.is_finite() {
+        return;
+    }
+
+    let lift = (clearance_m - minimum_bottom).max(0.0);
+    if lift > 0.0 {
+        for segment in &mut genome.segments {
+            segment.initial_position[1] += lift;
+        }
+    }
 }
 
 fn remove_leaf_segment(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
