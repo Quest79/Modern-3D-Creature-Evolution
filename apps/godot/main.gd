@@ -4378,8 +4378,12 @@ func _handle_event(event: Dictionary) -> void:
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
             _set_status(
-                "Evolution started • %s creatures × %s generations"
-                % [str(event.get("population", 0)), str(event.get("generations", 0))]
+                "Evolution started • %s survivors • requested eval pool %s • %s generations"
+                % [
+                    str(event.get("population", 0)),
+                    str(event.get("evaluation_pool", event.get("population", 0))),
+                    str(event.get("generations", 0)),
+                ]
             )
 
         "generation_complete":
@@ -4407,10 +4411,11 @@ func _handle_event(event: Dictionary) -> void:
                 timeline_suffix = " • triggered: %s" % ", ".join(triggered_events)
 
             _set_status(
-                "Generation %d / %d • best %.4f • average %.4f%s"
+                "Generation %d / %d • eval %s • best %.4f • average %.4f%s"
                 % [
                     generation,
                     generations,
+                    str(event.get("evaluation_pool_size", event.get("effective_population", 0))),
                     float(event.get("best_fitness", 0.0)),
                     float(event.get("average_fitness", 0.0)),
                     timeline_suffix,
@@ -4433,7 +4438,10 @@ func _handle_event(event: Dictionary) -> void:
                         str(event.get("best_brain_sensor_nodes", 0)),
                     ]
                 + "[cell]Brain outputs[/cell][cell]%s[/cell]" % str(event.get("best_brain_outputs", 0))
-                + "[cell]Population[/cell][cell]%s[/cell]" % str(event.get("effective_population", 0))
+                + "[cell]Survivor population[/cell][cell]%s[/cell]"
+                    % str(event.get("effective_population", 0))
+                + "[cell]Candidates evaluated / gen[/cell][cell]%s[/cell]"
+                    % str(event.get("evaluation_pool_size", event.get("effective_population", 0)))
                 + "[cell]Trials / creature[/cell][cell]%s (%s)[/cell]"
                     % [
                         str(event.get("effective_trials_per_creature", 1)),
