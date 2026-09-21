@@ -1203,7 +1203,17 @@ mod platform {
         )?;
         let started = Instant::now();
         let mut all_results = Vec::with_capacity(genomes.len());
-        let batch_size = accelerator.batch_size.max(1);
+
+        // Do not let a small UI batch setting split a saturation-sized generation
+        // into underfilled launches. The 8-lane creature kernel needs roughly
+        // 128 creatures per SM to keep enough independent warps ready.
+        let saturation_batch = (device_info.multiprocessor_count.max(1) as usize)
+            .saturating_mul(128);
+        let batch_size = accelerator
+            .batch_size
+            .max(saturation_batch)
+            .max(1)
+            .min(genomes.len());
         let mut offset = 0usize;
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
