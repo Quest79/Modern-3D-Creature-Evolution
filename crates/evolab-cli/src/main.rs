@@ -1689,15 +1689,71 @@ fn normalize_integral_json_numbers(value: &mut Value) {
     }
 }
 
+fn migrate_legacy_biological_genome_value(value: &mut Value) {
+    let Some(segments) = value
+        .as_object_mut()
+        .and_then(|genome| genome.get_mut("segments"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for segment in segments {
+        let Some(segment) = segment.as_object_mut() else {
+            continue;
+        };
+
+        let legacy_material = !segment.contains_key("material");
+        if legacy_material {
+            segment.insert(
+                "material".to_string(),
+                Value::String("soft_tissue".to_string()),
+            );
+        }
+
+        if legacy_material {
+            let legacy_density = segment.get("density").and_then(Value::as_f64);
+            if legacy_density.is_some_and(|density| density > 0.0 && density <= 4.0) {
+                segment.insert(
+                    "density".to_string(),
+                    Value::Number(
+                        serde_json::Number::from_f64(1_050.0)
+                            .expect("1050 is a valid JSON number"),
+                    ),
+                );
+            }
+
+            if let Some(friction) = segment.get("friction").and_then(Value::as_f64)
+                && friction > 2.1
+            {
+                segment.insert(
+                    "friction".to_string(),
+                    Value::Number(
+                        serde_json::Number::from_f64(2.1)
+                            .expect("2.1 is a valid JSON number"),
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn parse_creature_genome_json(raw: &str) -> Result<CreatureGenome, serde_json::Error> {
     let mut value: Value = serde_json::from_str(raw)?;
     normalize_integral_json_numbers(&mut value);
+    migrate_legacy_biological_genome_value(&mut value);
     serde_json::from_value(value)
 }
 
 fn parse_experiment_json(raw: &str) -> Result<ExperimentFile, serde_json::Error> {
     let mut value: Value = serde_json::from_str(raw)?;
     normalize_integral_json_numbers(&mut value);
+    if let Some(ancestor) = value
+        .as_object_mut()
+        .and_then(|experiment| experiment.get_mut("ancestor"))
+    {
+        migrate_legacy_biological_genome_value(ancestor);
+    }
     serde_json::from_value(value)
 }
 
