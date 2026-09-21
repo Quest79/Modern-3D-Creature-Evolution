@@ -113,7 +113,13 @@ pub struct JointGene {
     pub motor_amplitude_radians: f32,
     pub motor_frequency_hz: f32,
     pub motor_phase_radians: f32,
+    /// Legacy serialized field. Runtime PD stiffness is derived from joint
+    /// inertia, range of motion, and the current biological torque ceiling.
+    #[serde(default)]
     pub motor_stiffness: f32,
+    /// Legacy serialized field. Runtime PD damping is derived for critical
+    /// damping from the physical stiffness and effective joint inertia.
+    #[serde(default)]
     pub motor_damping: f32,
     pub motor_max_torque: f32,
 }
@@ -171,8 +177,8 @@ impl CreatureGenome {
                     motor_amplitude_radians: 0.65,
                     motor_frequency_hz: 1.25,
                     motor_phase_radians: 0.0,
-                    motor_stiffness: 32.0,
-                    motor_damping: 4.5,
+                    motor_stiffness: 0.0,
+                    motor_damping: 0.0,
                     motor_max_torque: 18.0,
                 },
                 JointGene {
@@ -185,8 +191,8 @@ impl CreatureGenome {
                     motor_amplitude_radians: 0.65,
                     motor_frequency_hz: 1.25,
                     motor_phase_radians: std::f32::consts::PI,
-                    motor_stiffness: 32.0,
-                    motor_damping: 4.5,
+                    motor_stiffness: 0.0,
+                    motor_damping: 0.0,
                     motor_max_torque: 18.0,
                 },
             ],
@@ -244,6 +250,18 @@ impl CreatureGenome {
                 return Err(format!(
                     "segment {} density must be between {} and {} kg/m^3",
                     segment.id, BIOLOGICAL_MIN_DENSITY_KG_M3, BIOLOGICAL_MAX_DENSITY_KG_M3
+                ));
+            }
+            let (material_min_density, material_max_density) =
+                segment.material.density_range_kg_m3();
+            if !(material_min_density..=material_max_density).contains(&segment.density) {
+                return Err(format!(
+                    "segment {} density {:.1} kg/m^3 is outside {:?} range {:.1}..={:.1} kg/m^3",
+                    segment.id,
+                    segment.density,
+                    segment.material,
+                    material_min_density,
+                    material_max_density
                 ));
             }
             if !segment.friction.is_finite()
@@ -377,6 +395,62 @@ impl CreatureGenome {
 
         Ok((torque_limit.max(0.0), power_limit.max(0.0)))
     }
+
+    /// Effective rotational inertia seen by a revolute joint. This is computed
+    /// from each cuboid's mass distribution plus the parallel-axis contribution
+    /// from its centre of mass to the joint anchor.
+    pub fn joint_effective_inertia(&self, joint: &JointGene) -> Result<f32, String> {
+        let parent = self
+            .segments
+            .iter()
+            .find(|segment| segment.id == joint.parent_id)
+            .ok_or_else(|| format!("missing parent segment {}", joint.parent_id))?;
+        let child = self
+            .segments
+            .iter()
+            .find(|segment| segment.id == joint.child_id)
+            .ok_or_else(|| format!("missing child segment {}", joint.child_id))?;
+
+        let axis_length = joint.axis.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if !axis_length.is_finite() || axis_length <= 1.0e-8 {
+            return Err("joint axis must be non-zero and finite".into());
+        }
+        let axis = [
+            joint.axis[0] / axis_length,
+            joint.axis[1] / axis_length,
+            joint.axis[2] / axis_length,
+        ];
+
+        let parent_inertia = Self::segment_inertia_about_anchor(parent, joint.parent_anchor, axis);
+        let child_inertia = Self::segment_inertia_about_anchor(child, joint.child_anchor, axis);
+        let sum = parent_inertia + child_inertia;
+        if !sum.is_finite() || sum <= 1.0e-12 {
+            return Err("joint effective inertia must be finite and positive".into());
+        }
+
+        Ok((parent_inertia * child_inertia / sum).max(1.0e-12))
+    }
+
+    fn segment_inertia_about_anchor(
+        segment: &SegmentGene,
+        anchor: [f32; 3],
+        axis: [f32; 3],
+    ) -> f32 {
+        let mass = segment.mass_kg();
+        let [hx, hy, hz] = segment.half_extents;
+        let ixx = mass / 3.0 * (hy * hy + hz * hz);
+        let iyy = mass / 3.0 * (hx * hx + hz * hz);
+        let izz = mass / 3.0 * (hx * hx + hy * hy);
+        let inertia_about_com =
+            axis[0] * axis[0] * ixx + axis[1] * axis[1] * iyy + axis[2] * axis[2] * izz;
+
+        let r_squared = anchor.iter().map(|value| value * value).sum::<f32>();
+        let r_dot_axis =
+            anchor[0] * axis[0] + anchor[1] * axis[1] + anchor[2] * axis[2];
+        let perpendicular_distance_squared = (r_squared - r_dot_axis * r_dot_axis).max(0.0);
+
+        inertia_about_com + mass * perpendicular_distance_squared
+    }
 }
 
 impl Default for CreatureGenome {
@@ -480,7 +554,7 @@ impl CreatureSimulator {
             .ok_or_else(|| "missing root body handle".to_string())?;
 
         let mut impulse_joints = ImpulseJointSet::new();
-        let mut motor_handles: Vec<(ImpulseJointHandle, JointGene, f32, f32)> = Vec::new();
+        let mut motor_handles: Vec<(ImpulseJointHandle, JointGene, f32, f32, f32)> = Vec::new();
 
         for joint_gene in &genome.joints {
             let parent = *handles
@@ -494,6 +568,7 @@ impl CreatureSimulator {
 
             let (biological_torque_limit, biological_power_limit) =
                 genome.biological_joint_limits(joint_gene)?;
+            let effective_inertia = genome.joint_effective_inertia(joint_gene)?;
 
             let joint = RevoluteJointBuilder::new(axis)
                 .local_anchor1(Vector::new(
@@ -508,7 +583,7 @@ impl CreatureSimulator {
                 ))
                 .contacts_enabled(false)
                 .limits(joint_gene.limits_radians)
-                .motor_position(0.0, joint_gene.motor_stiffness, joint_gene.motor_damping)
+                .motor_position(0.0, 0.0, 0.0)
                 .motor_max_force(joint_gene.motor_max_torque)
                 .build();
 
@@ -518,6 +593,7 @@ impl CreatureSimulator {
                 joint_gene.clone(),
                 biological_torque_limit,
                 biological_power_limit,
+                effective_inertia,
             ));
         }
 
@@ -550,7 +626,7 @@ impl CreatureSimulator {
         let mut motor_effort = 0.0_f32;
         let max_actuator_power = motor_handles
             .iter()
-            .map(|(_, _, _, power_limit)| *power_limit * config.motor_strength_multiplier)
+            .map(|(_, _, _, power_limit, _)| *power_limit * config.motor_strength_multiplier)
             .sum::<f32>();
         let mut previous_mechanical_energy =
             Self::mechanical_energy(&handles, &rigid_bodies, gravity, config.dt)?;
@@ -566,8 +642,13 @@ impl CreatureSimulator {
                 &config.world,
             )?;
 
-            for (joint_handle, gene, biological_torque_limit, biological_power_limit) in
-                &motor_handles
+            for (
+                joint_handle,
+                gene,
+                biological_torque_limit,
+                biological_power_limit,
+                effective_inertia,
+            ) in &motor_handles
             {
                 let target = genome
                     .brain
@@ -593,22 +674,25 @@ impl CreatureSimulator {
                             effective_max_torque.min(power_limit / angular_speed);
                     }
 
-                    let torque_proxy = (position_error * gene.motor_stiffness * strength
-                        + angular_speed * gene.motor_damping * strength)
-                        .min(effective_max_torque);
-                    motor_effort += torque_proxy * angular_speed * config.dt;
-                }
+                    let joint_span =
+                        (gene.limits_radians[1] - gene.limits_radians[0]).abs().max(1.0e-3);
+                    let characteristic_error = (joint_span * 0.5).max(1.0e-3);
+                    let stiffness = effective_max_torque / characteristic_error;
+                    let damping = 2.0 * (stiffness * *effective_inertia).sqrt();
 
-                if let Some(joint) = impulse_joints.get_mut(*joint_handle, true) {
-                    joint.data.set_motor_position(
-                        JointAxis::AngX,
-                        target,
-                        gene.motor_stiffness * strength,
-                        gene.motor_damping * strength,
-                    );
-                    joint
-                        .data
-                        .set_motor_max_force(JointAxis::AngX, effective_max_torque);
+                    let torque_proxy =
+                        (position_error * stiffness + angular_speed * damping)
+                            .min(effective_max_torque);
+                    motor_effort += torque_proxy * angular_speed * config.dt;
+
+                    if let Some(joint) = impulse_joints.get_mut(*joint_handle, true) {
+                        joint
+                            .data
+                            .set_motor_position(JointAxis::AngX, target, stiffness, damping);
+                        joint
+                            .data
+                            .set_motor_max_force(JointAxis::AngX, effective_max_torque);
+                    }
                 }
             }
 
