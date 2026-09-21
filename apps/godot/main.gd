@@ -918,7 +918,13 @@ func _build_ui() -> void:
     _playback_speed_spin.suffix = "x"
     _playback_speed_spin.tooltip_text = "Live viewer speed. 0.01x = 100× slower, 2.00x = 2× faster."
     _playback_speed_spin.value_changed.connect(_on_playback_speed_changed)
-    _batch_spin = _add_number_row(sim_section, "Parallel simulations", 1, 1000000, 1000, 1)
+    _batch_spin = _add_number_row(
+        sim_section, "Parallel simulations / generation", 1, 1000000, 1000, 1
+    )
+    _batch_spin.tooltip_text = (
+        "Benchmark world count. During CUDA evolution this is also the candidate "
+        + "evaluation pool per generation; Population remains the survivor/parent pool."
+    )
     _workers_spin = _add_number_row(sim_section, "CPU workers (0 = auto)", 0, 256, 0, 1)
 
     var accelerator_row := HBoxContainer.new()
@@ -3405,6 +3411,7 @@ func _on_evolve_pressed() -> void:
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
+        "--evaluation-pool", str(int(_batch_spin.value)),
         "--generations", str(int(_generations_spin.value)),
         "--tournament", str(int(_tournament_spin.value)),
         "--elite", str(int(_elite_spin.value)),
@@ -3477,6 +3484,7 @@ func _on_resume_evolution_pressed() -> void:
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
+        "--evaluation-pool", str(int(_batch_spin.value)),
         "--generations", str(int(_generations_spin.value)),
         "--tournament", str(int(_tournament_spin.value)),
         "--elite", str(int(_elite_spin.value)),
@@ -3627,6 +3635,7 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
         "ancestor": ancestor,
         "evolution": {
             "population_size": int(_population_spin.value),
+            "evaluation_pool_size": int(_batch_spin.value),
             "generations": int(_generations_spin.value),
             "tournament_size": int(_tournament_spin.value),
             "elite_count": int(_elite_spin.value),
@@ -3739,6 +3748,9 @@ func _apply_experiment_dictionary(experiment: Dictionary) -> bool:
 
     _population_spin.value = int(
         evolution.get("population_size", _population_spin.value)
+    )
+    _batch_spin.value = int(
+        evolution.get("evaluation_pool_size", _batch_spin.value)
     )
     _generations_spin.value = int(
         evolution.get("generations", _generations_spin.value)
