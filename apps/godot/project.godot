@@ -7,6 +7,10 @@ config_version=5
 config/name="Modern 3D Creature Evolution"
 run/main_scene="res://main.tscn"
 
+[debug]
+
+file_logging/enable_file_logging=false
+
 [display]
 
 window/size/viewport_width=1360
