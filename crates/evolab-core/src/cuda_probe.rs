@@ -344,7 +344,12 @@ mod platform {
 
             let mut major = 0_i32;
             let mut minor = 0_i32;
-            // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR/MINOR.
+            let mut multiprocessor_count = 0_i32;
+            // CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT and compute capability.
+            check(
+                unsafe { (api.device_get_attribute)(&mut multiprocessor_count, 16, device) },
+                "cuDeviceGetAttribute(multiprocessor_count)",
+            )?;
             check(
                 unsafe { (api.device_get_attribute)(&mut major, 75, device) },
                 "cuDeviceGetAttribute(major)",
@@ -375,6 +380,7 @@ mod platform {
                 free_memory_bytes: free_memory as u64,
                 compute_capability_major: major,
                 compute_capability_minor: minor,
+                multiprocessor_count,
             });
         }
 
