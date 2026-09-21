@@ -185,9 +185,9 @@ impl PackedCreatureBatch {
                 let parent_segment = &genome.segments[parent as usize];
                 let child_segment = &genome.segments[child as usize];
                 for component in 0..3 {
-                    packed.rest_relative[slot * 3 + component] =
-                        child_segment.initial_position[component]
-                            - parent_segment.initial_position[component];
+                    packed.rest_relative[slot * 3 + component] = child_segment.initial_position
+                        [component]
+                        - parent_segment.initial_position[component];
                 }
 
                 let (torque, power) = genome.biological_joint_limits(joint)?;
@@ -248,9 +248,7 @@ fn flatten_expression(
     op_b: &mut Vec<f32>,
 ) -> Result<(), String> {
     match expression {
-        Expression::Constant(value) => {
-            push_op(0, 0, *value, 0.0, op_code, op_index, op_a, op_b)
-        }
+        Expression::Constant(value) => push_op(0, 0, *value, 0.0, op_code, op_index, op_a, op_b),
         Expression::Sensor(sensor) => {
             let (code, index) = match sensor {
                 SensorKind::Time => (1, 0),
@@ -287,34 +285,114 @@ fn flatten_expression(
             push_op(code, index, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Add(left, right) => {
-            flatten_expression(left, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
-            flatten_expression(right, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                left,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
+            flatten_expression(
+                right,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(16, 0, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Subtract(left, right) => {
-            flatten_expression(left, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
-            flatten_expression(right, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                left,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
+            flatten_expression(
+                right,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(17, 0, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Multiply(left, right) => {
-            flatten_expression(left, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
-            flatten_expression(right, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                left,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
+            flatten_expression(
+                right,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(18, 0, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Negate(value) => {
-            flatten_expression(value, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                value,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(19, 0, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Sin(value) => {
-            flatten_expression(value, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                value,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(20, 0, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Cos(value) => {
-            flatten_expression(value, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                value,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(21, 0, 0.0, 0.0, op_code, op_index, op_a, op_b);
         }
         Expression::Clamp { value, min, max } => {
-            flatten_expression(value, joint_index, segment_index, op_code, op_index, op_a, op_b)?;
+            flatten_expression(
+                value,
+                joint_index,
+                segment_index,
+                op_code,
+                op_index,
+                op_a,
+                op_b,
+            )?;
             push_op(22, 0, *min, *max, op_code, op_index, op_a, op_b);
         }
     }
@@ -324,7 +402,7 @@ fn flatten_expression(
 #[cfg(not(windows))]
 mod platform {
     use crate::{
-        AcceleratorConfig, CudaDeviceInfo, CreatureGenome, DeviceWorkAssignment, FitnessConfig,
+        AcceleratorConfig, CreatureGenome, CudaDeviceInfo, DeviceWorkAssignment, FitnessConfig,
         SimulationConfig,
     };
 
@@ -355,7 +433,7 @@ mod platform {
     };
 
     use crate::{
-        AcceleratorConfig, AcceleratorMode, CudaDeviceInfo, CreatureGenome, DevicePerformance,
+        AcceleratorConfig, AcceleratorMode, CreatureGenome, CudaDeviceInfo, DevicePerformance,
         DeviceWorkAssignment, ExecutionPerformance, FitnessConfig, FitnessMetrics, FitnessResult,
         SimulationConfig, ThroughputMode,
     };
@@ -414,7 +492,8 @@ mod platform {
         unsafe extern "system" fn(NvrtcProgram, i32, *const *const c_char) -> NvrtcResult;
     type NvrtcGetPtxSize = unsafe extern "system" fn(NvrtcProgram, *mut usize) -> NvrtcResult;
     type NvrtcGetPtx = unsafe extern "system" fn(NvrtcProgram, *mut c_char) -> NvrtcResult;
-    type NvrtcGetProgramLogSize = unsafe extern "system" fn(NvrtcProgram, *mut usize) -> NvrtcResult;
+    type NvrtcGetProgramLogSize =
+        unsafe extern "system" fn(NvrtcProgram, *mut usize) -> NvrtcResult;
     type NvrtcGetProgramLog = unsafe extern "system" fn(NvrtcProgram, *mut c_char) -> NvrtcResult;
     type NvrtcDestroyProgram = unsafe extern "system" fn(*mut NvrtcProgram) -> NvrtcResult;
 
@@ -634,7 +713,10 @@ mod platform {
         fn allocate(api: &'a CudaApi, len: usize) -> Result<Self, String> {
             let bytes = len.max(1) * size_of::<T>();
             let mut pointer = 0;
-            check_cuda(unsafe { (api.mem_alloc)(&mut pointer, bytes) }, "cuMemAlloc")?;
+            check_cuda(
+                unsafe { (api.mem_alloc)(&mut pointer, bytes) },
+                "cuMemAlloc",
+            )?;
             Ok(Self {
                 api,
                 pointer,
@@ -727,10 +809,7 @@ mod platform {
         if create != NVRTC_SUCCESS {
             return Err(format!("nvrtcCreateProgram failed with code {create}"));
         }
-        let guard = NvrtcProgramGuard {
-            api: &api,
-            program,
-        };
+        let guard = NvrtcProgramGuard { api: &api, program };
 
         let arch = CString::new(format!("--gpu-architecture=compute_{major}{minor}"))
             .map_err(|_| "invalid CUDA architecture".to_string())?;
@@ -761,13 +840,17 @@ mod platform {
                 .trim_end_matches(' ')
                 .trim()
                 .to_string();
-            return Err(format!("NVRTC failed to compile CUDA creature solver: {message}"));
+            return Err(format!(
+                "NVRTC failed to compile CUDA creature solver: {message}"
+            ));
         }
 
         let mut ptx_size = 0usize;
         let ptx_size_result = unsafe { (api.get_ptx_size)(program, &mut ptx_size) };
         if ptx_size_result != NVRTC_SUCCESS {
-            return Err(format!("nvrtcGetPTXSize failed with code {ptx_size_result}"));
+            return Err(format!(
+                "nvrtcGetPTXSize failed with code {ptx_size_result}"
+            ));
         }
         let mut ptx = vec![0_u8; ptx_size.max(1)];
         let ptx_result = unsafe { (api.get_ptx)(program, ptx.as_mut_ptr().cast::<c_char>()) };
@@ -791,9 +874,8 @@ mod platform {
 
         for assignment in assignments {
             let assignment = assignment.clone();
-            let genomes = genomes
-                [assignment.start_index..assignment.start_index + assignment.count]
-                .to_vec();
+            let genomes =
+                genomes[assignment.start_index..assignment.start_index + assignment.count].to_vec();
             let simulation = simulation.clone();
             let fitness = *fitness;
             let accelerator = accelerator.clone();
@@ -814,10 +896,13 @@ mod platform {
             }));
         }
 
-        let mut results = vec![FitnessResult {
-            score: -1.0e30,
-            metrics: FitnessMetrics::default(),
-        }; genomes.len()];
+        let mut results = vec![
+            FitnessResult {
+                score: -1.0e30,
+                metrics: FitnessMetrics::default(),
+            };
+            genomes.len()
+        ];
         let mut device_stats = Vec::new();
 
         for handle in handles {
@@ -899,14 +984,7 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_results = run_chunk(
-                &api,
-                function,
-                chunk,
-                simulation,
-                fitness,
-                accelerator,
-            )?;
+            let chunk_results = run_chunk(&api, function, chunk, simulation, fitness, accelerator)?;
             all_results.extend(
                 chunk_results
                     .into_iter()
@@ -938,11 +1016,8 @@ mod platform {
         fitness: &FitnessConfig,
         accelerator: &AcceleratorConfig,
     ) -> Result<Vec<FitnessResult>, String> {
-        let packed = PackedCreatureBatch::pack(
-            genomes,
-            accelerator.max_parts,
-            accelerator.max_joints,
-        )?;
+        let packed =
+            PackedCreatureBatch::pack(genomes, accelerator.max_parts, accelerator.max_joints)?;
         let world_count = packed.world_count;
         let part_slots = world_count * packed.max_parts;
         let joint_slots = world_count * packed.max_joints;
