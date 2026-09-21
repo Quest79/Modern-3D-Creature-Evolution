@@ -386,9 +386,14 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
 fn change_joint_limits(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<MutationRecord> {
     let index = rng.range_usize(genome.joints.len());
     let joint = genome.joints.get_mut(index)?;
+
+    // Keep a tiny floating-point guard below the exact 180-degree validation
+    // ceiling. Using exactly PI/2 here can round (max - min) a few ulps above PI.
+    const JOINT_SPAN_GUARD_RADIANS: f32 = 1.0e-5;
+    let max_half_width = std::f32::consts::FRAC_PI_2 - JOINT_SPAN_GUARD_RADIANS;
     let half_width =
         ((joint.limits_radians[1] - joint.limits_radians[0]) * 0.5 * rng.range_f32(0.70, 1.30))
-            .clamp(0.005, std::f32::consts::FRAC_PI_2);
+            .clamp(0.005, max_half_width);
     let center = ((joint.limits_radians[0] + joint.limits_radians[1]) * 0.5 + rng.signed(0.12))
         .clamp(
             -std::f32::consts::PI + half_width,
@@ -892,5 +897,25 @@ mod tests {
         let source = CreatureGenome::three_segment_walker();
         let result = mutate_genome(&source, 987_654_321, 250, &MutationConfig::default()).unwrap();
         assert!(result.genome.validate().is_ok());
+    }
+
+    #[test]
+    fn joint_limit_mutations_never_exceed_validation_span() {
+        let source = CreatureGenome::three_segment_walker();
+        let config = MutationConfig {
+            structural_mutation_chance: 0.0,
+            ..MutationConfig::default()
+        };
+
+        for seed in 0..1_000_u64 {
+            if let Ok(result) = mutate_genome(&source, seed, 100, &config) {
+                for joint in &result.genome.joints {
+                    assert!(
+                        joint.limits_radians[1] - joint.limits_radians[0]
+                            <= std::f32::consts::PI
+                    );
+                }
+            }
+        }
     }
 }
