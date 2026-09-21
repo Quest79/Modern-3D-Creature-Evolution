@@ -646,6 +646,35 @@ mod platform {
     }
 
     fn find_nvrtc_library() -> Option<PathBuf> {
+        fn find_in_bin(bin: &std::path::Path) -> Option<PathBuf> {
+            let entries = std::fs::read_dir(bin).ok()?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let lowercase = name.to_ascii_lowercase();
+                if lowercase.starts_with("nvrtc64_") && lowercase.ends_with(".dll") {
+                    return Some(path);
+                }
+            }
+            None
+        }
+
+        if let Some(cuda_path) = std::env::var_os("CUDA_PATH") {
+            if let Some(path) = find_in_bin(&PathBuf::from(cuda_path).join("bin")) {
+                return Some(path);
+            }
+        }
+
+        if let Some(path_value) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&path_value) {
+                if let Some(path) = find_in_bin(&directory) {
+                    return Some(path);
+                }
+            }
+        }
+
         let base = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
         let mut versions = std::fs::read_dir(base)
             .ok()?
@@ -657,19 +686,8 @@ mod platform {
         versions.reverse();
 
         for version in versions {
-            let bin = version.join("bin");
-            let Ok(entries) = std::fs::read_dir(bin) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-                let lowercase = name.to_ascii_lowercase();
-                if lowercase.starts_with("nvrtc64_") && lowercase.ends_with(".dll") {
-                    return Some(path);
-                }
+            if let Some(path) = find_in_bin(&version.join("bin")) {
+                return Some(path);
             }
         }
         None
