@@ -601,7 +601,16 @@ fn evaluate_creature(
             simulation.world.seed = trial_seed(simulation.world.seed, trial_index);
         }
         trial_seeds.push(simulation.world.seed);
-        trials.push(evaluate_fitness(genome, &simulation, &settings.fitness)?);
+        match evaluate_fitness(genome, &simulation, &settings.fitness) {
+            Ok(result) => trials.push(result),
+            Err(error) if error.starts_with("unstable physics:") => {
+                trials.push(FitnessResult {
+                    score: -1.0e30,
+                    metrics: FitnessMetrics::default(),
+                });
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     let result = aggregate_trials(&trials, settings.trial_aggregation);
