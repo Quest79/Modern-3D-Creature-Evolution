@@ -773,8 +773,7 @@ fn add_segment(
     genome.segments.push(child);
     let characteristic_length_m =
         (half_extents[0].max(half_extents[1]).max(half_extents[2]) * 2.0).max(0.0002);
-    let gravity_scale_hz =
-        (9.81 / characteristic_length_m).sqrt() / std::f32::consts::TAU;
+    let gravity_scale_hz = (9.81 / characteristic_length_m).sqrt() / std::f32::consts::TAU;
     let seed_frequency_hz = (gravity_scale_hz * rng.range_f32(0.5, 2.0)).clamp(0.05, 20.0);
 
     let mut joint = JointGene {
