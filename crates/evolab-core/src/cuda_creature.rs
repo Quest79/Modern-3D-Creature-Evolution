@@ -78,10 +78,10 @@ fn validate_cuda_creature_world(config: &SimulationConfig) -> Result<(), String>
 #[derive(Default)]
 struct PackedCreatureBatch {
     world_count: usize,
-    max_parts: usize,
-    max_joints: usize,
     part_count: Vec<u32>,
     joint_count: Vec<u32>,
+    part_base: Vec<u32>,
+    joint_base: Vec<u32>,
     initial_position: Vec<f32>,
     half_extents: Vec<f32>,
     mass: Vec<f32>,
@@ -109,18 +109,18 @@ struct PackedCreatureBatch {
 impl PackedCreatureBatch {
     fn pack(
         genomes: &[CreatureGenome],
-        max_parts: usize,
-        max_joints: usize,
+        _max_parts: usize,
+        _max_joints: usize,
     ) -> Result<Self, String> {
         let world_count = genomes.len();
-        let part_slots = world_count * max_parts;
-        let joint_slots = world_count * max_joints;
+        let part_slots = genomes.iter().map(|genome| genome.segments.len()).sum::<usize>();
+        let joint_slots = genomes.iter().map(|genome| genome.joints.len()).sum::<usize>();
         let mut packed = Self {
             world_count,
-            max_parts,
-            max_joints,
             part_count: vec![0; world_count],
             joint_count: vec![0; world_count],
+            part_base: vec![0; world_count],
+            joint_base: vec![0; world_count],
             initial_position: vec![0.0; part_slots * 3],
             half_extents: vec![0.0; part_slots * 3],
             mass: vec![0.0; part_slots],
@@ -144,14 +144,20 @@ impl PackedCreatureBatch {
             op_b: Vec::new(),
         };
 
+        let mut next_part = 0usize;
+        let mut next_joint = 0usize;
         for (world_index, genome) in genomes.iter().enumerate() {
             packed.part_count[world_index] = genome.segments.len() as u32;
             packed.joint_count[world_index] = genome.joints.len() as u32;
+            packed.part_base[world_index] = u32::try_from(next_part)
+                .map_err(|_| "CUDA compact part index exceeds u32".to_string())?;
+            packed.joint_base[world_index] = u32::try_from(next_joint)
+                .map_err(|_| "CUDA compact joint index exceeds u32".to_string())?;
 
             let mut segment_index = std::collections::HashMap::new();
             for (index, segment) in genome.segments.iter().enumerate() {
                 segment_index.insert(segment.id, index as u32);
-                let slot = world_index * max_parts + index;
+                let slot = next_part + index;
                 for axis in 0..3 {
                     packed.initial_position[slot * 3 + axis] = segment.initial_position[axis];
                     packed.half_extents[slot * 3 + axis] = segment.half_extents[axis];
@@ -168,7 +174,7 @@ impl PackedCreatureBatch {
             }
 
             for (index, joint) in genome.joints.iter().enumerate() {
-                let slot = world_index * max_joints + index;
+                let slot = next_joint + index;
                 let parent = *segment_index
                     .get(&joint.parent_id)
                     .ok_or_else(|| format!("missing parent segment {}", joint.parent_id))?;
@@ -220,6 +226,9 @@ impl PackedCreatureBatch {
                 packed.brain_count[slot] = u32::try_from(count)
                     .map_err(|_| "CUDA brain expression is too large".to_string())?;
             }
+
+            next_part += genome.segments.len();
+            next_joint += genome.joints.len();
         }
 
         Ok(packed)
