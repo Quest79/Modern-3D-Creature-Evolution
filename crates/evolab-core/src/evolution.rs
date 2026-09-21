@@ -336,13 +336,15 @@ fn change_material(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<M
 }
 
 fn random_biological_material(rng: &mut GenomeRng) -> BiologicalMaterial {
-    match rng.range_usize(7) {
+    match rng.range_usize(9) {
         0 => BiologicalMaterial::PorousPlant,
-        1 => BiologicalMaterial::Adipose,
-        2 => BiologicalMaterial::SoftTissue,
-        3 => BiologicalMaterial::FibrousTissue,
-        4 => BiologicalMaterial::TrabecularBone,
-        5 => BiologicalMaterial::CorticalBone,
+        1 => BiologicalMaterial::DensePlant,
+        2 => BiologicalMaterial::Adipose,
+        3 => BiologicalMaterial::SoftTissue,
+        4 => BiologicalMaterial::FibrousTissue,
+        5 => BiologicalMaterial::TrabecularBone,
+        6 => BiologicalMaterial::CorticalBone,
+        7 => BiologicalMaterial::Exoskeleton,
         _ => BiologicalMaterial::MineralizedTissue,
     }
 }
