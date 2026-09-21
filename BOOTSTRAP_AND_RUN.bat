@@ -169,7 +169,10 @@ if errorlevel 1 (
 set "POST_SYNC_HEAD="
 for /f "delims=" %%C in ('git rev-parse HEAD 2^>nul') do set "POST_SYNC_HEAD=%%C"
 
-if defined UPDATE_FROM_HEAD if defined POST_SYNC_HEAD if /i not "%UPDATE_FROM_HEAD%"=="%POST_SYNC_HEAD%" (
+set "UPDATE_FOUND=0"
+if defined UPDATE_FROM_HEAD if defined POST_SYNC_HEAD if /i not "%UPDATE_FROM_HEAD%"=="%POST_SYNC_HEAD%" set "UPDATE_FOUND=1"
+
+if "%UPDATE_FOUND%"=="1" (
     call :ShowUpdateSummary "%UPDATE_FROM_HEAD%" "%POST_SYNC_HEAD%"
 ) else (
     for /f "delims=" %%C in ('git rev-parse --short HEAD') do (
@@ -329,7 +332,7 @@ echo.
 echo +==================================================================================================+
 echo ^|                                      PROJECT UPDATED                                             ^|
 echo +==================================================================================================+
-echo ^|  From: %-12UPDATE_OLD_SHORT%   To: %-12UPDATE_NEW_SHORT%   Commits: %-5UPDATE_COMMITS%                                  ^|
+echo ^|  From: %UPDATE_OLD_SHORT%   --^>   To: %UPDATE_NEW_SHORT%   ^|   Commits: %UPDATE_COMMITS%
 echo +--------------------------------------------------------------------------------------------------+
 echo ^|  CHANGED FILES                                      LINES CHANGED / VISUAL +/-                  ^|
 echo +--------------------------------------------------------------------------------------------------+
