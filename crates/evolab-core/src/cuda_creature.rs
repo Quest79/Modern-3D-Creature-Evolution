@@ -84,7 +84,6 @@ struct PackedCreatureBatch {
     joint_base: Vec<u32>,
     initial_position: Vec<f32>,
     half_extents: Vec<f32>,
-    mass: Vec<f32>,
     inv_mass: Vec<f32>,
     friction: Vec<f32>,
     parent: Vec<u32>,
@@ -129,7 +128,6 @@ impl PackedCreatureBatch {
             joint_base: vec![0; world_count],
             initial_position: vec![0.0; part_slots * 3],
             half_extents: vec![0.0; part_slots * 3],
-            mass: vec![0.0; part_slots],
             inv_mass: vec![0.0; part_slots],
             friction: vec![0.0; part_slots],
             parent: vec![0; joint_slots],
@@ -169,7 +167,6 @@ impl PackedCreatureBatch {
                     packed.half_extents[slot * 3 + axis] = segment.half_extents[axis];
                 }
                 let mass = segment.mass_kg().max(1.0e-12);
-                packed.mass[slot] = mass;
                 packed.inv_mass[slot] = mass.recip();
                 packed.friction[slot] = segment.friction;
             }
