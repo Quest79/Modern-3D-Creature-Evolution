@@ -69,31 +69,6 @@ if errorlevel 1 (
 )
 set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 
-rem The articulated CUDA solver compiles its GPU kernel with NVRTC at runtime.
-rem If this PC has an NVIDIA GPU, make sure the CUDA Toolkit/NVRTC is present.
-set "CUDA_NVRTC_FOUND="
-if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
-    for /d %%D in ("%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*") do (
-        for %%F in ("%%~fD\bin\nvrtc64_*.dll") do (
-            if exist "%%~fF" set "CUDA_NVRTC_FOUND=%%~fF"
-        )
-    )
-)
-
-where nvidia-smi >nul 2>&1
-if not errorlevel 1 if not defined CUDA_NVRTC_FOUND (
-    echo.
-    echo [SETUP] NVIDIA GPU detected. Installing CUDA Toolkit for GPU physics...
-    winget install --id Nvidia.CUDA -e --source winget --accept-package-agreements --accept-source-agreements
-    if errorlevel 1 (
-        echo.
-        echo [ERROR] CUDA Toolkit installation failed.
-        echo CUDA evolution requires NVRTC from the CUDA Toolkit.
-        pause
-        exit /b 1
-    )
-)
-
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VC_TOOLS_FOUND="
 if exist "%VSWHERE%" (
@@ -169,9 +144,47 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem Always restart once from the freshly synchronized copy inside the repo.
+rem This prevents an older downloaded bootstrap from continuing with stale setup logic.
+if /i not "%~1"=="--bootstrap-synced" (
+    echo.
+    echo [SETUP] Restarting with the latest bootstrap...
+    call "%PROJECT_DIR%\BOOTSTRAP_AND_RUN.bat" --bootstrap-synced %*
+    exit /b %errorlevel%
+)
+shift
+
 for /f "delims=" %%C in ('git rev-parse --short HEAD') do (
     echo [SETUP] Running main at commit %%C
 )
+
+rem The articulated CUDA solver compiles its GPU kernel with NVRTC at runtime.
+rem Detect NVRTC from CUDA_PATH, the standard Toolkit tree, or PATH.
+call :FindNvrtc
+
+where nvidia-smi >nul 2>&1
+if not errorlevel 1 if not defined CUDA_NVRTC_FOUND (
+    echo.
+    echo [SETUP] NVIDIA GPU detected. Installing CUDA Toolkit for GPU physics...
+    winget install --id Nvidia.CUDA -e --source winget --accept-package-agreements --accept-source-agreements
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] CUDA Toolkit installation failed.
+        echo CUDA evolution requires NVRTC from the CUDA Toolkit.
+        pause
+        exit /b 1
+    )
+
+    call :FindNvrtc
+    if not defined CUDA_NVRTC_FOUND (
+        echo.
+        echo [ERROR] CUDA Toolkit installation completed, but NVRTC was not found.
+        echo Close this window and run this bootstrap again once.
+        pause
+        exit /b 1
+    )
+)
+
 
 echo.
 echo [BUILD] Building release backend...
@@ -248,6 +261,33 @@ if errorlevel 1 (
 )
 
 endlocal
+exit /b 0
+
+:FindNvrtc
+set "CUDA_NVRTC_FOUND="
+
+if defined CUDA_PATH (
+    for %%F in ("%CUDA_PATH%\bin\nvrtc64_*.dll") do (
+        if exist "%%~fF" set "CUDA_NVRTC_FOUND=%%~fF"
+    )
+)
+
+if not defined CUDA_NVRTC_FOUND if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
+    for /d %%D in ("%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*") do (
+        for %%F in ("%%~fD\bin\nvrtc64_*.dll") do (
+            if exist "%%~fF" set "CUDA_NVRTC_FOUND=%%~fF"
+        )
+    )
+)
+
+if not defined CUDA_NVRTC_FOUND (
+    for %%F in (nvrtc64_*.dll) do (
+        for /f "delims=" %%N in ('where %%F 2^>nul') do (
+            if not defined CUDA_NVRTC_FOUND set "CUDA_NVRTC_FOUND=%%~fN"
+        )
+    )
+)
+
 exit /b 0
 
 :FindGodot
