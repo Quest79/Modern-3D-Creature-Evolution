@@ -2,7 +2,11 @@ extends Node
 
 const EVENT_PORT_START := 47821
 const EVENT_PORT_TRIES := 32
-const SETTINGS_PATH := "user://settings.cfg"
+const PORTABLE_DATA_DIR_NAME := "portable_data"
+const PORTABLE_RUNTIME_DIR_NAME := "runtime"
+const PORTABLE_SAVES_DIR_NAME := "saves"
+const PORTABLE_CHAMPIONS_DIR_NAME := "champions"
+const PORTABLE_EXPERIMENTS_DIR_NAME := "experiments"
 const DEFAULT_HUD_WIDTH := 400.0
 const MIN_HUD_WIDTH := 160.0
 const MAX_HUD_WIDTH := 400.0
@@ -212,6 +216,7 @@ var _replay_final_time := 0.0
 
 
 func _ready() -> void:
+    _ensure_portable_directories()
     _load_settings()
     _ui_theme = Theme.new()
     _ui_theme.default_font_size = _font_size
@@ -316,7 +321,19 @@ func _process(delta: float) -> void:
                 _job_kind = ""
                 _has_evolution_champion = true
                 _load_results_file(_evolution_results_path())
-                _current_genome_source = "latest evolution champion"
+                var recovered_fitness := 0.0
+                if not _results_data.is_empty():
+                    var recovered_result = _results_data.get("result", {})
+                    if typeof(recovered_result) == TYPE_DICTIONARY:
+                        recovered_fitness = float(
+                            recovered_result.get("champion_fitness", 0.0)
+                        )
+                var recovered_archive := _archive_current_champion(recovered_fitness)
+                _current_genome_source = (
+                    recovered_archive
+                    if not recovered_archive.is_empty()
+                    else _evolution_champion_path()
+                )
                 _build_creature_from_genome(_current_genome)
                 _set_status(
                     "Evolution process ended • latest champion/results recovered"
@@ -339,11 +356,58 @@ func _exit_tree() -> void:
         _udp.close()
 
 
+func _repo_root_path() -> String:
+    var project_dir := ProjectSettings.globalize_path("res://")
+    return project_dir.path_join("../..").simplify_path()
+
+
+func _portable_data_root() -> String:
+    return _repo_root_path().path_join(PORTABLE_DATA_DIR_NAME)
+
+
+func _portable_runtime_dir() -> String:
+    return _portable_data_root().path_join(PORTABLE_RUNTIME_DIR_NAME)
+
+
+func _portable_saves_dir() -> String:
+    return _portable_data_root().path_join(PORTABLE_SAVES_DIR_NAME)
+
+
+func _portable_champions_dir() -> String:
+    return _portable_saves_dir().path_join(PORTABLE_CHAMPIONS_DIR_NAME)
+
+
+func _portable_experiments_dir() -> String:
+    return _portable_saves_dir().path_join(PORTABLE_EXPERIMENTS_DIR_NAME)
+
+
+func _runtime_path(file_name: String) -> String:
+    return _portable_runtime_dir().path_join(file_name)
+
+
+func _settings_path() -> String:
+    return _portable_data_root().path_join("settings.cfg")
+
+
+func _ensure_portable_directories() -> bool:
+    var ok := true
+    for path in [
+        _portable_data_root(),
+        _portable_runtime_dir(),
+        _portable_saves_dir(),
+        _portable_champions_dir(),
+        _portable_experiments_dir(),
+    ]:
+        if DirAccess.make_dir_recursive_absolute(path) != OK:
+            if not DirAccess.dir_exists_absolute(path):
+                ok = false
+                push_error("Could not create portable data directory: %s" % path)
+    return ok
+
+
 func _backend_path() -> String:
     var exe_name := "evolab.exe" if OS.get_name() == "Windows" else "evolab"
-    var project_dir := ProjectSettings.globalize_path("res://")
-    var repo_root := project_dir.path_join("../..").simplify_path()
-    return repo_root.path_join("target").path_join("release").path_join(exe_name)
+    return _repo_root_path().path_join("target").path_join("release").path_join(exe_name)
 
 
 func _backend_exists() -> bool:
@@ -1722,9 +1786,7 @@ func _on_replay_lineage_creature() -> void:
     var simulation: Dictionary = settings.get("simulation", {})
     var world: Dictionary = simulation.get("world", {})
 
-    var temp_path := ProjectSettings.globalize_path(
-        "user://historical_replay_creature.json"
-    )
+    var temp_path := _runtime_path("historical_replay_creature.json")
     if not _write_genome_file(temp_path, genome_value):
         _set_status("Could not prepare historical creature replay.")
         return
@@ -2572,7 +2634,8 @@ func _world_json() -> String:
 
 
 func _write_runtime_json(file_name: String, value) -> String:
-    var path := ProjectSettings.globalize_path("user://" + file_name)
+    _ensure_portable_directories()
+    var path := _runtime_path(file_name)
     var file := FileAccess.open(path, FileAccess.WRITE)
     if file == null:
         return ""
@@ -2771,7 +2834,7 @@ func _apply_font_size() -> void:
 
 func _load_settings() -> void:
     var config := ConfigFile.new()
-    if config.load(SETTINGS_PATH) != OK:
+    if config.load(_settings_path()) != OK:
         return
 
     _font_size = int(config.get_value("ui", "font_size", _font_size))
@@ -2962,7 +3025,7 @@ func _save_settings() -> void:
         "mouse_sensitivity_degrees",
         _mouse_sensitivity_degrees
     )
-    config.save(SETTINGS_PATH)
+    config.save(_settings_path())
 
 
 func _update_layout() -> void:
@@ -3087,6 +3150,7 @@ func _build_file_dialogs() -> void:
     _save_dialog.access = FileDialog.ACCESS_FILESYSTEM
     _save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
     _save_dialog.filters = PackedStringArray(["*.json ; Creature Genome JSON"])
+    _save_dialog.current_dir = _portable_champions_dir()
     _save_dialog.current_file = "creature_genome.json"
     _save_dialog.file_selected.connect(_on_save_file_selected)
     add_child(_save_dialog)
@@ -3095,6 +3159,7 @@ func _build_file_dialogs() -> void:
     _load_dialog.access = FileDialog.ACCESS_FILESYSTEM
     _load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
     _load_dialog.filters = PackedStringArray(["*.json ; Creature Genome JSON"])
+    _load_dialog.current_dir = _portable_champions_dir()
     _load_dialog.file_selected.connect(_on_load_file_selected)
     add_child(_load_dialog)
 
@@ -3102,6 +3167,7 @@ func _build_file_dialogs() -> void:
     _experiment_save_dialog.access = FileDialog.ACCESS_FILESYSTEM
     _experiment_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
     _experiment_save_dialog.filters = PackedStringArray(["*.evo ; EvoLab Experiment"])
+    _experiment_save_dialog.current_dir = _portable_experiments_dir()
     _experiment_save_dialog.current_file = "experiment.evo"
     _experiment_save_dialog.file_selected.connect(_on_experiment_save_file_selected)
     add_child(_experiment_save_dialog)
@@ -3110,6 +3176,7 @@ func _build_file_dialogs() -> void:
     _experiment_load_dialog.access = FileDialog.ACCESS_FILESYSTEM
     _experiment_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
     _experiment_load_dialog.filters = PackedStringArray(["*.evo ; EvoLab Experiment"])
+    _experiment_load_dialog.current_dir = _portable_experiments_dir()
     _experiment_load_dialog.file_selected.connect(_on_experiment_load_file_selected)
     add_child(_experiment_load_dialog)
 
@@ -3119,6 +3186,7 @@ func _build_file_dialogs() -> void:
     _results_load_dialog.filters = PackedStringArray([
         "*.evoresults ; EvoLab Evolution Results"
     ])
+    _results_load_dialog.current_dir = _portable_saves_dir()
     _results_load_dialog.file_selected.connect(_on_results_load_file_selected)
     add_child(_results_load_dialog)
 
@@ -3274,7 +3342,7 @@ func _on_mutate_pressed() -> void:
     ]))
 
     if not _current_genome.is_empty():
-        var temp_path := ProjectSettings.globalize_path("user://mutation_parent.json")
+        var temp_path := _runtime_path("mutation_parent.json")
         if not _write_genome_file(temp_path, _current_genome):
             _set_status("Could not prepare current genome for mutation.")
             return
@@ -3367,7 +3435,7 @@ func _on_evolve_pressed() -> void:
     args.append_array(_accelerator_cli_args())
 
     if not _current_genome.is_empty():
-        var parent_path := ProjectSettings.globalize_path("user://evolution_parent.json")
+        var parent_path := _runtime_path("evolution_parent.json")
         if not _write_genome_file(parent_path, _current_genome):
             _set_status("Could not write evolution parent genome.")
             return
@@ -3440,7 +3508,7 @@ func _on_resume_evolution_pressed() -> void:
     args.append_array(_accelerator_cli_args())
 
     if not _current_genome.is_empty():
-        var parent_path := ProjectSettings.globalize_path("user://evolution_parent.json")
+        var parent_path := _runtime_path("evolution_parent.json")
         if not _write_genome_file(parent_path, _current_genome):
             _set_status("Could not write evolution parent genome.")
             return
@@ -3506,9 +3574,7 @@ func _experiment_ancestor_dictionary() -> Dictionary:
     if not _backend_exists():
         return {}
 
-    var temp_path := ProjectSettings.globalize_path(
-        "user://experiment_default_ancestor.json"
-    )
+    var temp_path := _runtime_path("experiment_default_ancestor.json")
     var output: Array = []
     var exit_code := OS.execute(
         _backend_path(),
@@ -3909,15 +3975,111 @@ func _on_load_file_selected(path: String) -> void:
 
 
 func _evolution_champion_path() -> String:
-    return ProjectSettings.globalize_path("user://evolution_champion.json")
+    return _runtime_path("active_evolution_champion.json")
 
 
 func _evolution_results_path() -> String:
-    return ProjectSettings.globalize_path("user://evolution_results.evoresults")
+    return _runtime_path("active_evolution_results.evoresults")
 
 
 func _evolution_checkpoint_path() -> String:
-    return ProjectSettings.globalize_path("user://evolution_checkpoint.evockpt")
+    return _runtime_path("active_evolution_checkpoint.evockpt")
+
+
+func _champion_objective_label() -> String:
+    var weights := {
+        "Distance": _fitness_distance_weight,
+        "Speed": _fitness_speed_weight,
+        "Upright": _fitness_upright_weight,
+        "Stability": _fitness_stability_weight,
+        "Energy": _fitness_energy_weight,
+    }
+
+    if not _results_data.is_empty():
+        var result_value = _results_data.get("result", {})
+        if typeof(result_value) == TYPE_DICTIONARY:
+            var result: Dictionary = result_value
+            var final_settings_value = result.get("final_settings", {})
+            if typeof(final_settings_value) == TYPE_DICTIONARY:
+                var final_settings: Dictionary = final_settings_value
+                var fitness_value = final_settings.get("fitness", {})
+                if typeof(fitness_value) == TYPE_DICTIONARY:
+                    var fitness: Dictionary = fitness_value
+                    var saved_weights_value = fitness.get("weights", {})
+                    if typeof(saved_weights_value) == TYPE_DICTIONARY:
+                        var saved_weights: Dictionary = saved_weights_value
+                        weights["Distance"] = float(saved_weights.get("distance", weights["Distance"]))
+                        weights["Speed"] = float(saved_weights.get("average_speed", weights["Speed"]))
+                        weights["Upright"] = float(saved_weights.get("upright", weights["Upright"]))
+                        weights["Stability"] = float(saved_weights.get("stability", weights["Stability"]))
+                        weights["Energy"] = float(saved_weights.get("energy", weights["Energy"]))
+
+    var best_name := "Fitness"
+    var best_weight := 0.0
+    for name in weights:
+        var magnitude := absf(float(weights[name]))
+        if magnitude > best_weight:
+            best_weight = magnitude
+            best_name = str(name)
+    return best_name
+
+
+func _filename_number(value: float) -> String:
+    var text := "%.3f" % value
+    while text.contains(".") and text.ends_with("0"):
+        text = text.left(text.length() - 1)
+    if text.ends_with("."):
+        text = text.left(text.length() - 1)
+    if text == "-0":
+        text = "0"
+    return text
+
+
+func _champion_archive_path(fitness: float) -> String:
+    _ensure_portable_directories()
+    var now := Time.get_datetime_dict_from_system()
+    var months := [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"
+    ]
+    var month_index := clampi(int(now.get("month", 1)) - 1, 0, 11)
+    var hour_24 := int(now.get("hour", 0))
+    var minute := int(now.get("minute", 0))
+    var am_pm := "am" if hour_24 < 12 else "pm"
+    var hour_12 := hour_24 % 12
+    if hour_12 == 0:
+        hour_12 = 12
+
+    var base_name := (
+        "champ_%s%d-%d-%d-%02d%s_%s-%s"
+        % [
+            months[month_index],
+            int(now.get("day", 1)),
+            int(now.get("year", 1970)),
+            hour_12,
+            minute,
+            am_pm,
+            _champion_objective_label(),
+            _filename_number(fitness),
+        ]
+    )
+    var candidate := _portable_champions_dir().path_join(base_name + ".json")
+    var suffix := 2
+    while FileAccess.file_exists(candidate):
+        candidate = _portable_champions_dir().path_join(
+            "%s_%d.json" % [base_name, suffix]
+        )
+        suffix += 1
+    return candidate
+
+
+func _archive_current_champion(fitness: float) -> String:
+    if _current_genome.is_empty():
+        return ""
+    var archive_path := _champion_archive_path(fitness)
+    if not _write_genome_file(archive_path, _current_genome):
+        return ""
+    return archive_path
 
 
 func _load_results_file(path: String) -> bool:
@@ -4287,7 +4449,14 @@ func _handle_event(event: Dictionary) -> void:
             if results_file != "":
                 _load_results_file(results_file)
 
-            _current_genome_source = "evolution champion"
+            var archived_champion := _archive_current_champion(
+                float(event.get("champion_fitness", 0.0))
+            )
+            _current_genome_source = (
+                archived_champion
+                if not archived_champion.is_empty()
+                else champion_file
+            )
             _build_creature_from_genome(_current_genome)
             _has_evolution_champion = not _current_genome.is_empty()
 
