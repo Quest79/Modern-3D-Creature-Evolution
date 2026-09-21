@@ -900,8 +900,7 @@ mod platform {
             ));
         }
         let mut cubin = vec![0_u8; cubin_size.max(1)];
-        let cubin_result =
-            unsafe { (api.get_cubin)(program, cubin.as_mut_ptr().cast::<c_char>()) };
+        let cubin_result = unsafe { (api.get_cubin)(program, cubin.as_mut_ptr().cast::<c_char>()) };
         if cubin_result != NVRTC_SUCCESS {
             return Err(format!("nvrtcGetCUBIN failed with code {cubin_result}"));
         }
