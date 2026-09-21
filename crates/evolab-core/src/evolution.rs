@@ -356,17 +356,29 @@ fn change_motor(genome: &mut CreatureGenome, rng: &mut GenomeRng) -> Option<Muta
     };
     let joint = genome.joints.get_mut(index)?;
 
-    // Stiffness and damping are solver/controller gains, not biological strength
-    // traits. Strength evolution changes requested torque, while runtime enforces
-    // geometry-scaled muscle stress and power ceilings.
+    // Controller gains are derived from physical inertia at runtime. Evolution
+    // changes only biological actuation traits: requested torque, excursion, and
+    // contraction-cycle frequency.
     joint.motor_max_torque =
         (joint.motor_max_torque * rng.range_f32(0.70, 1.40)).clamp(0.0, biological_torque_limit);
+
+    let half_span = ((joint.limits_radians[1] - joint.limits_radians[0]) * 0.5).max(0.0);
+    joint.motor_amplitude_radians =
+        (joint.motor_amplitude_radians * rng.range_f32(0.75, 1.25)).clamp(0.0, half_span);
+
+    joint.motor_frequency_hz =
+        (joint.motor_frequency_hz * rng.range_f32(0.70, 1.40)).clamp(0.05, 20.0);
 
     Some(MutationRecord {
         kind: MutationKind::ChangeMotor,
         description: format!(
-            "changed actuator {}→{} requested torque to {:.2} N·m (biological ceiling {:.2} N·m)",
-            joint.parent_id, joint.child_id, joint.motor_max_torque, biological_torque_limit
+            "changed actuator {}→{}: torque {:.2} N·m / {:.2} N·m ceiling, amplitude {:.3} rad, frequency {:.3} Hz",
+            joint.parent_id,
+            joint.child_id,
+            joint.motor_max_torque,
+            biological_torque_limit,
+            joint.motor_amplitude_radians,
+            joint.motor_frequency_hz
         ),
     })
 }
@@ -759,6 +771,12 @@ fn add_segment(
     };
 
     genome.segments.push(child);
+    let characteristic_length_m =
+        (half_extents[0].max(half_extents[1]).max(half_extents[2]) * 2.0).max(0.0002);
+    let gravity_scale_hz =
+        (9.81 / characteristic_length_m).sqrt() / std::f32::consts::TAU;
+    let seed_frequency_hz = (gravity_scale_hz * rng.range_f32(0.5, 2.0)).clamp(0.05, 20.0);
+
     let mut joint = JointGene {
         parent_id: parent.id,
         child_id: id,
@@ -766,13 +784,13 @@ fn add_segment(
         child_anchor,
         axis: joint_axis,
         limits_radians: [-0.90, 0.90],
-        motor_amplitude_radians: rng.range_f32(0.25, 0.85),
-        motor_frequency_hz: rng.range_f32(0.45, 2.0),
+        motor_amplitude_radians: rng.range_f32(0.15, 0.85),
+        motor_frequency_hz: seed_frequency_hz,
         motor_phase_radians: rng.range_f32(0.0, std::f32::consts::TAU),
-        // Numerical position-controller gains; biological strength is enforced
-        // separately by torque/stress and power limits.
-        motor_stiffness: 32.0,
-        motor_damping: 4.5,
+        // Kept in the file format for compatibility; runtime gains are derived
+        // from physical inertia and the current biological torque ceiling.
+        motor_stiffness: 0.0,
+        motor_damping: 0.0,
         motor_max_torque: 0.0,
     };
     let biological_torque_limit = genome.biological_joint_limits(&joint).ok()?.0;
