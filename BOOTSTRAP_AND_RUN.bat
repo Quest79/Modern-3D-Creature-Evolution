@@ -169,23 +169,34 @@ where nvidia-smi >nul 2>&1
 if not errorlevel 1 if not defined CUDA_NVRTC_FOUND (
     echo.
     echo [SETUP] NVIDIA GPU detected, but NVRTC is missing.
-    echo [SETUP] Repairing the CUDA Toolkit installation...
-    winget install --id Nvidia.CUDA -e --source winget --force --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
-    if errorlevel 1 (
-        echo.
-        echo [ERROR] CUDA Toolkit repair/reinstall failed.
-        pause
-        exit /b 1
+    echo [SETUP] Installing the missing NVRTC component...
+
+    set "CUDA_PACKAGE_VERSION="
+    for /f "tokens=2" %%V in ('winget show --id Nvidia.CUDA -e --source winget --accept-source-agreements 2^>nul ^| findstr /B /C:"Version:"') do (
+        set "CUDA_PACKAGE_VERSION=%%V"
+    )
+
+    if defined CUDA_PACKAGE_VERSION (
+        winget install --id Nvidia.CUDA -e --source winget --force --disable-interactivity --accept-package-agreements --accept-source-agreements --override "-s nvrtc_!CUDA_PACKAGE_VERSION! nvrtc_dev_!CUDA_PACKAGE_VERSION! -n"
+    ) else (
+        winget install --id Nvidia.CUDA -e --source winget --force --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
     )
 
     call :FindNvrtc
+
+    if not defined CUDA_NVRTC_FOUND (
+        echo.
+        echo [SETUP] Targeted NVRTC install did not produce the DLL. Running a full forced CUDA repair...
+        winget install --id Nvidia.CUDA -e --source winget --force --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+        call :FindNvrtc
+    )
 )
 
 if not defined CUDA_NVRTC_FOUND (
     echo.
-    echo [ERROR] NVRTC is still missing after a forced CUDA Toolkit reinstall.
-    echo [ERROR] Expected a file named nvrtc64_*.dll inside the CUDA Toolkit.
-    echo [ERROR] The bootstrap will stop here instead of telling you to run it again.
+    echo [ERROR] NVRTC is still missing after automated CUDA repair.
+    echo [ERROR] Expected nvrtc64_*.dll under the installed CUDA Toolkit.
+    echo [ERROR] Stopping here. This script will NOT ask you to rerun it again.
     pause
     exit /b 1
 )
