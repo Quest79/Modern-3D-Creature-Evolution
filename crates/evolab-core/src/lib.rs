@@ -10,6 +10,7 @@ mod brain;
 mod checkpoint;
 mod config;
 mod creature;
+mod cuda_creature;
 mod cuda_probe;
 mod evolution;
 mod experiment;
@@ -40,6 +41,7 @@ pub use creature::{
     BiologicalMaterial, CreatureBodySnapshot, CreatureGenome, CreatureReport, CreatureSimulator,
     CreatureSnapshot, JointGene, MUSCLE_DENSITY_KG_M3, SegmentGene,
 };
+pub use cuda_creature::{CudaCreatureBatchResult, run_cuda_creature_batch};
 pub use cuda_probe::{CudaProbeBatchReport, discover_cuda_devices, run_cuda_probe_batch};
 pub use evolution::{
     GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult,
