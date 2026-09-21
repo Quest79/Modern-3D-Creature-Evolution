@@ -4,7 +4,7 @@ use crate::{
 };
 
 #[cfg(windows)]
-use crate::{DeviceWorkAssignment, Expression, FitnessMetrics, SensorKind, legacy_expression};
+use crate::{Expression, SensorKind, legacy_expression};
 
 #[derive(Clone, Debug)]
 pub struct CudaCreatureBatchResult {
@@ -767,6 +767,21 @@ mod platform {
             Ok(())
         } else {
             Err(format!("{operation} failed with CUDA error code {result}"))
+        }
+    }
+
+    struct StreamGuard<'a> {
+        api: &'a CudaApi,
+        stream: CuStream,
+    }
+
+    impl Drop for StreamGuard<'_> {
+        fn drop(&mut self) {
+            if !self.stream.is_null() {
+                unsafe {
+                    let _ = (self.api.stream_destroy)(self.stream);
+                }
+            }
         }
     }
 
