@@ -119,8 +119,19 @@ if errorlevel 1 (
 )
 
 echo.
-echo [SETUP] Synchronizing exactly to the latest main branch...
-git fetch --prune origin main
+echo [SETUP] Checking for updates...
+
+set "PRE_SYNC_HEAD="
+for /f "delims=" %%C in ('git rev-parse HEAD 2^>nul') do set "PRE_SYNC_HEAD=%%C"
+
+rem If an older bootstrap already reset us to the new HEAD and then restarted
+rem this freshly updated script, ORIG_HEAD still points at the version we came from.
+set "RESTART_FROM_HEAD="
+if /i "%~1"=="--bootstrap-synced" (
+    for /f "delims=" %%C in ('git rev-parse ORIG_HEAD 2^>nul') do set "RESTART_FROM_HEAD=%%C"
+)
+
+git fetch --quiet --prune origin main
 if errorlevel 1 (
     echo.
     echo [ERROR] Could not fetch the latest main branch.
@@ -138,12 +149,32 @@ if errorlevel 1 (
     exit /b 1
 )
 
-git reset --hard origin/main
+set "TARGET_HEAD="
+for /f "delims=" %%C in ('git rev-parse origin/main 2^>nul') do set "TARGET_HEAD=%%C"
+
+set "UPDATE_FROM_HEAD=%PRE_SYNC_HEAD%"
+if /i "%~1"=="--bootstrap-synced" if defined RESTART_FROM_HEAD if /i not "%RESTART_FROM_HEAD%"=="%PRE_SYNC_HEAD%" (
+    git merge-base --is-ancestor "%RESTART_FROM_HEAD%" "%PRE_SYNC_HEAD%" >nul 2>&1
+    if not errorlevel 1 set "UPDATE_FROM_HEAD=%RESTART_FROM_HEAD%"
+)
+
+git reset --hard origin/main >nul
 if errorlevel 1 (
     echo.
     echo [ERROR] Could not synchronize the local checkout to origin/main.
     pause
     exit /b 1
+)
+
+set "POST_SYNC_HEAD="
+for /f "delims=" %%C in ('git rev-parse HEAD 2^>nul') do set "POST_SYNC_HEAD=%%C"
+
+if defined UPDATE_FROM_HEAD if defined POST_SYNC_HEAD if /i not "%UPDATE_FROM_HEAD%"=="%POST_SYNC_HEAD%" (
+    call :ShowUpdateSummary "%UPDATE_FROM_HEAD%" "%POST_SYNC_HEAD%"
+) else (
+    for /f "delims=" %%C in ('git rev-parse --short HEAD') do (
+        echo [UPDATE] Already current at %%C - no files changed.
+    )
 )
 
 rem Always restart once from the freshly synchronized copy inside the repo.
@@ -282,6 +313,35 @@ if errorlevel 1 (
 )
 
 endlocal
+exit /b 0
+
+:ShowUpdateSummary
+set "UPDATE_OLD=%~1"
+set "UPDATE_NEW=%~2"
+set "UPDATE_OLD_SHORT="
+set "UPDATE_NEW_SHORT="
+set "UPDATE_COMMITS=0"
+for /f "delims=" %%C in ('git rev-parse --short "%UPDATE_OLD%" 2^>nul') do set "UPDATE_OLD_SHORT=%%C"
+for /f "delims=" %%C in ('git rev-parse --short "%UPDATE_NEW%" 2^>nul') do set "UPDATE_NEW_SHORT=%%C"
+for /f "delims=" %%C in ('git rev-list --count "%UPDATE_OLD%..%UPDATE_NEW%" 2^>nul') do set "UPDATE_COMMITS=%%C"
+
+echo.
+echo +==================================================================================================+
+echo ^|                                      PROJECT UPDATED                                             ^|
+echo +==================================================================================================+
+echo ^|  From: %-12UPDATE_OLD_SHORT%   To: %-12UPDATE_NEW_SHORT%   Commits: %-5UPDATE_COMMITS%                                  ^|
+echo +--------------------------------------------------------------------------------------------------+
+echo ^|  CHANGED FILES                                      LINES CHANGED / VISUAL +/-                  ^|
+echo +--------------------------------------------------------------------------------------------------+
+git diff --stat --stat-width=96 --stat-name-width=54 "%UPDATE_OLD%..%UPDATE_NEW%"
+echo +--------------------------------------------------------------------------------------------------+
+echo ^|  NEW COMMITS                                                                                     ^|
+echo +--------------------------------------------------------------------------------------------------+
+git log --no-decorate --pretty=format:"  %%h  %%s" "%UPDATE_OLD%..%UPDATE_NEW%"
+echo.
+echo +==================================================================================================+
+echo.
+
 exit /b 0
 
 :FindNvrtc
