@@ -664,10 +664,27 @@ mod platform {
     }
 
     fn find_nvrtc_library() -> Option<PathBuf> {
-        fn find_in_bin(bin: &std::path::Path) -> Option<PathBuf> {
+        fn is_wrong_architecture(path: &Path) -> bool {
+            let lowercase = path.to_string_lossy().to_ascii_lowercase();
+            if cfg!(target_arch = "x86_64") {
+                lowercase.contains(r"\arm64\") || lowercase.contains(r"\aarch64\")
+            } else if cfg!(target_arch = "aarch64") {
+                lowercase.contains(r"\x64\") || lowercase.contains(r"\x86_64\")
+            } else {
+                false
+            }
+        }
+
+        fn find_in_bin(bin: &Path) -> Option<PathBuf> {
+            if is_wrong_architecture(bin) {
+                return None;
+            }
             let entries = std::fs::read_dir(bin).ok()?;
             for entry in entries.flatten() {
                 let path = entry.path();
+                if is_wrong_architecture(&path) {
+                    continue;
+                }
                 let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                     continue;
                 };
@@ -679,8 +696,19 @@ mod platform {
             None
         }
 
+        fn find_in_toolkit_root(root: &Path) -> Option<PathBuf> {
+            // NVIDIA's normal x64 layout keeps NVRTC directly in bin. Some
+            // Toolkit releases also expose an explicit x64 subdirectory.
+            for candidate in [root.join("bin"), root.join("bin").join("x64")] {
+                if let Some(path) = find_in_bin(&candidate) {
+                    return Some(path);
+                }
+            }
+            None
+        }
+
         if let Some(cuda_path) = std::env::var_os("CUDA_PATH") {
-            if let Some(path) = find_in_bin(&PathBuf::from(cuda_path).join("bin")) {
+            if let Some(path) = find_in_toolkit_root(&PathBuf::from(cuda_path)) {
                 return Some(path);
             }
         }
@@ -704,7 +732,7 @@ mod platform {
         versions.reverse();
 
         for version in versions {
-            if let Some(path) = find_in_bin(&version.join("bin")) {
+            if let Some(path) = find_in_toolkit_root(&version) {
                 return Some(path);
             }
         }
