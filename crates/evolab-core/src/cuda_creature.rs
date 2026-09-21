@@ -451,7 +451,7 @@ mod platform {
         os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
         ptr::{null, null_mut},
-        sync::{Mutex, OnceLock},
+        sync::{Arc, Mutex, OnceLock},
         thread,
         time::Instant,
     };
@@ -484,6 +484,7 @@ mod platform {
     type CuDeviceGet = unsafe extern "system" fn(*mut CuDevice, i32) -> CuResult;
     type CuCtxCreate = unsafe extern "system" fn(*mut CuContext, u32, CuDevice) -> CuResult;
     type CuCtxDestroy = unsafe extern "system" fn(CuContext) -> CuResult;
+    type CuCtxSetCurrent = unsafe extern "system" fn(CuContext) -> CuResult;
     type CuStreamCreate = unsafe extern "system" fn(*mut CuStream, u32) -> CuResult;
     type CuStreamDestroy = unsafe extern "system" fn(CuStream) -> CuResult;
     type CuStreamSynchronize = unsafe extern "system" fn(CuStream) -> CuResult;
@@ -579,6 +580,7 @@ mod platform {
         device_get: CuDeviceGet,
         ctx_create: CuCtxCreate,
         ctx_destroy: CuCtxDestroy,
+        ctx_set_current: CuCtxSetCurrent,
         stream_create: CuStreamCreate,
         stream_destroy: CuStreamDestroy,
         stream_synchronize: CuStreamSynchronize,
@@ -619,6 +621,7 @@ mod platform {
                 device_get: load!("cuDeviceGet", CuDeviceGet),
                 ctx_create: load!("cuCtxCreate_v2", CuCtxCreate),
                 ctx_destroy: load!("cuCtxDestroy_v2", CuCtxDestroy),
+                ctx_set_current: load!("cuCtxSetCurrent", CuCtxSetCurrent),
                 stream_create: load!("cuStreamCreate", CuStreamCreate),
                 stream_destroy: load!("cuStreamDestroy_v2", CuStreamDestroy),
                 stream_synchronize: load!("cuStreamSynchronize", CuStreamSynchronize),
@@ -768,49 +771,109 @@ mod platform {
         }
     }
 
-    struct ContextGuard<'a> {
-        api: &'a CudaApi,
+    type RuntimeCacheKey = (u32, i32, i32, bool);
+    static CUDA_RUNTIME_CACHE: OnceLock<
+        Mutex<HashMap<RuntimeCacheKey, Arc<Mutex<CudaRuntime>>>>,
+    > = OnceLock::new();
+
+    struct CudaRuntime {
+        api: CudaApi,
         context: CuContext,
+        module: CuModule,
+        function: CuFunction,
     }
 
-    impl Drop for ContextGuard<'_> {
+    unsafe impl Send for CudaRuntime {}
+
+    impl Drop for CudaRuntime {
         fn drop(&mut self) {
-            if !self.context.is_null() {
-                unsafe {
+            unsafe {
+                let _ = (self.api.ctx_set_current)(self.context);
+                if !self.module.is_null() {
+                    let _ = (self.api.module_unload)(self.module);
+                }
+                if !self.context.is_null() {
                     let _ = (self.api.ctx_destroy)(self.context);
                 }
             }
         }
     }
 
-    struct StreamGuard<'a> {
-        api: &'a CudaApi,
-        stream: CuStream,
-    }
+    fn get_or_create_runtime(
+        device_info: &CudaDeviceInfo,
+        throughput_mode: ThroughputMode,
+    ) -> Result<Arc<Mutex<CudaRuntime>>, String> {
+        let key = (
+            device_info.id,
+            device_info.compute_capability_major,
+            device_info.compute_capability_minor,
+            throughput_mode == ThroughputMode::MaxThroughput,
+        );
+        let cache = CUDA_RUNTIME_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    impl Drop for StreamGuard<'_> {
-        fn drop(&mut self) {
-            if !self.stream.is_null() {
-                unsafe {
-                    let _ = (self.api.stream_destroy)(self.stream);
-                }
-            }
+        if let Some(runtime) = cache
+            .lock()
+            .map_err(|_| "CUDA runtime cache mutex was poisoned".to_string())?
+            .get(&key)
+            .cloned()
+        {
+            return Ok(runtime);
         }
-    }
 
-    struct ModuleGuard<'a> {
-        api: &'a CudaApi,
-        module: CuModule,
-    }
+        let api = CudaApi::load()?;
+        let mut device = 0;
+        check_cuda(
+            unsafe { (api.device_get)(&mut device, device_info.id as i32) },
+            "cuDeviceGet",
+        )?;
 
-    impl Drop for ModuleGuard<'_> {
-        fn drop(&mut self) {
-            if !self.module.is_null() {
-                unsafe {
-                    let _ = (self.api.module_unload)(self.module);
-                }
+        let mut context = null_mut();
+        check_cuda(
+            unsafe { (api.ctx_create)(&mut context, 0, device) },
+            "cuCtxCreate",
+        )?;
+
+        let image = compile_kernel(
+            device_info.compute_capability_major,
+            device_info.compute_capability_minor,
+            throughput_mode,
+        )?;
+
+        let mut module = null_mut();
+        if let Err(error) = check_cuda(
+            unsafe { (api.module_load_data)(&mut module, image.as_ptr().cast::<c_void>()) },
+            "cuModuleLoadData",
+        ) {
+            unsafe {
+                let _ = (api.ctx_destroy)(context);
             }
+            return Err(error);
         }
+
+        let kernel_name = CString::new("simulate_creatures").expect("static kernel name");
+        let mut function = null_mut();
+        if let Err(error) = check_cuda(
+            unsafe { (api.module_get_function)(&mut function, module, kernel_name.as_ptr()) },
+            "cuModuleGetFunction",
+        ) {
+            unsafe {
+                let _ = (api.module_unload)(module);
+                let _ = (api.ctx_destroy)(context);
+            }
+            return Err(error);
+        }
+
+        let runtime = Arc::new(Mutex::new(CudaRuntime {
+            api,
+            context,
+            module,
+            function,
+        }));
+
+        let mut guard = cache
+            .lock()
+            .map_err(|_| "CUDA runtime cache mutex was poisoned".to_string())?;
+        Ok(guard.entry(key).or_insert_with(|| runtime.clone()).clone())
     }
 
     struct DeviceBuffer<'a, T> {
@@ -1080,36 +1143,17 @@ mod platform {
         device_info: &CudaDeviceInfo,
         global_start: usize,
     ) -> Result<DeviceAssignmentResult, String> {
-        let api = CudaApi::load()?;
-        let mut device = 0;
+        let runtime =
+            get_or_create_runtime(device_info, accelerator.throughput_mode)?;
+        let runtime = runtime
+            .lock()
+            .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
         check_cuda(
-            unsafe { (api.device_get)(&mut device, device_info.id as i32) },
-            "cuDeviceGet",
+            unsafe { (runtime.api.ctx_set_current)(runtime.context) },
+            "cuCtxSetCurrent",
         )?;
-        let mut context = null_mut();
-        check_cuda(
-            unsafe { (api.ctx_create)(&mut context, 0, device) },
-            "cuCtxCreate",
-        )?;
-        let _context_guard = ContextGuard { api: &api, context };
-
-        let ptx = compile_kernel(
-            device_info.compute_capability_major,
-            device_info.compute_capability_minor,
-            accelerator.throughput_mode,
-        )?;
-        let mut module = null_mut();
-        check_cuda(
-            unsafe { (api.module_load_data)(&mut module, ptx.as_ptr().cast::<c_void>()) },
-            "cuModuleLoadData",
-        )?;
-        let _module_guard = ModuleGuard { api: &api, module };
-        let kernel_name = CString::new("simulate_creatures").expect("static kernel name");
-        let mut function = null_mut();
-        check_cuda(
-            unsafe { (api.module_get_function)(&mut function, module, kernel_name.as_ptr()) },
-            "cuModuleGetFunction",
-        )?;
+        let api = &runtime.api;
+        let function = runtime.function;
 
         let started = Instant::now();
         let mut all_results = Vec::with_capacity(genomes.len());
@@ -1118,7 +1162,7 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_results = run_chunk(&api, function, chunk, simulation, fitness, accelerator)?;
+            let chunk_results = run_chunk(api, function, chunk, simulation, fitness, accelerator)?;
             all_results.extend(
                 chunk_results
                     .into_iter()
