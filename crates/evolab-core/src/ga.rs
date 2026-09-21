@@ -16,6 +16,11 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct EvolutionConfig {
     pub population_size: usize,
+    /// Number of candidates evaluated each generation. 0 means population_size.
+    /// This can be much larger than the survivor population on CUDA so idle GPU
+    /// capacity is used to explore more offspring in the same generation.
+    #[serde(default)]
+    pub evaluation_pool_size: usize,
     pub generations: usize,
     pub tournament_size: usize,
     pub elite_count: usize,
@@ -38,6 +43,7 @@ impl Default for EvolutionConfig {
     fn default() -> Self {
         Self {
             population_size: 50,
+            evaluation_pool_size: 0,
             generations: 100,
             tournament_size: 7,
             elite_count: 2,
@@ -68,6 +74,9 @@ impl EvolutionConfig {
         if self.population_size < 2 {
             return Err("population_size must be at least 2".into());
         }
+        if self.evaluation_pool_size > 1_000_000 {
+            return Err("evaluation_pool_size must be 0 or at most 1000000".into());
+        }
         if self.generations == 0 {
             return Err("generations must be greater than 0".into());
         }
@@ -90,6 +99,14 @@ impl EvolutionConfig {
         self.timeline.validate()?;
 
         Ok(())
+    }
+
+    pub fn effective_evaluation_pool_size(&self) -> usize {
+        if self.evaluation_pool_size == 0 {
+            self.population_size
+        } else {
+            self.evaluation_pool_size.max(self.population_size)
+        }
     }
 }
 
@@ -300,8 +317,16 @@ where
             ));
         }
 
+        let evaluation_pool = expand_evaluation_pool(
+            &population,
+            config.effective_evaluation_pool_size(),
+            config,
+            &settings,
+            &mut rng,
+            &mut next_individual_id,
+        )?;
         let (mut evaluated, execution) =
-            evaluate_population(&pool, &population, &settings, &config.accelerator)?;
+            evaluate_population(&pool, &evaluation_pool, &settings, &config.accelerator)?;
         evaluations_completed += evaluated.len() * settings.trials_per_creature;
 
         evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
@@ -334,7 +359,8 @@ where
 
         let diversity = summarize_diversity(&evaluated);
         let species = summarize_species(&evaluated);
-        let lineage = build_lineage_records(generation, &evaluated);
+        let lineage_count = settings.population_size.min(evaluated.len());
+        let lineage = build_lineage_records(generation, &evaluated[..lineage_count]);
         let pareto_front = build_pareto_front(generation, &evaluated);
         let map_elites = build_map_elites(generation, &evaluated);
 
@@ -535,6 +561,67 @@ fn initial_population(
 
     Ok(population)
 }
+
+fn expand_evaluation_pool(
+    population: &[Candidate],
+    target_size: usize,
+    config: &EvolutionConfig,
+    settings: &EffectiveEvolutionSettings,
+    rng: &mut GenomeRng,
+    next_individual_id: &mut u64,
+) -> Result<Vec<Candidate>, String> {
+    if population.is_empty() {
+        return Err("cannot expand an empty evolution population".into());
+    }
+
+    let target_size = target_size.max(population.len());
+    let mut expanded = Vec::with_capacity(target_size);
+    expanded.extend(population.iter().cloned());
+
+    while expanded.len() < target_size {
+        let parent = &population[rng.range_usize(population.len())];
+        let mut parent_ids = vec![parent.individual_id];
+
+        let base = if population.len() > 1 && rng.chance(config.crossover_chance) {
+            let donor = &population[rng.range_usize(population.len())];
+            if donor.individual_id != parent.individual_id {
+                parent_ids.push(donor.individual_id);
+            }
+            crossover_brain_subtree(&parent.genome, &donor.genome, rng)
+        } else {
+            parent.genome.clone()
+        };
+
+        let mut accepted = None;
+        for _ in 0..5 {
+            if let Ok(mutation_result) = mutate_genome(
+                &base,
+                rng.next_seed(),
+                settings.mutations_per_child,
+                &settings.mutation,
+            ) {
+                accepted = Some(mutation_result);
+                break;
+            }
+        }
+
+        let Some(mutation_result) = accepted else {
+            continue;
+        };
+
+        let individual_id = *next_individual_id;
+        *next_individual_id += 1;
+        expanded.push(Candidate {
+            individual_id,
+            parent_ids,
+            genome: mutation_result.genome,
+            mutations: mutation_result.mutations,
+        });
+    }
+
+    Ok(expanded)
+}
+
 
 fn evaluate_population(
     pool: &rayon::ThreadPool,
