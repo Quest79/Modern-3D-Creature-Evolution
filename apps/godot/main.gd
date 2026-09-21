@@ -3579,7 +3579,7 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
             "mutation": {
                 "min_segments": 2,
                 "max_segments": int(_max_segments_spin.value),
-                "min_half_extent": 0.001,
+                "min_half_extent": 0.0001,
                 "max_half_extent": 15.0,
                 "structural_mutation_chance":
                     float(_structural_mutation_spin.value),
