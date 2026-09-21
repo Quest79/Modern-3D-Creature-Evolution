@@ -49,7 +49,10 @@ impl SimulationConfig {
         if !self.motor_strength_multiplier.is_finite()
             || !(0.0..=1.0).contains(&self.motor_strength_multiplier)
         {
-            return Err("motor_strength_multiplier is biological activation and must be between 0 and 1".into());
+            return Err(
+                "motor_strength_multiplier is biological activation and must be between 0 and 1"
+                    .into(),
+            );
         }
         Ok(())
     }
