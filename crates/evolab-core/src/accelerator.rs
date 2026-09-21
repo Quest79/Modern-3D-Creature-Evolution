@@ -117,6 +117,8 @@ pub struct CudaDeviceInfo {
     pub free_memory_bytes: u64,
     pub compute_capability_major: i32,
     pub compute_capability_minor: i32,
+    #[serde(default)]
+    pub multiprocessor_count: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -234,6 +236,7 @@ mod tests {
             free_memory_bytes: 1,
             compute_capability_major: 0,
             compute_capability_minor: 0,
+            multiprocessor_count: 1,
         }];
         assert_eq!(config.selected_gpu_ids(&devices).unwrap(), vec![1]);
     }
