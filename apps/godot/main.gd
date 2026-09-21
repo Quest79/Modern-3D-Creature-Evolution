@@ -614,9 +614,9 @@ func _build_ui() -> void:
         0.01
     )
     _motor_strength_spin = _add_number_row(
-        evolution_section, "Motor strength", 0.0, 20.0, _motor_strength, 0.05
+        evolution_section, "Motor activation", 0.0, 1.0, _motor_strength, 0.01
     )
-    _motor_strength_spin.suffix = "x"
+    _motor_strength_spin.suffix = "× biological max"
     _trials_spin = _add_number_row(
         evolution_section, "Trials / creature", 1, 100, _trials_per_creature, 1
     )
@@ -2836,7 +2836,7 @@ func _load_settings() -> void:
     _motor_strength = float(
         config.get_value("evolution", "motor_strength", _motor_strength)
     )
-    _motor_strength = clampf(_motor_strength, 0.0, 20.0)
+    _motor_strength = clampf(_motor_strength, 0.0, 1.0)
     _trials_per_creature = int(
         config.get_value("evolution", "trials_per_creature", _trials_per_creature)
     )
@@ -3579,8 +3579,8 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
             "mutation": {
                 "min_segments": 2,
                 "max_segments": int(_max_segments_spin.value),
-                "min_half_extent": 0.10,
-                "max_half_extent": 0.85,
+                "min_half_extent": 0.001,
+                "max_half_extent": 15.0,
                 "structural_mutation_chance":
                     float(_structural_mutation_spin.value),
             },
