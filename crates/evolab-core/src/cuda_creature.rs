@@ -446,7 +446,6 @@ mod platform {
     use std::{
         collections::HashMap,
         ffi::{CString, OsStr, c_char, c_void},
-        marker::PhantomData,
         mem::{size_of, transmute},
         os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
@@ -781,6 +780,7 @@ mod platform {
         context: CuContext,
         module: CuModule,
         function: CuFunction,
+        workspace: CudaWorkspace,
     }
 
     unsafe impl Send for CudaRuntime {}
@@ -789,6 +789,9 @@ mod platform {
         fn drop(&mut self) {
             unsafe {
                 let _ = (self.api.ctx_set_current)(self.context);
+            }
+            self.workspace.release_all(&self.api);
+            unsafe {
                 if !self.module.is_null() {
                     let _ = (self.api.module_unload)(self.module);
                 }
@@ -868,6 +871,7 @@ mod platform {
             context,
             module,
             function,
+            workspace: CudaWorkspace::default(),
         }));
 
         let mut guard = cache
@@ -876,36 +880,67 @@ mod platform {
         Ok(guard.entry(key).or_insert_with(|| runtime.clone()).clone())
     }
 
-    struct DeviceBuffer<'a, T> {
-        api: &'a CudaApi,
+    #[derive(Default)]
+    struct RawDeviceBuffer {
         pointer: CuDevicePtr,
-        len: usize,
-        _marker: PhantomData<T>,
+        capacity_bytes: usize,
     }
 
-    impl<'a, T> DeviceBuffer<'a, T> {
-        fn allocate(api: &'a CudaApi, len: usize) -> Result<Self, String> {
-            let bytes = len.max(1) * size_of::<T>();
-            let mut pointer = 0;
+    impl RawDeviceBuffer {
+        fn ensure_capacity(&mut self, api: &CudaApi, required_bytes: usize) -> Result<(), String> {
+            let required_bytes = required_bytes.max(1);
+            if self.capacity_bytes >= required_bytes && self.pointer != 0 {
+                return Ok(());
+            }
+
+            if self.pointer != 0 {
+                check_cuda(unsafe { (api.mem_free)(self.pointer) }, "cuMemFree")?;
+                self.pointer = 0;
+                self.capacity_bytes = 0;
+            }
+
+            // Grow geometrically so normal generation-to-generation morphology
+            // changes do not force another device allocation.
+            let capacity_bytes = required_bytes.next_power_of_two();
             check_cuda(
-                unsafe { (api.mem_alloc)(&mut pointer, bytes) },
+                unsafe { (api.mem_alloc)(&mut self.pointer, capacity_bytes) },
                 "cuMemAlloc",
             )?;
-            Ok(Self {
-                api,
-                pointer,
-                len,
-                _marker: PhantomData,
-            })
+            self.capacity_bytes = capacity_bytes;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CudaWorkspace {
+        buffers: HashMap<&'static str, RawDeviceBuffer>,
+    }
+
+    impl CudaWorkspace {
+        fn ensure(
+            &mut self,
+            api: &CudaApi,
+            name: &'static str,
+            required_bytes: usize,
+        ) -> Result<CuDevicePtr, String> {
+            let buffer = self.buffers.entry(name).or_default();
+            buffer.ensure_capacity(api, required_bytes)?;
+            Ok(buffer.pointer)
         }
 
-        fn copy_from(api: &'a CudaApi, values: &[T]) -> Result<Self, String> {
-            let buffer = Self::allocate(api, values.len())?;
+        fn upload<T>(
+            &mut self,
+            api: &CudaApi,
+            name: &'static str,
+            values: &[T],
+        ) -> Result<CuDevicePtr, String> {
+            let bytes = values.len().max(1) * size_of::<T>();
+            let pointer = self.ensure(api, name, bytes)?;
             if !values.is_empty() {
                 check_cuda(
                     unsafe {
                         (api.memcpy_htod)(
-                            buffer.pointer,
+                            pointer,
                             values.as_ptr().cast::<c_void>(),
                             values.len() * size_of::<T>(),
                         )
@@ -913,20 +948,33 @@ mod platform {
                     "cuMemcpyHtoD",
                 )?;
             }
-            Ok(buffer)
+            Ok(pointer)
         }
 
-        fn copy_to(&self, values: &mut [T]) -> Result<(), String> {
-            if values.len() != self.len {
-                return Err("CUDA output buffer length mismatch".into());
+        fn download<T>(
+            &self,
+            api: &CudaApi,
+            name: &'static str,
+            values: &mut [T],
+        ) -> Result<(), String> {
+            let buffer = self
+                .buffers
+                .get(name)
+                .ok_or_else(|| format!("CUDA workspace buffer '{name}' is missing"))?;
+            let bytes = values.len() * size_of::<T>();
+            if bytes > buffer.capacity_bytes {
+                return Err(format!(
+                    "CUDA workspace buffer '{name}' is too small: {} < {} bytes",
+                    buffer.capacity_bytes, bytes
+                ));
             }
             if !values.is_empty() {
                 check_cuda(
                     unsafe {
-                        (self.api.memcpy_dtoh)(
+                        (api.memcpy_dtoh)(
                             values.as_mut_ptr().cast::<c_void>(),
-                            self.pointer,
-                            values.len() * size_of::<T>(),
+                            buffer.pointer,
+                            bytes,
                         )
                     },
                     "cuMemcpyDtoH",
@@ -934,15 +982,18 @@ mod platform {
             }
             Ok(())
         }
-    }
 
-    impl<T> Drop for DeviceBuffer<'_, T> {
-        fn drop(&mut self) {
-            if self.pointer != 0 {
-                unsafe {
-                    let _ = (self.api.mem_free)(self.pointer);
+        fn release_all(&mut self, api: &CudaApi) {
+            for buffer in self.buffers.values_mut() {
+                if buffer.pointer != 0 {
+                    unsafe {
+                        let _ = (api.mem_free)(buffer.pointer);
+                    }
+                    buffer.pointer = 0;
+                    buffer.capacity_bytes = 0;
                 }
             }
+            self.buffers.clear();
         }
     }
 
@@ -1145,16 +1196,13 @@ mod platform {
     ) -> Result<DeviceAssignmentResult, String> {
         let runtime =
             get_or_create_runtime(device_info, accelerator.throughput_mode)?;
-        let runtime = runtime
+        let mut runtime = runtime
             .lock()
             .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
         check_cuda(
             unsafe { (runtime.api.ctx_set_current)(runtime.context) },
             "cuCtxSetCurrent",
         )?;
-        let api = &runtime.api;
-        let function = runtime.function;
-
         let started = Instant::now();
         let mut all_results = Vec::with_capacity(genomes.len());
         let batch_size = accelerator.batch_size.max(1);
@@ -1162,7 +1210,8 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_results = run_chunk(api, function, chunk, simulation, fitness, accelerator)?;
+            let chunk_results =
+                run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
             all_results.extend(
                 chunk_results
                     .into_iter()
@@ -1187,8 +1236,7 @@ mod platform {
     }
 
     fn run_chunk(
-        api: &CudaApi,
-        function: CuFunction,
+        runtime: &mut CudaRuntime,
         genomes: &[CreatureGenome],
         simulation: &SimulationConfig,
         fitness: &FitnessConfig,
@@ -1200,87 +1248,67 @@ mod platform {
         let part_slots = packed.inv_mass.len();
         let joint_slots = packed.parent.len();
 
-        let d_part_count = DeviceBuffer::copy_from(api, &packed.part_count)?;
-        let d_joint_count = DeviceBuffer::copy_from(api, &packed.joint_count)?;
-        let d_part_base = DeviceBuffer::copy_from(api, &packed.part_base)?;
-        let d_joint_base = DeviceBuffer::copy_from(api, &packed.joint_base)?;
-        let d_initial_position = DeviceBuffer::copy_from(api, &packed.initial_position)?;
-        let d_half_extents = DeviceBuffer::copy_from(api, &packed.half_extents)?;
-        let d_mass = DeviceBuffer::copy_from(api, &packed.mass)?;
-        let d_inv_mass = DeviceBuffer::copy_from(api, &packed.inv_mass)?;
-        let d_friction = DeviceBuffer::copy_from(api, &packed.friction)?;
-        let d_parent = DeviceBuffer::copy_from(api, &packed.parent)?;
-        let d_child = DeviceBuffer::copy_from(api, &packed.child)?;
-        let d_axis = DeviceBuffer::copy_from(api, &packed.axis)?;
-        let d_rest_relative = DeviceBuffer::copy_from(api, &packed.rest_relative)?;
-        let d_limit_min = DeviceBuffer::copy_from(api, &packed.limit_min)?;
-        let d_limit_max = DeviceBuffer::copy_from(api, &packed.limit_max)?;
-        let d_inertia = DeviceBuffer::copy_from(api, &packed.inertia)?;
-        let d_biological_torque = DeviceBuffer::copy_from(api, &packed.biological_torque)?;
-        let d_biological_power = DeviceBuffer::copy_from(api, &packed.biological_power)?;
-        let d_requested_torque = DeviceBuffer::copy_from(api, &packed.requested_torque)?;
-        let d_brain_start = DeviceBuffer::copy_from(api, &packed.brain_start)?;
-        let d_brain_count = DeviceBuffer::copy_from(api, &packed.brain_count)?;
-        let d_op_code = DeviceBuffer::copy_from(api, &packed.op_code)?;
-        let d_op_index = DeviceBuffer::copy_from(api, &packed.op_index)?;
-        let d_op_a = DeviceBuffer::copy_from(api, &packed.op_a)?;
-        let d_op_b = DeviceBuffer::copy_from(api, &packed.op_b)?;
+        let api = &runtime.api;
+        let function = runtime.function;
+        let workspace = &mut runtime.workspace;
 
-        let d_state_position = DeviceBuffer::<f32>::allocate(api, part_slots * 3)?;
-        let d_state_velocity = DeviceBuffer::<f32>::allocate(api, part_slots * 3)?;
-        let d_state_contact = DeviceBuffer::<f32>::allocate(api, part_slots)?;
-        let d_state_angle = DeviceBuffer::<f32>::allocate(api, joint_slots)?;
-        let d_state_angvel = DeviceBuffer::<f32>::allocate(api, joint_slots)?;
-        let d_state_target = DeviceBuffer::<f32>::allocate(api, joint_slots)?;
-        let d_joint_force = DeviceBuffer::<f32>::allocate(api, joint_slots * 3)?;
+        let mut p_part_count = workspace.upload(api, "part_count", &packed.part_count)?;
+        let mut p_joint_count = workspace.upload(api, "joint_count", &packed.joint_count)?;
+        let mut p_part_base = workspace.upload(api, "part_base", &packed.part_base)?;
+        let mut p_joint_base = workspace.upload(api, "joint_base", &packed.joint_base)?;
+        let mut p_initial_position =
+            workspace.upload(api, "initial_position", &packed.initial_position)?;
+        let mut p_half_extents = workspace.upload(api, "half_extents", &packed.half_extents)?;
+        let mut p_inv_mass = workspace.upload(api, "inv_mass", &packed.inv_mass)?;
+        let mut p_friction = workspace.upload(api, "friction", &packed.friction)?;
+        let mut p_parent = workspace.upload(api, "parent", &packed.parent)?;
+        let mut p_child = workspace.upload(api, "child", &packed.child)?;
+        let mut p_axis = workspace.upload(api, "axis", &packed.axis)?;
+        let mut p_rest_relative =
+            workspace.upload(api, "rest_relative", &packed.rest_relative)?;
+        let mut p_limit_min = workspace.upload(api, "limit_min", &packed.limit_min)?;
+        let mut p_limit_max = workspace.upload(api, "limit_max", &packed.limit_max)?;
+        let mut p_inertia = workspace.upload(api, "inertia", &packed.inertia)?;
+        let mut p_biological_torque =
+            workspace.upload(api, "biological_torque", &packed.biological_torque)?;
+        let mut p_biological_power =
+            workspace.upload(api, "biological_power", &packed.biological_power)?;
+        let mut p_requested_torque =
+            workspace.upload(api, "requested_torque", &packed.requested_torque)?;
+        let mut p_brain_start = workspace.upload(api, "brain_start", &packed.brain_start)?;
+        let mut p_brain_count = workspace.upload(api, "brain_count", &packed.brain_count)?;
+        let mut p_op_code = workspace.upload(api, "op_code", &packed.op_code)?;
+        let mut p_op_index = workspace.upload(api, "op_index", &packed.op_index)?;
+        let mut p_op_a = workspace.upload(api, "op_a", &packed.op_a)?;
+        let mut p_op_b = workspace.upload(api, "op_b", &packed.op_b)?;
 
-        let d_out_score = DeviceBuffer::<f32>::allocate(api, world_count)?;
-        let d_out_distance = DeviceBuffer::<f32>::allocate(api, world_count)?;
-        let d_out_speed = DeviceBuffer::<f32>::allocate(api, world_count)?;
-        let d_out_upright = DeviceBuffer::<f32>::allocate(api, world_count)?;
-        let d_out_stability = DeviceBuffer::<f32>::allocate(api, world_count)?;
-        let d_out_energy = DeviceBuffer::<f32>::allocate(api, world_count)?;
-        let d_out_unstable = DeviceBuffer::<u32>::allocate(api, world_count)?;
+        let mut p_state_position =
+            workspace.ensure(api, "state_position", part_slots * 3 * size_of::<f32>())?;
+        let mut p_state_velocity =
+            workspace.ensure(api, "state_velocity", part_slots * 3 * size_of::<f32>())?;
+        let mut p_state_contact =
+            workspace.ensure(api, "state_contact", part_slots * size_of::<f32>())?;
+        let mut p_state_angle =
+            workspace.ensure(api, "state_angle", joint_slots * size_of::<f32>())?;
+        let mut p_state_angvel =
+            workspace.ensure(api, "state_angvel", joint_slots * size_of::<f32>())?;
+        let mut p_state_target =
+            workspace.ensure(api, "state_target", joint_slots * size_of::<f32>())?;
+        let mut p_joint_force =
+            workspace.ensure(api, "joint_force", joint_slots * 3 * size_of::<f32>())?;
 
-        let mut p_part_count = d_part_count.pointer;
-        let mut p_joint_count = d_joint_count.pointer;
-        let mut p_part_base = d_part_base.pointer;
-        let mut p_joint_base = d_joint_base.pointer;
-        let mut p_initial_position = d_initial_position.pointer;
-        let mut p_half_extents = d_half_extents.pointer;
-        let mut p_mass = d_mass.pointer;
-        let mut p_inv_mass = d_inv_mass.pointer;
-        let mut p_friction = d_friction.pointer;
-        let mut p_parent = d_parent.pointer;
-        let mut p_child = d_child.pointer;
-        let mut p_axis = d_axis.pointer;
-        let mut p_rest_relative = d_rest_relative.pointer;
-        let mut p_limit_min = d_limit_min.pointer;
-        let mut p_limit_max = d_limit_max.pointer;
-        let mut p_inertia = d_inertia.pointer;
-        let mut p_biological_torque = d_biological_torque.pointer;
-        let mut p_biological_power = d_biological_power.pointer;
-        let mut p_requested_torque = d_requested_torque.pointer;
-        let mut p_brain_start = d_brain_start.pointer;
-        let mut p_brain_count = d_brain_count.pointer;
-        let mut p_op_code = d_op_code.pointer;
-        let mut p_op_index = d_op_index.pointer;
-        let mut p_op_a = d_op_a.pointer;
-        let mut p_op_b = d_op_b.pointer;
-        let mut p_state_position = d_state_position.pointer;
-        let mut p_state_velocity = d_state_velocity.pointer;
-        let mut p_state_contact = d_state_contact.pointer;
-        let mut p_state_angle = d_state_angle.pointer;
-        let mut p_state_angvel = d_state_angvel.pointer;
-        let mut p_state_target = d_state_target.pointer;
-        let mut p_joint_force = d_joint_force.pointer;
-        let mut p_out_score = d_out_score.pointer;
-        let mut p_out_distance = d_out_distance.pointer;
-        let mut p_out_speed = d_out_speed.pointer;
-        let mut p_out_upright = d_out_upright.pointer;
-        let mut p_out_stability = d_out_stability.pointer;
-        let mut p_out_energy = d_out_energy.pointer;
-        let mut p_out_unstable = d_out_unstable.pointer;
+        let mut p_out_score = workspace.ensure(api, "out_score", world_count * size_of::<f32>())?;
+        let mut p_out_distance =
+            workspace.ensure(api, "out_distance", world_count * size_of::<f32>())?;
+        let mut p_out_speed = workspace.ensure(api, "out_speed", world_count * size_of::<f32>())?;
+        let mut p_out_upright =
+            workspace.ensure(api, "out_upright", world_count * size_of::<f32>())?;
+        let mut p_out_stability =
+            workspace.ensure(api, "out_stability", world_count * size_of::<f32>())?;
+        let mut p_out_energy =
+            workspace.ensure(api, "out_energy", world_count * size_of::<f32>())?;
+        let mut p_out_unstable =
+            workspace.ensure(api, "out_unstable", world_count * size_of::<u32>())?;
 
         let mut dt = simulation.dt;
         let mut steps = simulation.step_count() as u32;
@@ -1329,7 +1357,6 @@ mod platform {
                 (&mut p_joint_base as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_mass as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_inv_mass as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_friction as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_parent as *mut CuDevicePtr).cast::<c_void>(),
@@ -1411,13 +1438,13 @@ mod platform {
         let mut stability = vec![0.0; world_count];
         let mut energy = vec![0.0; world_count];
         let mut unstable = vec![0_u32; world_count];
-        d_out_score.copy_to(&mut score)?;
-        d_out_distance.copy_to(&mut distance)?;
-        d_out_speed.copy_to(&mut speed)?;
-        d_out_upright.copy_to(&mut upright)?;
-        d_out_stability.copy_to(&mut stability)?;
-        d_out_energy.copy_to(&mut energy)?;
-        d_out_unstable.copy_to(&mut unstable)?;
+        workspace.download(api, "out_score", &mut score)?;
+        workspace.download(api, "out_distance", &mut distance)?;
+        workspace.download(api, "out_speed", &mut speed)?;
+        workspace.download(api, "out_upright", &mut upright)?;
+        workspace.download(api, "out_stability", &mut stability)?;
+        workspace.download(api, "out_energy", &mut energy)?;
+        workspace.download(api, "out_unstable", &mut unstable)?;
 
         Ok((0..world_count)
             .map(|index| {
@@ -1506,7 +1533,6 @@ extern "C" __global__ void simulate_creatures(
     const unsigned* joint_base_by_world,
     const float* initial_position,
     const float* half_extents,
-    const float* mass,
     const float* inv_mass,
     const float* friction,
     const unsigned* parent,
