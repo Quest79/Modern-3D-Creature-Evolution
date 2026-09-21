@@ -1360,6 +1360,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                         "pareto_front_size": summary.pareto_front.len(),
                         "map_elites_cells": summary.map_elites.len(),
                         "evaluations_completed": summary.evaluations_completed,
+                        "evaluation_pool_size": summary.evaluation_pool_size,
                         "execution": summary.execution,
                         "effective_population": summary.effective_settings.population_size,
                         "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
