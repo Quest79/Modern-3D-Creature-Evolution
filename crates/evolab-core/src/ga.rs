@@ -533,8 +533,7 @@ fn evaluate_population(
     let requested_mode = accelerator.mode;
 
     if requested_mode != AcceleratorMode::Cpu {
-        let mut gpu_genomes =
-            Vec::with_capacity(population.len() * settings.trials_per_creature);
+        let mut gpu_genomes = Vec::with_capacity(population.len() * settings.trials_per_creature);
         for candidate in population {
             for _ in 0..settings.trials_per_creature {
                 gpu_genomes.push(candidate.genome.clone());
@@ -552,10 +551,8 @@ fn evaluate_population(
                 for (candidate_index, candidate) in population.iter().enumerate() {
                     let start = candidate_index * settings.trials_per_creature;
                     let end = start + settings.trials_per_creature;
-                    let result = aggregate_trials(
-                        &batch.fitness[start..end],
-                        settings.trial_aggregation,
-                    );
+                    let result =
+                        aggregate_trials(&batch.fitness[start..end], settings.trial_aggregation);
 
                     let mut trial_seeds = Vec::with_capacity(settings.trials_per_creature);
                     for trial_index in 0..settings.trials_per_creature {
