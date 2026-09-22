@@ -224,6 +224,8 @@ var _benchmark_timeline_file := ""
 var _benchmark_parent_path := ""
 var _benchmark_gpu_telemetry_path := ""
 var _benchmark_gpu_telemetry_pid := 0
+var _benchmark_process_telemetry_path := ""
+var _benchmark_process_telemetry_pid := 0
 var _benchmark_requested_eval_pool := 0
 var _benchmark_cuda_eval_pool := 0
 var _benchmark_phase_started_ms := -1
@@ -4498,11 +4500,156 @@ func _benchmark_start_phase(phase: String) -> void:
         _benchmark_abort("Failed to start %s benchmark evolution." % phase.to_upper())
         return
 
+    _benchmark_start_process_telemetry()
     _benchmark_start_gpu_telemetry()
     _set_status(
         "Benchmark %s/2 • %s evolution • waiting for generation 1"
         % [("1" if phase == "cuda" else "2"), phase.to_upper()]
     )
+
+
+func _benchmark_start_process_telemetry() -> void:
+    _benchmark_stop_process_telemetry(false)
+    if OS.get_name() != "Windows" or _job_pid <= 0:
+        return
+
+    _benchmark_process_telemetry_path = (
+        _benchmark_base_path + "_" + _benchmark_phase + "_process_telemetry.csv"
+    )
+    if FileAccess.file_exists(_benchmark_process_telemetry_path):
+        DirAccess.remove_absolute(_benchmark_process_telemetry_path)
+
+    var script_path := _runtime_path("benchmark_process_sampler.ps1")
+    var script := (
+        "param([int]$TargetPid,[string]$OutputPath)\n"
+        + "'timestamp,cpu_total_s,working_set_mib,private_mib,threads,handles' | "
+        + "Set-Content -LiteralPath $OutputPath -Encoding UTF8\n"
+        + "while ($true) {\n"
+        + "  try { $p = Get-Process -Id $TargetPid -ErrorAction Stop } catch { break }\n"
+        + "  $line = '{0},{1:F6},{2:F3},{3:F3},{4},{5}' -f "
+        + "(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$p.CPU,"
+        + "($p.WorkingSet64/1MB),($p.PrivateMemorySize64/1MB),$p.Threads.Count,$p.HandleCount\n"
+        + "  Add-Content -LiteralPath $OutputPath -Value $line -Encoding UTF8\n"
+        + "  Start-Sleep -Milliseconds 250\n"
+        + "}\n"
+    )
+    var script_file := FileAccess.open(script_path, FileAccess.WRITE)
+    if script_file == null:
+        _benchmark_log("Process telemetry: could not write PowerShell sampler.\n")
+        return
+    script_file.store_string(script)
+    script_file.close()
+
+    _benchmark_process_telemetry_pid = OS.create_process(
+        "powershell.exe",
+        PackedStringArray([
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", script_path,
+            "-TargetPid", str(_job_pid),
+            "-OutputPath", _benchmark_process_telemetry_path,
+        ]),
+        false
+    )
+    if _benchmark_process_telemetry_pid <= 0:
+        _benchmark_process_telemetry_pid = 0
+        _benchmark_log("Process telemetry: PowerShell sampler could not be started.\n")
+
+
+func _benchmark_stop_process_telemetry(append_to_log: bool = true) -> Dictionary:
+    if _benchmark_process_telemetry_pid > 0:
+        if OS.is_process_running(_benchmark_process_telemetry_pid):
+            OS.kill(_benchmark_process_telemetry_pid)
+        _benchmark_process_telemetry_pid = 0
+
+    var stats := {
+        "samples": 0,
+        "cpu_seconds_delta": 0.0,
+        "estimated_cpu_percent_of_machine": 0.0,
+        "working_set_avg_mib": 0.0,
+        "working_set_max_mib": 0.0,
+        "private_avg_mib": 0.0,
+        "private_max_mib": 0.0,
+        "threads_avg": 0.0,
+        "threads_max": 0.0,
+        "handles_max": 0.0,
+    }
+
+    if _benchmark_process_telemetry_path.is_empty():
+        return stats
+
+    var file := FileAccess.open(_benchmark_process_telemetry_path, FileAccess.READ)
+    if file == null:
+        if append_to_log:
+            _benchmark_log(
+                "Process telemetry file unavailable: %s\n"
+                % _benchmark_process_telemetry_path
+            )
+        return stats
+
+    var raw := file.get_as_text()
+    file.close()
+    var cpu_first := -1.0
+    var cpu_last := -1.0
+    var ws_sum := 0.0
+    var private_sum := 0.0
+    var threads_sum := 0.0
+    var sample_count := 0
+
+    for line in raw.split("\n", false):
+        var fields := line.split(",", false)
+        if fields.size() < 6:
+            continue
+        var cpu_text := str(fields[1]).strip_edges()
+        if not cpu_text.is_valid_float():
+            continue
+        var cpu_total := float(cpu_text)
+        var ws := float(fields[2]) if str(fields[2]).strip_edges().is_valid_float() else 0.0
+        var private_mib := (
+            float(fields[3]) if str(fields[3]).strip_edges().is_valid_float() else 0.0
+        )
+        var threads := float(fields[4]) if str(fields[4]).strip_edges().is_valid_float() else 0.0
+        var handles := float(fields[5]) if str(fields[5]).strip_edges().is_valid_float() else 0.0
+
+        if cpu_first < 0.0:
+            cpu_first = cpu_total
+        cpu_last = cpu_total
+        sample_count += 1
+        ws_sum += ws
+        private_sum += private_mib
+        threads_sum += threads
+        stats["working_set_max_mib"] = maxf(float(stats["working_set_max_mib"]), ws)
+        stats["private_max_mib"] = maxf(float(stats["private_max_mib"]), private_mib)
+        stats["threads_max"] = maxf(float(stats["threads_max"]), threads)
+        stats["handles_max"] = maxf(float(stats["handles_max"]), handles)
+
+    stats["samples"] = sample_count
+    if sample_count > 0:
+        stats["working_set_avg_mib"] = ws_sum / sample_count
+        stats["private_avg_mib"] = private_sum / sample_count
+        stats["threads_avg"] = threads_sum / sample_count
+
+    if cpu_first >= 0.0 and cpu_last >= cpu_first:
+        var cpu_delta := cpu_last - cpu_first
+        stats["cpu_seconds_delta"] = cpu_delta
+        var elapsed_seconds := maxf(
+            0.001,
+            float(Time.get_ticks_msec() - _benchmark_phase_started_ms) / 1000.0
+        )
+        stats["estimated_cpu_percent_of_machine"] = (
+            cpu_delta / elapsed_seconds / maxf(float(OS.get_processor_count()), 1.0) * 100.0
+        )
+
+    if append_to_log:
+        _benchmark_log(
+            "\n--- %s EVOLAB PROCESS TELEMETRY (250 ms samples) ---\n"
+            % _benchmark_phase.to_upper()
+            + raw
+            + ("" if raw.ends_with("\n") else "\n")
+            + "--- END PROCESS TELEMETRY ---\n"
+        )
+
+    return stats
 
 
 func _benchmark_start_gpu_telemetry() -> void:
@@ -4904,6 +5051,7 @@ func _benchmark_handle_event(event: Dictionary) -> void:
             )
 
         "evolution_complete":
+            var process_telemetry := _benchmark_stop_process_telemetry(true)
             var telemetry := _benchmark_stop_gpu_telemetry(true)
             _benchmark_append_results_file()
 
@@ -4936,6 +5084,7 @@ func _benchmark_handle_event(event: Dictionary) -> void:
                 "execution_totals": _benchmark_phase_execution_totals.duplicate(true),
                 "cuda_totals": _benchmark_phase_cuda_totals.duplicate(true),
                 "gpu_telemetry": telemetry,
+                "process_telemetry": process_telemetry,
             }
             _benchmark_log(
                 "\nPHASE SUMMARY %s\n%s\n"
@@ -4998,6 +5147,7 @@ func _benchmark_finish_success() -> void:
         else 0.0
     )
     var gpu_telemetry: Dictionary = _benchmark_cuda_summary.get("gpu_telemetry", {})
+    var process_telemetry: Dictionary = _benchmark_cuda_summary.get("process_telemetry", {})
     var gpu_util_avg := float(gpu_telemetry.get("gpu_util_avg", 0.0))
     var gpu_util_max := float(gpu_telemetry.get("gpu_util_max", 0.0))
     var bottleneck_text := _benchmark_bottleneck_text(_benchmark_cuda_summary)
@@ -5025,6 +5175,18 @@ func _benchmark_finish_success() -> void:
         + "  Estimate formula: CUDA evaluation time outside measured kernel launch-to-sync windows.\n"
         + "Average GPU utilization: %.2f%%\n" % gpu_util_avg
         + "Peak GPU utilization: %.2f%%\n" % gpu_util_max
+        + "EvoLab CPU usage estimate: %.2f%% of total machine CPU capacity\n"
+            % float(process_telemetry.get("estimated_cpu_percent_of_machine", 0.0))
+        + "EvoLab working set avg / max: %.1f / %.1f MiB\n"
+            % [
+                float(process_telemetry.get("working_set_avg_mib", 0.0)),
+                float(process_telemetry.get("working_set_max_mib", 0.0)),
+            ]
+        + "EvoLab threads avg / max: %.1f / %.0f\n"
+            % [
+                float(process_telemetry.get("threads_avg", 0.0)),
+                float(process_telemetry.get("threads_max", 0.0)),
+            ]
         + "CUDA H->D bytes: %d\n" % int(cuda_totals.get("h_to_d_bytes", 0))
         + "CUDA D->H bytes: %d\n" % int(cuda_totals.get("d_to_h_bytes", 0))
         + "CUDA kernel launches: %d\n" % int(cuda_totals.get("kernel_launch_count", 0))
@@ -5074,6 +5236,8 @@ func _benchmark_finish_success() -> void:
             % gpu_idle_wait_estimate
         + "[cell]CUDA GPU avg / max[/cell][cell]%.1f%% / %.1f%%[/cell]"
             % [gpu_util_avg, gpu_util_max]
+        + "[cell]EvoLab CPU estimate[/cell][cell]%.1f%% machine total[/cell]"
+            % float(process_telemetry.get("estimated_cpu_percent_of_machine", 0.0))
         + "[cell]Primary measured bottleneck[/cell][cell]%s[/cell]"
             % primary_bottleneck
         + "[cell]Log[/cell][cell]%s[/cell]" % _benchmark_log_path
@@ -5082,6 +5246,7 @@ func _benchmark_finish_success() -> void:
 
 
 func _benchmark_abort(reason: String) -> void:
+    _benchmark_stop_process_telemetry(true)
     _benchmark_stop_gpu_telemetry(true)
     _benchmark_log(
         "\nBENCHMARK ABORTED: %s\nTime: %s\n"
@@ -5164,6 +5329,12 @@ func _stop_current_job() -> void:
     if _benchmark_gpu_telemetry_pid > 0 and OS.is_process_running(_benchmark_gpu_telemetry_pid):
         OS.kill(_benchmark_gpu_telemetry_pid)
         _benchmark_gpu_telemetry_pid = 0
+    if (
+        _benchmark_process_telemetry_pid > 0
+        and OS.is_process_running(_benchmark_process_telemetry_pid)
+    ):
+        OS.kill(_benchmark_process_telemetry_pid)
+        _benchmark_process_telemetry_pid = 0
     if _job_pid > 0 and OS.is_process_running(_job_pid):
         OS.kill(_job_pid)
     _job_pid = 0
