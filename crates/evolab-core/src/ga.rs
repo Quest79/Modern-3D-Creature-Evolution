@@ -1043,9 +1043,7 @@ fn breed_next_generation(
         }
 
         if !accepted_any {
-            return Err(
-                "could not generate any valid offspring after five retries each".into(),
-            );
+            return Err("could not generate any valid offspring after five retries each".into());
         }
     }
 
