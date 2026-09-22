@@ -7,6 +7,7 @@ const PORTABLE_RUNTIME_DIR_NAME := "runtime"
 const PORTABLE_SAVES_DIR_NAME := "saves"
 const PORTABLE_CHAMPIONS_DIR_NAME := "champions"
 const PORTABLE_EXPERIMENTS_DIR_NAME := "experiments"
+const PORTABLE_BENCHMARKS_DIR_NAME := "benchmarks"
 const DEFAULT_HUD_WIDTH := 400.0
 const MIN_HUD_WIDTH := 160.0
 const MAX_HUD_WIDTH := 400.0
@@ -214,6 +215,25 @@ var _replay_kind := ""
 var _replay_clock := 0.0
 var _replay_final_time := 0.0
 
+var _benchmark_active := false
+var _benchmark_phase := ""
+var _benchmark_log_path := ""
+var _benchmark_base_path := ""
+var _benchmark_world_file := ""
+var _benchmark_timeline_file := ""
+var _benchmark_parent_path := ""
+var _benchmark_gpu_telemetry_path := ""
+var _benchmark_gpu_telemetry_pid := 0
+var _benchmark_requested_eval_pool := 0
+var _benchmark_cuda_eval_pool := 0
+var _benchmark_phase_started_ms := -1
+var _benchmark_last_generation_ms := -1
+var _benchmark_phase_eval_seconds := 0.0
+var _benchmark_phase_items := 0
+var _benchmark_phase_physics_steps := 0.0
+var _benchmark_cuda_summary: Dictionary = {}
+var _benchmark_cpu_summary: Dictionary = {}
+
 
 func _ready() -> void:
     _ensure_portable_directories()
@@ -282,6 +302,11 @@ func _process(delta: float) -> void:
                     "[color=#ff8a8a][b]Run failed:[/b] "
                     + "the backend sent no data back to the GUI.[/color]"
                 )
+                if _benchmark_active and timed_out_kind.begins_with("benchmark_"):
+                    _benchmark_abort(
+                        "%s sent no events for 5 seconds." % timed_out_kind
+                    )
+                    return
                 _finish_job_controls()
         elif _dead_process_since_ms < 0:
             # Give final UDP packets a moment to arrive before declaring the
@@ -293,7 +318,11 @@ func _process(delta: float) -> void:
             _dead_process_since_ms = -1
             _job_started_ms = -1
 
-            if (
+            if _benchmark_active and ended_kind.begins_with("benchmark_"):
+                _benchmark_abort(
+                    "%s process ended before evolution_complete." % ended_kind
+                )
+            elif (
                 (ended_kind == "live" or ended_kind == "creature")
                 and _replay_active
             ):
@@ -381,6 +410,10 @@ func _portable_experiments_dir() -> String:
     return _portable_saves_dir().path_join(PORTABLE_EXPERIMENTS_DIR_NAME)
 
 
+func _portable_benchmarks_dir() -> String:
+    return _portable_data_root().path_join(PORTABLE_BENCHMARKS_DIR_NAME)
+
+
 func _runtime_path(file_name: String) -> String:
     return _portable_runtime_dir().path_join(file_name)
 
@@ -397,6 +430,7 @@ func _ensure_portable_directories() -> bool:
         _portable_saves_dir(),
         _portable_champions_dir(),
         _portable_experiments_dir(),
+        _portable_benchmarks_dir(),
     ]:
         if DirAccess.make_dir_recursive_absolute(path) != OK:
             if not DirAccess.dir_exists_absolute(path):
@@ -558,7 +592,10 @@ func _build_ui() -> void:
 
     _batch_button = Button.new()
     _batch_button.text = "Benchmark"
-    _batch_button.tooltip_text = "Run many independent simulations and measure throughput."
+    _batch_button.tooltip_text = (
+        "Run a full CUDA evolution, then the same full CPU evolution, and save "
+        + "a detailed diagnostic benchmark log."
+    )
     _batch_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _batch_button.pressed.connect(_on_batch_pressed)
     quick_test_row.add_child(_batch_button)
@@ -4200,32 +4237,632 @@ func _on_batch_pressed() -> void:
     if not _can_start_action("benchmark"):
         return
 
-    _clear_creature_meshes()
-    _probe_mesh.visible = true
-    _reset_probe()
-    _progress_bar.value = 0
-    _metrics.text = "[color=#9aa7bd]Evaluating independent simulations in parallel...[/color]"
-
-    var world_file := _world_file_for_cli()
-    if world_file.is_empty():
-        _set_status("Could not write runtime world configuration.")
+    if int(_tournament_spin.value) > int(_population_spin.value):
+        _set_status("Tournament size cannot exceed population.")
+        return
+    if int(_elite_spin.value) >= int(_population_spin.value):
+        _set_status("Elite kept must be smaller than population.")
         return
 
+    _begin_full_evolution_benchmark()
+
+
+func _benchmark_timestamp() -> String:
+    var now := Time.get_datetime_dict_from_system()
+    return (
+        "%04d-%02d-%02d_%02d-%02d-%02d"
+        % [
+            int(now.get("year", 1970)),
+            int(now.get("month", 1)),
+            int(now.get("day", 1)),
+            int(now.get("hour", 0)),
+            int(now.get("minute", 0)),
+            int(now.get("second", 0)),
+        ]
+    )
+
+
+func _benchmark_capture_command(command: String, args: PackedStringArray) -> String:
+    var output: Array = []
+    var exit_code := OS.execute(command, args, output, true, false)
+    if exit_code != 0:
+        return "%s exited with code %d" % [command, exit_code]
+    return "\n".join(output).strip_edges()
+
+
+func _benchmark_log(text: String) -> void:
+    if _benchmark_log_path.is_empty():
+        return
+    var file := FileAccess.open(_benchmark_log_path, FileAccess.READ_WRITE)
+    if file == null:
+        return
+    file.seek_end()
+    file.store_string(text)
+    if not text.ends_with("\n"):
+        file.store_string("\n")
+    file.close()
+
+
+func _benchmark_phase_file(suffix: String) -> String:
+    return _benchmark_base_path + "_" + _benchmark_phase + "_" + suffix
+
+
+func _begin_full_evolution_benchmark() -> void:
+    _ensure_portable_directories()
+    _benchmark_active = true
+    _benchmark_phase = "cuda"
+    _benchmark_requested_eval_pool = int(_batch_spin.value)
+    _benchmark_cuda_eval_pool = 0
+    _benchmark_cuda_summary.clear()
+    _benchmark_cpu_summary.clear()
+    _benchmark_phase_started_ms = -1
+    _benchmark_last_generation_ms = -1
+
+    var stamp := _benchmark_timestamp()
+    _benchmark_base_path = _portable_benchmarks_dir().path_join("benchmark_" + stamp)
+    _benchmark_log_path = _benchmark_base_path + ".log"
+    var log_file := FileAccess.open(_benchmark_log_path, FileAccess.WRITE)
+    if log_file == null:
+        _benchmark_active = false
+        _set_status("Could not create benchmark log.")
+        return
+    log_file.close()
+
+    _benchmark_world_file = _world_file_for_cli()
+    _benchmark_timeline_file = _timeline_file_for_cli()
+    if _benchmark_world_file.is_empty() or _benchmark_timeline_file.is_empty():
+        _benchmark_abort("Could not write benchmark world/timeline configuration.")
+        return
+
+    _benchmark_parent_path = ""
+    if not _current_genome.is_empty():
+        _benchmark_parent_path = _benchmark_base_path + "_parent.json"
+        if not _write_genome_file(_benchmark_parent_path, _current_genome):
+            _benchmark_abort("Could not snapshot the benchmark parent genome.")
+            return
+
+    var git_commit := _benchmark_capture_command(
+        "git",
+        PackedStringArray(["-C", _repo_root_path(), "rev-parse", "HEAD"])
+    )
+    var git_status := _benchmark_capture_command(
+        "git",
+        PackedStringArray(["-C", _repo_root_path(), "status", "--porcelain"])
+    )
+    var gpu_info := _benchmark_capture_command(
+        "nvidia-smi",
+        PackedStringArray([
+            "--query-gpu=index,name,driver_version,pci.bus_id,memory.total,power.limit,clocks.max.sm,clocks.max.memory,compute_cap",
+            "--format=csv,noheader,nounits",
+        ])
+    )
+    var system_info := _benchmark_capture_command(
+        "powershell.exe",
+        PackedStringArray([
+            "-NoProfile",
+            "-Command",
+            "$c=Get-CimInstance Win32_ComputerSystem; "
+            + "$p=Get-CimInstance Win32_Processor | Select-Object -First 1; "
+            + "[pscustomobject]@{CPU=$p.Name;Cores=$p.NumberOfCores;"
+            + "LogicalProcessors=$p.NumberOfLogicalProcessors;"
+            + "RAMBytes=$c.TotalPhysicalMemory;Manufacturer=$c.Manufacturer;"
+            + "Model=$c.Model}|ConvertTo-Json -Compress",
+        ])
+    )
+    var experiment := _experiment_dictionary("CUDA-vs-CPU Benchmark")
+
+    _benchmark_log(
+        "================================================================================\n"
+        + "MODERN 3D CREATURE EVOLUTION - FULL EVOLUTION CUDA/CPU BENCHMARK\n"
+        + "================================================================================\n"
+        + "Started: %s\n" % Time.get_datetime_string_from_system()
+        + "Repository commit: %s\n" % git_commit
+        + "Git working tree: %s\n"
+            % ("clean" if git_status.is_empty() else "\n" + git_status)
+        + "Godot: %s\n" % JSON.stringify(Engine.get_version_info())
+        + "OS: %s %s\n" % [OS.get_name(), OS.get_version()]
+        + "Processor count reported by Godot: %d\n" % OS.get_processor_count()
+        + "System: %s\n" % system_info
+        + "NVIDIA GPU(s):\n%s\n" % gpu_info
+        + "Requested evaluation pool: %d\n" % _benchmark_requested_eval_pool
+        + "GPU batch setting: %d\n" % int(_gpu_batch_spin.value)
+        + "GPU max parts/joints: %d / %d\n"
+            % [int(_gpu_max_parts_spin.value), int(_gpu_max_joints_spin.value)]
+        + "Throughput policy: %s\n" % _throughput_mode
+        + "CUDA GPU IDs: %s\n" % _gpu_ids_for_cli()
+        + "CPU workers: %d\n" % int(_workers_spin.value)
+        + "\n--- COMPLETE BENCHMARK CONFIGURATION ---\n"
+        + JSON.stringify(experiment, "\t")
+        + "\n--- END CONFIGURATION ---\n\n"
+        + "Benchmark order: CUDA first, CPU second.\n"
+        + "CPU evaluation pool is forced to the actual CUDA evaluation-pool size "
+        + "observed during phase 1 so both backends evaluate the same number of candidates.\n"
+        + "CPU fallback is disabled during the CUDA phase.\n\n"
+    )
+
+    _probe_mesh.visible = false
+    _progress_bar.value = 0
+    _metrics.text = (
+        "[color=#9aa7bd]Benchmark phase 1/2: full CUDA evolution starting...[/color]"
+    )
+    _benchmark_start_phase("cuda")
+
+
+func _benchmark_evolution_args(backend: String, evaluation_pool: int) -> PackedStringArray:
+    var champion_path := _benchmark_phase_file("champion.json")
+    var results_path := _benchmark_phase_file("results.evoresults")
+    var checkpoint_path := _benchmark_phase_file("checkpoint.evockpt")
+
+    for path in [champion_path, results_path, checkpoint_path]:
+        if FileAccess.file_exists(path):
+            DirAccess.remove_absolute(path)
+
     var args := PackedStringArray([
-        "probe",
-        "--batch", str(int(_batch_spin.value)),
+        "evolve",
+        "--population", str(int(_population_spin.value)),
+        "--evaluation-pool", str(evaluation_pool),
+        "--generations", str(int(_generations_spin.value)),
+        "--tournament", str(int(_tournament_spin.value)),
+        "--elite", str(int(_elite_spin.value)),
+        "--crossover", str(_crossover_spin.value),
+        "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--structural-mutation-chance", str(_structural_mutation_spin.value),
+        "--max-segments", str(int(_max_segments_spin.value)),
+        "--seed", str(int(_seed_spin.value)),
         "--workers", str(int(_workers_spin.value)),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
-        "--world-file", world_file,
-        "--backend", _accelerator_mode,
-        "--gpus", _gpu_ids_for_cli(),
+        "--motor-strength", str(_motor_strength_spin.value),
+        "--trials", str(int(_trials_spin.value)),
+        "--trial-aggregation", _trial_aggregation_value(),
+        "--timeline-file", _benchmark_timeline_file,
+        "--fitness-distance", str(_fitness_distance_spin.value),
+        "--fitness-speed", str(_fitness_speed_spin.value),
+        "--fitness-upright", str(_fitness_upright_spin.value),
+        "--fitness-stability", str(_fitness_stability_spin.value),
+        "--fitness-energy", str(_fitness_energy_spin.value),
+        "--world-file", _benchmark_world_file,
         "--event-port", str(_event_port),
+        "--champion-output", champion_path,
+        "--result-output", results_path,
+        "--experiment-name", "CUDA-vs-CPU Benchmark " + backend.to_upper(),
+        "--checkpoint-output", checkpoint_path,
+        "--accelerator", backend,
+        "--gpus", _gpu_ids_for_cli(),
+        "--gpu-batch-size", str(int(_gpu_batch_spin.value)),
+        "--gpu-max-parts", str(int(_gpu_max_parts_spin.value)),
+        "--gpu-max-joints", str(int(_gpu_max_joints_spin.value)),
+        "--throughput-mode", _throughput_mode,
+        "--no-cpu-fallback",
     ])
 
-    _set_status("Starting benchmark process...")
-    if _start_job("batch", args):
-        _set_status("Benchmark process started • waiting for backend")
+    if not _benchmark_parent_path.is_empty():
+        args.append_array(PackedStringArray(["--genome", _benchmark_parent_path]))
+    return args
+
+
+func _benchmark_start_phase(phase: String) -> void:
+    if not _benchmark_active:
+        return
+
+    _benchmark_phase = phase
+    _benchmark_phase_started_ms = Time.get_ticks_msec()
+    _benchmark_last_generation_ms = _benchmark_phase_started_ms
+    _benchmark_phase_eval_seconds = 0.0
+    _benchmark_phase_items = 0
+    _benchmark_phase_physics_steps = 0.0
+
+    var evaluation_pool := _benchmark_requested_eval_pool
+    if phase == "cpu" and _benchmark_cuda_eval_pool > 0:
+        evaluation_pool = _benchmark_cuda_eval_pool
+
+    var args := _benchmark_evolution_args(phase, evaluation_pool)
+    _benchmark_log(
+        "\n================================================================================\n"
+        + "PHASE: %s\n" % phase.to_upper()
+        + "Start: %s\n" % Time.get_datetime_string_from_system()
+        + "Requested evaluation pool for this phase: %d\n" % evaluation_pool
+        + "Command: %s %s\n"
+            % [_backend_path(), " ".join(args)]
+        + "================================================================================\n"
+    )
+
+    if not _start_job("benchmark_" + phase, args):
+        _benchmark_abort("Failed to start %s benchmark evolution." % phase.to_upper())
+        return
+
+    _benchmark_start_gpu_telemetry()
+    _set_status(
+        "Benchmark %s • full evolution • waiting for generation 1"
+        % phase.to_upper()
+    )
+
+
+func _benchmark_start_gpu_telemetry() -> void:
+    _benchmark_stop_gpu_telemetry(false)
+    _benchmark_gpu_telemetry_path = (
+        _benchmark_base_path + "_" + _benchmark_phase + "_gpu_telemetry.csv"
+    )
+    if FileAccess.file_exists(_benchmark_gpu_telemetry_path):
+        DirAccess.remove_absolute(_benchmark_gpu_telemetry_path)
+
+    var args := PackedStringArray([
+        "--query-gpu=timestamp,index,name,pstate,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,clocks.sm,clocks.mem,temperature.gpu",
+        "--format=csv,noheader,nounits",
+        "-lms", "250",
+        "-f", _benchmark_gpu_telemetry_path,
+    ])
+    var gpu_ids := _gpu_ids_for_cli()
+    if gpu_ids != "all":
+        args.append_array(PackedStringArray(["-i", gpu_ids]))
+
+    _benchmark_gpu_telemetry_pid = OS.create_process("nvidia-smi", args, false)
+    if _benchmark_gpu_telemetry_pid <= 0:
+        _benchmark_gpu_telemetry_pid = 0
+        _benchmark_log("GPU telemetry: nvidia-smi sampler could not be started.\n")
+
+
+func _benchmark_stop_gpu_telemetry(append_to_log: bool = true) -> Dictionary:
+    if _benchmark_gpu_telemetry_pid > 0:
+        if OS.is_process_running(_benchmark_gpu_telemetry_pid):
+            OS.kill(_benchmark_gpu_telemetry_pid)
+        _benchmark_gpu_telemetry_pid = 0
+
+    var stats := {
+        "samples": 0,
+        "gpu_util_avg": 0.0,
+        "gpu_util_max": 0.0,
+        "memory_util_avg": 0.0,
+        "power_avg_w": 0.0,
+        "power_max_w": 0.0,
+        "sm_clock_avg_mhz": 0.0,
+        "temperature_max_c": 0.0,
+    }
+
+    if _benchmark_gpu_telemetry_path.is_empty():
+        return stats
+
+    var file := FileAccess.open(_benchmark_gpu_telemetry_path, FileAccess.READ)
+    if file == null:
+        if append_to_log:
+            _benchmark_log(
+                "GPU telemetry file unavailable: %s\n" % _benchmark_gpu_telemetry_path
+            )
+        return stats
+
+    var raw := file.get_as_text()
+    file.close()
+    var util_sum := 0.0
+    var memory_util_sum := 0.0
+    var power_sum := 0.0
+    var clock_sum := 0.0
+    var sample_count := 0
+
+    for line in raw.split("\n", false):
+        var fields := line.split(",", false)
+        if fields.size() < 13:
+            continue
+        var gpu_util_text := str(fields[4]).strip_edges()
+        var mem_util_text := str(fields[5]).strip_edges()
+        var power_text := str(fields[8]).strip_edges()
+        var clock_text := str(fields[10]).strip_edges()
+        var temp_text := str(fields[12]).strip_edges()
+        if not gpu_util_text.is_valid_float():
+            continue
+
+        var gpu_util := float(gpu_util_text)
+        var memory_util := float(mem_util_text) if mem_util_text.is_valid_float() else 0.0
+        var power := float(power_text) if power_text.is_valid_float() else 0.0
+        var clock := float(clock_text) if clock_text.is_valid_float() else 0.0
+        var temperature := float(temp_text) if temp_text.is_valid_float() else 0.0
+
+        sample_count += 1
+        util_sum += gpu_util
+        memory_util_sum += memory_util
+        power_sum += power
+        clock_sum += clock
+        stats["gpu_util_max"] = maxf(float(stats["gpu_util_max"]), gpu_util)
+        stats["power_max_w"] = maxf(float(stats["power_max_w"]), power)
+        stats["temperature_max_c"] = maxf(
+            float(stats["temperature_max_c"]),
+            temperature
+        )
+
+    stats["samples"] = sample_count
+    if sample_count > 0:
+        stats["gpu_util_avg"] = util_sum / sample_count
+        stats["memory_util_avg"] = memory_util_sum / sample_count
+        stats["power_avg_w"] = power_sum / sample_count
+        stats["sm_clock_avg_mhz"] = clock_sum / sample_count
+
+    if append_to_log:
+        _benchmark_log(
+            "\n--- %s GPU TELEMETRY (250 ms samples) ---\n" % _benchmark_phase.to_upper()
+            + "Columns: timestamp,index,name,pstate,gpu_util_pct,memory_util_pct,"
+            + "memory_used_mib,memory_total_mib,power_w,power_limit_w,"
+            + "sm_clock_mhz,memory_clock_mhz,temp_c\n"
+            + raw
+            + ("" if raw.ends_with("\n") else "\n")
+            + "Telemetry summary: %s\n" % JSON.stringify(stats)
+            + "--- END GPU TELEMETRY ---\n"
+        )
+
+    return stats
+
+
+func _benchmark_append_results_file() -> void:
+    var results_path := _benchmark_phase_file("results.evoresults")
+    var file := FileAccess.open(results_path, FileAccess.READ)
+    if file == null:
+        _benchmark_log(
+            "Full results file unavailable for %s: %s\n"
+            % [_benchmark_phase.to_upper(), results_path]
+        )
+        return
+    var text := file.get_as_text()
+    file.close()
+    _benchmark_log(
+        "\n--- %s FULL EVOLUTION RESULTS JSON ---\n" % _benchmark_phase.to_upper()
+        + text
+        + ("" if text.ends_with("\n") else "\n")
+        + "--- END FULL RESULTS JSON ---\n"
+    )
+
+
+func _benchmark_handle_event(event: Dictionary) -> void:
+    var kind := str(event.get("kind", ""))
+    _benchmark_log("EVENT %s\n" % JSON.stringify(event))
+
+    match kind:
+        "evolution_started":
+            _build_world_from_geometry(event.get("world_geometry", []))
+            _set_status(
+                "Benchmark %s • started • %s generations"
+                % [
+                    _benchmark_phase.to_upper(),
+                    str(event.get("generations", 0)),
+                ]
+            )
+
+        "generation_complete":
+            var now_ms := Time.get_ticks_msec()
+            var interval_seconds := (
+                float(now_ms - _benchmark_last_generation_ms) / 1000.0
+                if _benchmark_last_generation_ms >= 0
+                else 0.0
+            )
+            _benchmark_last_generation_ms = now_ms
+
+            var generation := int(event.get("generation", 0))
+            var generations := maxi(int(event.get("generations", 1)), 1)
+            var evaluation_pool := int(
+                event.get(
+                    "evaluation_pool_size",
+                    event.get("effective_population", 0)
+                )
+            )
+            if _benchmark_phase == "cuda":
+                _benchmark_cuda_eval_pool = maxi(
+                    _benchmark_cuda_eval_pool,
+                    evaluation_pool
+                )
+
+            var execution_value = event.get("execution", {})
+            var execution: Dictionary = {}
+            if typeof(execution_value) == TYPE_DICTIONARY:
+                execution = execution_value
+
+            var eval_seconds := float(execution.get("wall_seconds", 0.0))
+            var gpu_items := int(execution.get("gpu_items", 0))
+            var cpu_items := int(execution.get("cpu_items", 0))
+            var items := gpu_items + cpu_items
+            if items <= 0:
+                items = evaluation_pool
+            _benchmark_phase_eval_seconds += eval_seconds
+            _benchmark_phase_items += items
+            _benchmark_phase_physics_steps += (
+                float(execution.get("physics_steps_per_second", 0.0))
+                * eval_seconds
+            )
+
+            var phase_fraction := float(generation) / float(generations)
+            _progress_bar.value = (
+                phase_fraction * 50.0
+                if _benchmark_phase == "cuda"
+                else 50.0 + phase_fraction * 50.0
+            )
+            var overhead_seconds := maxf(0.0, interval_seconds - eval_seconds)
+            _set_status(
+                "Benchmark %s • generation %d/%d • eval %d • backend %.3fs • interval %.3fs"
+                % [
+                    _benchmark_phase.to_upper(),
+                    generation,
+                    generations,
+                    evaluation_pool,
+                    eval_seconds,
+                    interval_seconds,
+                ]
+            )
+            _metrics.text = (
+                "[table=2]"
+                + "[cell]Benchmark phase[/cell][cell][b]%s[/b][/cell]"
+                    % _benchmark_phase.to_upper()
+                + "[cell]Generation[/cell][cell]%d / %d[/cell]"
+                    % [generation, generations]
+                + "[cell]Candidates[/cell][cell]%d[/cell]" % evaluation_pool
+                + "[cell]Backend eval time[/cell][cell]%.3f s[/cell]" % eval_seconds
+                + "[cell]Generation interval[/cell][cell]%.3f s[/cell]" % interval_seconds
+                + "[cell]Non-eval/CPU gap[/cell][cell]%.3f s[/cell]" % overhead_seconds
+                + "[cell]Items / second[/cell][cell]%.1f[/cell]"
+                    % float(execution.get("items_per_second", 0.0))
+                + "[cell]Physics steps / second[/cell][cell]%.0f[/cell]"
+                    % float(execution.get("physics_steps_per_second", 0.0))
+                + "[cell]GPU items[/cell][cell]%d[/cell]" % gpu_items
+                + "[cell]CPU items[/cell][cell]%d[/cell]" % cpu_items
+                + "[cell]Fallback items[/cell][cell]%d[/cell]"
+                    % int(execution.get("fallback_items", 0))
+                + "[/table]"
+            )
+            _benchmark_log(
+                "GENERATION_TIMING phase=%s generation=%d interval_s=%.6f "
+                % [_benchmark_phase, generation, interval_seconds]
+                + "backend_eval_s=%.6f estimated_non_eval_s=%.6f "
+                    % [eval_seconds, overhead_seconds]
+                + "evaluation_pool=%d gpu_items=%d cpu_items=%d "
+                    % [evaluation_pool, gpu_items, cpu_items]
+                + "items_per_s=%.3f physics_steps_per_s=%.3f\n"
+                    % [
+                        float(execution.get("items_per_second", 0.0)),
+                        float(execution.get("physics_steps_per_second", 0.0)),
+                    ]
+            )
+
+        "evolution_complete":
+            var telemetry := _benchmark_stop_gpu_telemetry(true)
+            _benchmark_append_results_file()
+
+            var full_wall := float(event.get("wall_seconds", 0.0))
+            var eval_wall := _benchmark_phase_eval_seconds
+            var items_per_second := (
+                float(_benchmark_phase_items) / eval_wall
+                if eval_wall > 0.0
+                else 0.0
+            )
+            var physics_steps_per_second := (
+                _benchmark_phase_physics_steps / eval_wall
+                if eval_wall > 0.0
+                else 0.0
+            )
+            var summary := {
+                "phase": _benchmark_phase,
+                "full_wall_seconds": full_wall,
+                "backend_evaluation_seconds": eval_wall,
+                "estimated_non_evaluation_seconds": maxf(0.0, full_wall - eval_wall),
+                "backend_fraction_of_full_run":
+                    (eval_wall / full_wall if full_wall > 0.0 else 0.0),
+                "items": _benchmark_phase_items,
+                "items_per_second": items_per_second,
+                "physics_steps_per_second": physics_steps_per_second,
+                "evaluations_completed": int(event.get("evaluations_completed", 0)),
+                "champion_fitness": float(event.get("champion_fitness", 0.0)),
+                "champion_distance": float(event.get("champion_distance", 0.0)),
+                "gpu_telemetry": telemetry,
+            }
+            _benchmark_log(
+                "\nPHASE SUMMARY %s\n%s\n"
+                % [_benchmark_phase.to_upper(), JSON.stringify(summary, "\t")]
+            )
+
+            if _benchmark_phase == "cuda":
+                _benchmark_cuda_summary = summary
+                _job_pid = 0
+                _job_kind = ""
+                _dead_process_since_ms = -1
+                _set_status(
+                    "Benchmark CUDA complete • starting equal-work CPU evolution..."
+                )
+                call_deferred("_benchmark_start_phase", "cpu")
+            else:
+                _benchmark_cpu_summary = summary
+                _job_pid = 0
+                _job_kind = ""
+                _dead_process_since_ms = -1
+                _benchmark_finish_success()
+
+        "evolution_error":
+            _benchmark_abort(
+                "%s evolution error: %s"
+                % [
+                    _benchmark_phase.to_upper(),
+                    str(event.get("message", "unknown error")),
+                ]
+            )
+
+
+func _benchmark_finish_success() -> void:
+    var cuda_wall := float(_benchmark_cuda_summary.get("full_wall_seconds", 0.0))
+    var cpu_wall := float(_benchmark_cpu_summary.get("full_wall_seconds", 0.0))
+    var speedup := cpu_wall / cuda_wall if cuda_wall > 0.0 else 0.0
+    var cuda_eval := float(
+        _benchmark_cuda_summary.get("backend_evaluation_seconds", 0.0)
+    )
+    var cpu_eval := float(
+        _benchmark_cpu_summary.get("backend_evaluation_seconds", 0.0)
+    )
+    var eval_speedup := cpu_eval / cuda_eval if cuda_eval > 0.0 else 0.0
+
+    _benchmark_log(
+        "\n================================================================================\n"
+        + "FINAL CUDA VS CPU COMPARISON\n"
+        + "================================================================================\n"
+        + "Actual CUDA evaluation pool: %d\n" % _benchmark_cuda_eval_pool
+        + "CUDA full evolution wall: %.6f s\n" % cuda_wall
+        + "CPU full evolution wall: %.6f s\n" % cpu_wall
+        + "Full-run CPU/CUDA speedup: %.4fx\n" % speedup
+        + "CUDA backend evaluation total: %.6f s\n" % cuda_eval
+        + "CPU backend evaluation total: %.6f s\n" % cpu_eval
+        + "Evaluation-only CPU/CUDA speedup: %.4fx\n" % eval_speedup
+        + "CUDA summary: %s\n" % JSON.stringify(_benchmark_cuda_summary)
+        + "CPU summary: %s\n" % JSON.stringify(_benchmark_cpu_summary)
+        + "Completed: %s\n" % Time.get_datetime_string_from_system()
+        + "================================================================================\n"
+    )
+
+    _benchmark_active = false
+    _benchmark_phase = ""
+    _progress_bar.value = 100
+    _finish_job_controls()
+    _set_status("Benchmark complete • log: %s" % _benchmark_log_path)
+    _metrics.text = (
+        "[table=2]"
+        + "[cell]Benchmark[/cell][cell][b]CUDA vs CPU full evolution[/b][/cell]"
+        + "[cell]CUDA wall time[/cell][cell]%.3f s[/cell]" % cuda_wall
+        + "[cell]CPU wall time[/cell][cell]%.3f s[/cell]" % cpu_wall
+        + "[cell]Full-run speedup[/cell][cell][b]%.2fx[/b][/cell]" % speedup
+        + "[cell]CUDA eval time[/cell][cell]%.3f s[/cell]" % cuda_eval
+        + "[cell]CPU eval time[/cell][cell]%.3f s[/cell]" % cpu_eval
+        + "[cell]Eval-only speedup[/cell][cell]%.2fx[/cell]" % eval_speedup
+        + "[cell]CUDA GPU avg / max[/cell][cell]%.1f%% / %.1f%%[/cell]"
+            % [
+                float(
+                    _benchmark_cuda_summary.get("gpu_telemetry", {}).get(
+                        "gpu_util_avg",
+                        0.0
+                    )
+                ),
+                float(
+                    _benchmark_cuda_summary.get("gpu_telemetry", {}).get(
+                        "gpu_util_max",
+                        0.0
+                    )
+                ),
+            ]
+        + "[cell]Log[/cell][cell]%s[/cell]" % _benchmark_log_path
+        + "[/table]"
+    )
+
+
+func _benchmark_abort(reason: String) -> void:
+    _benchmark_stop_gpu_telemetry(true)
+    _benchmark_log(
+        "\nBENCHMARK ABORTED: %s\nTime: %s\n"
+        % [reason, Time.get_datetime_string_from_system()]
+    )
+    if _job_pid > 0 and OS.is_process_running(_job_pid):
+        OS.kill(_job_pid)
+    _job_pid = 0
+    _job_kind = ""
+    _dead_process_since_ms = -1
+    _job_started_ms = -1
+    _benchmark_active = false
+    _benchmark_phase = ""
+    _finish_job_controls()
+    _progress_bar.value = 0
+    _set_status("Benchmark stopped • %s • log: %s" % [reason, _benchmark_log_path])
+    _metrics.text = (
+        "[color=#ff8a8a][b]Benchmark stopped:[/b] %s\n%s[/color]"
+        % [reason, _benchmark_log_path]
+    )
 
 
 func _can_start_action(action_name: String) -> bool:
@@ -4276,12 +4913,18 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
 
 
 func _on_stop_pressed() -> void:
+    if _benchmark_active:
+        _benchmark_abort("Cancelled by user.")
+        return
     _stop_current_job()
     _set_status("Stopped.")
     _metrics.text = "[color=#9aa7bd]Simulation cancelled.[/color]"
 
 
 func _stop_current_job() -> void:
+    if _benchmark_gpu_telemetry_pid > 0 and OS.is_process_running(_benchmark_gpu_telemetry_pid):
+        OS.kill(_benchmark_gpu_telemetry_pid)
+        _benchmark_gpu_telemetry_pid = 0
     if _job_pid > 0 and OS.is_process_running(_job_pid):
         OS.kill(_job_pid)
     _job_pid = 0
@@ -4343,6 +4986,18 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
 func _handle_event(event: Dictionary) -> void:
     _job_received_event = true
     var kind := str(event.get("kind", ""))
+
+    if (
+        _benchmark_active
+        and kind in [
+            "evolution_started",
+            "generation_complete",
+            "evolution_complete",
+            "evolution_error",
+        ]
+    ):
+        _benchmark_handle_event(event)
+        return
 
     if kind == "batch_error":
         _job_pid = 0
