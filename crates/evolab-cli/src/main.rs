@@ -1,4 +1,4 @@
-use std::fs;
+#![recursion_limit = "256"]\n\nuse std::fs;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -1362,6 +1362,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                         "evaluations_completed": summary.evaluations_completed,
                         "evaluation_pool_size": summary.evaluation_pool_size,
                         "execution": summary.execution,
+                        "timing": summary.timing,
+                        "population_telemetry": summary.population_telemetry,
+                        "offspring": summary.offspring,
                         "effective_population": summary.effective_settings.population_size,
                         "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
                         "effective_structural_mutation_chance":

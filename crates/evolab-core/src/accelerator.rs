@@ -159,12 +159,77 @@ pub fn schedule_gpu_work(
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CudaExecutionTelemetry {
+    pub host_packing_seconds: f64,
+    pub h_to_d_seconds: f64,
+    pub kernel_launch_seconds: f64,
+    pub kernel_execution_seconds: f64,
+    pub synchronization_seconds: f64,
+    pub d_to_h_seconds: f64,
+    pub result_decode_seconds: f64,
+    pub context_creation_seconds: f64,
+    pub nvrtc_compile_seconds: f64,
+    pub module_load_seconds: f64,
+    pub kernel_launch_count: usize,
+    pub stream_count: usize,
+    pub batch_count: usize,
+    pub total_packed_parts: usize,
+    pub total_packed_joints: usize,
+    pub total_brain_ops: usize,
+    pub h_to_d_bytes: u64,
+    pub d_to_h_bytes: u64,
+    pub allocation_count: u64,
+    pub reallocation_count: u64,
+    pub device_buffer_capacity_bytes: u64,
+    pub unstable_simulations: usize,
+    pub block_size: u32,
+    pub creature_group_size: u32,
+    pub creatures_per_block: u32,
+    pub grid_blocks_total: u64,
+}
+
+impl CudaExecutionTelemetry {
+    pub fn accumulate(&mut self, other: &Self) {
+        self.host_packing_seconds += other.host_packing_seconds;
+        self.h_to_d_seconds += other.h_to_d_seconds;
+        self.kernel_launch_seconds += other.kernel_launch_seconds;
+        self.kernel_execution_seconds += other.kernel_execution_seconds;
+        self.synchronization_seconds += other.synchronization_seconds;
+        self.d_to_h_seconds += other.d_to_h_seconds;
+        self.result_decode_seconds += other.result_decode_seconds;
+        self.context_creation_seconds += other.context_creation_seconds;
+        self.nvrtc_compile_seconds += other.nvrtc_compile_seconds;
+        self.module_load_seconds += other.module_load_seconds;
+        self.kernel_launch_count += other.kernel_launch_count;
+        self.stream_count = self.stream_count.max(other.stream_count);
+        self.batch_count += other.batch_count;
+        self.total_packed_parts += other.total_packed_parts;
+        self.total_packed_joints += other.total_packed_joints;
+        self.total_brain_ops += other.total_brain_ops;
+        self.h_to_d_bytes += other.h_to_d_bytes;
+        self.d_to_h_bytes += other.d_to_h_bytes;
+        self.allocation_count += other.allocation_count;
+        self.reallocation_count += other.reallocation_count;
+        self.device_buffer_capacity_bytes = self
+            .device_buffer_capacity_bytes
+            .max(other.device_buffer_capacity_bytes);
+        self.unstable_simulations += other.unstable_simulations;
+        self.block_size = self.block_size.max(other.block_size);
+        self.creature_group_size = self.creature_group_size.max(other.creature_group_size);
+        self.creatures_per_block = self.creatures_per_block.max(other.creatures_per_block);
+        self.grid_blocks_total += other.grid_blocks_total;
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct DevicePerformance {
     pub device_id: u32,
     pub items: usize,
     pub wall_seconds: f64,
     pub items_per_second: f64,
     pub physics_steps_per_second: f64,
+    #[serde(default)]
+    pub cuda: CudaExecutionTelemetry,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -178,6 +243,12 @@ pub struct ExecutionPerformance {
     pub items_per_second: f64,
     pub physics_steps_per_second: f64,
     pub devices: Vec<DevicePerformance>,
+    #[serde(default)]
+    pub host_preparation_seconds: f64,
+    #[serde(default)]
+    pub result_processing_seconds: f64,
+    #[serde(default)]
+    pub cuda: CudaExecutionTelemetry,
 }
 
 const fn default_true() -> bool {

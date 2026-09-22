@@ -575,6 +575,7 @@ mod platform {
             wall_seconds,
             items_per_second: assignment.count as f64 / wall_seconds,
             physics_steps_per_second: physics_steps as f64 / wall_seconds,
+            cuda: Default::default(),
         };
 
         Ok(DeviceBatchResult {

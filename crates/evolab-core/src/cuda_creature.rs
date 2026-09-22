@@ -453,9 +453,9 @@ mod platform {
     };
 
     use crate::{
-        AcceleratorConfig, AcceleratorMode, CreatureGenome, CudaDeviceInfo, DevicePerformance,
-        DeviceWorkAssignment, ExecutionPerformance, FitnessConfig, FitnessMetrics, FitnessResult,
-        SimulationConfig, ThroughputMode,
+        AcceleratorConfig, AcceleratorMode, CreatureGenome, CudaDeviceInfo, CudaExecutionTelemetry,
+        DevicePerformance, DeviceWorkAssignment, ExecutionPerformance, FitnessConfig,
+        FitnessMetrics, FitnessResult, SimulationConfig, ThroughputMode,
     };
 
     use super::{CudaCreatureBatchResult, PackedCreatureBatch};
@@ -816,7 +816,7 @@ mod platform {
     fn get_or_create_runtime(
         device_info: &CudaDeviceInfo,
         throughput_mode: ThroughputMode,
-    ) -> Result<Arc<Mutex<CudaRuntime>>, String> {
+    ) -> Result<(Arc<Mutex<CudaRuntime>>, CudaExecutionTelemetry), String> {
         let key = (
             device_info.id,
             device_info.compute_capability_major,
@@ -831,8 +831,10 @@ mod platform {
             .get(&key)
             .cloned()
         {
-            return Ok(runtime);
+            return Ok((runtime, CudaExecutionTelemetry::default()));
         }
+
+        let mut initialization = CudaExecutionTelemetry::default();
 
         let api = CudaApi::load()?;
         let mut device = 0;
@@ -842,18 +844,23 @@ mod platform {
         )?;
 
         let mut context = null_mut();
+        let context_started = Instant::now();
         check_cuda(
             unsafe { (api.ctx_create)(&mut context, 0, device) },
             "cuCtxCreate",
         )?;
+        initialization.context_creation_seconds = context_started.elapsed().as_secs_f64();
 
+        let compile_started = Instant::now();
         let image = compile_kernel(
             device_info.compute_capability_major,
             device_info.compute_capability_minor,
             throughput_mode,
         )?;
+        initialization.nvrtc_compile_seconds = compile_started.elapsed().as_secs_f64();
 
         let mut module = null_mut();
+        let module_started = Instant::now();
         if let Err(error) = check_cuda(
             unsafe { (api.module_load_data)(&mut module, image.as_ptr().cast::<c_void>()) },
             "cuModuleLoadData",
@@ -877,6 +884,8 @@ mod platform {
             return Err(error);
         }
 
+        initialization.module_load_seconds = module_started.elapsed().as_secs_f64();
+
         let runtime = Arc::new(Mutex::new(CudaRuntime {
             api,
             context,
@@ -888,7 +897,8 @@ mod platform {
         let mut guard = cache
             .lock()
             .map_err(|_| "CUDA runtime cache mutex was poisoned".to_string())?;
-        Ok(guard.entry(key).or_insert_with(|| runtime.clone()).clone())
+        let runtime = guard.entry(key).or_insert_with(|| runtime.clone()).clone();
+        Ok((runtime, initialization))
     }
 
     #[derive(Default)]
@@ -925,6 +935,10 @@ mod platform {
     #[derive(Default)]
     struct CudaWorkspace {
         buffers: HashMap<&'static str, RawDeviceBuffer>,
+        allocation_count: u64,
+        reallocation_count: u64,
+        h_to_d_bytes: u64,
+        d_to_h_bytes: u64,
     }
 
     impl CudaWorkspace {
@@ -935,7 +949,15 @@ mod platform {
             required_bytes: usize,
         ) -> Result<CuDevicePtr, String> {
             let buffer = self.buffers.entry(name).or_default();
+            let had_allocation = buffer.pointer != 0;
+            let previous_capacity = buffer.capacity_bytes;
             buffer.ensure_capacity(api, required_bytes)?;
+            if buffer.capacity_bytes != previous_capacity {
+                self.allocation_count += 1;
+                if had_allocation {
+                    self.reallocation_count += 1;
+                }
+            }
             Ok(buffer.pointer)
         }
 
@@ -948,50 +970,55 @@ mod platform {
             let bytes = values.len().max(1) * size_of::<T>();
             let pointer = self.ensure(api, name, bytes)?;
             if !values.is_empty() {
+                let transfer_bytes = values.len() * size_of::<T>();
                 check_cuda(
                     unsafe {
-                        (api.memcpy_htod)(
-                            pointer,
-                            values.as_ptr().cast::<c_void>(),
-                            values.len() * size_of::<T>(),
-                        )
+                        (api.memcpy_htod)(pointer, values.as_ptr().cast::<c_void>(), transfer_bytes)
                     },
                     "cuMemcpyHtoD",
                 )?;
+                self.h_to_d_bytes += transfer_bytes as u64;
             }
             Ok(pointer)
         }
 
         fn download<T>(
-            &self,
+            &mut self,
             api: &CudaApi,
             name: &'static str,
             values: &mut [T],
         ) -> Result<(), String> {
-            let buffer = self
-                .buffers
-                .get(name)
-                .ok_or_else(|| format!("CUDA workspace buffer '{name}' is missing"))?;
+            let (pointer, capacity_bytes) = {
+                let buffer = self
+                    .buffers
+                    .get(name)
+                    .ok_or_else(|| format!("CUDA workspace buffer '{name}' is missing"))?;
+                (buffer.pointer, buffer.capacity_bytes)
+            };
             let bytes = values.len() * size_of::<T>();
-            if bytes > buffer.capacity_bytes {
+            if bytes > capacity_bytes {
                 return Err(format!(
                     "CUDA workspace buffer '{name}' is too small: {} < {} bytes",
-                    buffer.capacity_bytes, bytes
+                    capacity_bytes, bytes
                 ));
             }
             if !values.is_empty() {
                 check_cuda(
                     unsafe {
-                        (api.memcpy_dtoh)(
-                            values.as_mut_ptr().cast::<c_void>(),
-                            buffer.pointer,
-                            bytes,
-                        )
+                        (api.memcpy_dtoh)(values.as_mut_ptr().cast::<c_void>(), pointer, bytes)
                     },
                     "cuMemcpyDtoH",
                 )?;
+                self.d_to_h_bytes += bytes as u64;
             }
             Ok(())
+        }
+
+        fn total_capacity_bytes(&self) -> u64 {
+            self.buffers
+                .values()
+                .map(|buffer| buffer.capacity_bytes as u64)
+                .sum()
         }
 
         fn release_all(&mut self, api: &CudaApi) {
@@ -1178,16 +1205,25 @@ mod platform {
         let physics_steps = genomes.len() as u64 * simulation.step_count() as u64;
         Ok(CudaCreatureBatchResult {
             fitness: results,
-            execution: ExecutionPerformance {
-                requested_mode: accelerator.mode,
-                actual_mode: AcceleratorMode::Cuda,
-                cpu_items: 0,
-                gpu_items: genomes.len(),
-                fallback_items: 0,
-                wall_seconds,
-                items_per_second: genomes.len() as f64 / wall_seconds,
-                physics_steps_per_second: physics_steps as f64 / wall_seconds,
-                devices: device_stats,
+            execution: {
+                let mut cuda = CudaExecutionTelemetry::default();
+                for device in &device_stats {
+                    cuda.accumulate(&device.cuda);
+                }
+                ExecutionPerformance {
+                    requested_mode: accelerator.mode,
+                    actual_mode: AcceleratorMode::Cuda,
+                    cpu_items: 0,
+                    gpu_items: genomes.len(),
+                    fallback_items: 0,
+                    wall_seconds,
+                    items_per_second: genomes.len() as f64 / wall_seconds,
+                    physics_steps_per_second: physics_steps as f64 / wall_seconds,
+                    devices: device_stats,
+                    host_preparation_seconds: 0.0,
+                    result_processing_seconds: 0.0,
+                    cuda,
+                }
             },
         })
     }
@@ -1205,7 +1241,8 @@ mod platform {
         device_info: &CudaDeviceInfo,
         global_start: usize,
     ) -> Result<DeviceAssignmentResult, String> {
-        let runtime = get_or_create_runtime(device_info, accelerator.throughput_mode)?;
+        let (runtime, mut cuda_telemetry) =
+            get_or_create_runtime(device_info, accelerator.throughput_mode)?;
         let mut runtime = runtime
             .lock()
             .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
@@ -1230,9 +1267,11 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_results = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            let chunk_result = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            cuda_telemetry.accumulate(&chunk_result.telemetry);
             all_results.extend(
-                chunk_results
+                chunk_result
+                    .fitness
                     .into_iter()
                     .enumerate()
                     .map(|(index, result)| (global_start + offset + index, result)),
@@ -1250,8 +1289,14 @@ mod platform {
                 wall_seconds,
                 items_per_second: genomes.len() as f64 / wall_seconds,
                 physics_steps_per_second: physics_steps as f64 / wall_seconds,
+                cuda: cuda_telemetry,
             },
         })
+    }
+
+    struct ChunkResult {
+        fitness: Vec<FitnessResult>,
+        telemetry: CudaExecutionTelemetry,
     }
 
     fn run_chunk(
@@ -1260,17 +1305,30 @@ mod platform {
         simulation: &SimulationConfig,
         fitness: &FitnessConfig,
         accelerator: &AcceleratorConfig,
-    ) -> Result<Vec<FitnessResult>, String> {
+    ) -> Result<ChunkResult, String> {
+        let mut telemetry = CudaExecutionTelemetry::default();
+        telemetry.batch_count = 1;
+
+        let packing_started = Instant::now();
         let packed =
             PackedCreatureBatch::pack(genomes, accelerator.max_parts, accelerator.max_joints)?;
+        telemetry.host_packing_seconds = packing_started.elapsed().as_secs_f64();
         let world_count = packed.world_count;
         let part_slots = packed.inv_mass.len();
         let joint_slots = packed.parent.len();
+        telemetry.total_packed_parts = part_slots;
+        telemetry.total_packed_joints = joint_slots;
+        telemetry.total_brain_ops = packed.op_code.len();
 
         let api = &runtime.api;
         let function = runtime.function;
         let workspace = &mut runtime.workspace;
+        let allocation_before = workspace.allocation_count;
+        let reallocation_before = workspace.reallocation_count;
+        let h_to_d_before = workspace.h_to_d_bytes;
+        let d_to_h_before = workspace.d_to_h_bytes;
 
+        let upload_started = Instant::now();
         let mut p_part_count = workspace.upload(api, "part_count", &packed.part_count)?;
         let mut p_joint_count = workspace.upload(api, "joint_count", &packed.joint_count)?;
         let mut p_part_base = workspace.upload(api, "part_base", &packed.part_base)?;
@@ -1299,6 +1357,7 @@ mod platform {
         let mut p_op_index = workspace.upload(api, "op_index", &packed.op_index)?;
         let mut p_op_a = workspace.upload(api, "op_a", &packed.op_a)?;
         let mut p_op_b = workspace.upload(api, "op_b", &packed.op_b)?;
+        telemetry.h_to_d_seconds = upload_started.elapsed().as_secs_f64();
 
         let mut p_state_position =
             workspace.ensure(api, "state_position", part_slots * 3 * size_of::<f32>())?;
@@ -1339,15 +1398,16 @@ mod platform {
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
 
-        // Four 8-lane creature groups fit inside each warp. With a 64-thread
-        // block that is eight creatures per block, so small 6-8 joint/segment
-        // bodies use most SIMD lanes instead of idling ~95% of a 128-thread block.
         const CUDA_CONCURRENT_LANES: usize = 3;
         const CUDA_GROUP_SIZE: u32 = 8;
         const CUDA_BLOCK_SIZE: u32 = 64;
         const CUDA_CREATURES_PER_BLOCK: u32 = CUDA_BLOCK_SIZE / CUDA_GROUP_SIZE;
+        telemetry.block_size = CUDA_BLOCK_SIZE;
+        telemetry.creature_group_size = CUDA_GROUP_SIZE;
+        telemetry.creatures_per_block = CUDA_CREATURES_PER_BLOCK;
 
         let lane_count = world_count.min(CUDA_CONCURRENT_LANES).max(1);
+        telemetry.stream_count = lane_count;
         let mut streams = Vec::with_capacity(lane_count);
         for _ in 0..lane_count {
             let mut stream = null_mut();
@@ -1358,6 +1418,8 @@ mod platform {
             streams.push(StreamGuard { api, stream });
         }
 
+        let kernel_window_started = Instant::now();
+        let launch_started = Instant::now();
         for (lane, stream) in streams.iter().enumerate() {
             let start = world_count * lane / lane_count;
             let end = world_count * (lane + 1) / lane_count;
@@ -1422,6 +1484,8 @@ mod platform {
             ];
 
             let grid_size = (launch_count as u32).div_ceil(CUDA_CREATURES_PER_BLOCK);
+            telemetry.kernel_launch_count += 1;
+            telemetry.grid_blocks_total += grid_size as u64;
             check_cuda(
                 unsafe {
                     (api.launch_kernel)(
@@ -1441,13 +1505,17 @@ mod platform {
                 "cuLaunchKernel(simulate_creatures)",
             )?;
         }
+        telemetry.kernel_launch_seconds = launch_started.elapsed().as_secs_f64();
 
+        let synchronization_started = Instant::now();
         for stream in &streams {
             check_cuda(
                 unsafe { (api.stream_synchronize)(stream.stream) },
                 "cuStreamSynchronize",
             )?;
         }
+        telemetry.synchronization_seconds = synchronization_started.elapsed().as_secs_f64();
+        telemetry.kernel_execution_seconds = kernel_window_started.elapsed().as_secs_f64();
 
         let mut score = vec![0.0; world_count];
         let mut distance = vec![0.0; world_count];
@@ -1456,6 +1524,7 @@ mod platform {
         let mut stability = vec![0.0; world_count];
         let mut energy = vec![0.0; world_count];
         let mut unstable = vec![0_u32; world_count];
+        let download_started = Instant::now();
         workspace.download(api, "out_score", &mut score)?;
         workspace.download(api, "out_distance", &mut distance)?;
         workspace.download(api, "out_speed", &mut speed)?;
@@ -1463,8 +1532,11 @@ mod platform {
         workspace.download(api, "out_stability", &mut stability)?;
         workspace.download(api, "out_energy", &mut energy)?;
         workspace.download(api, "out_unstable", &mut unstable)?;
+        telemetry.d_to_h_seconds = download_started.elapsed().as_secs_f64();
 
-        Ok((0..world_count)
+        let decode_started = Instant::now();
+        telemetry.unstable_simulations = unstable.iter().filter(|value| **value != 0).count();
+        let decoded = (0..world_count)
             .map(|index| {
                 if unstable[index] != 0 {
                     FitnessResult {
@@ -1484,7 +1556,20 @@ mod platform {
                     }
                 }
             })
-            .collect())
+            .collect();
+        telemetry.result_decode_seconds = decode_started.elapsed().as_secs_f64();
+        telemetry.h_to_d_bytes = workspace.h_to_d_bytes.saturating_sub(h_to_d_before);
+        telemetry.d_to_h_bytes = workspace.d_to_h_bytes.saturating_sub(d_to_h_before);
+        telemetry.allocation_count = workspace.allocation_count.saturating_sub(allocation_before);
+        telemetry.reallocation_count = workspace
+            .reallocation_count
+            .saturating_sub(reallocation_before);
+        telemetry.device_buffer_capacity_bytes = workspace.total_capacity_bytes();
+
+        Ok(ChunkResult {
+            fitness: decoded,
+            telemetry,
+        })
     }
 
     const CUDA_CREATURE_SOURCE: &str = r#"

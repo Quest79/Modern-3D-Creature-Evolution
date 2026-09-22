@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Instant,
+};
 
 use rayon::{ThreadPoolBuilder, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -134,6 +137,67 @@ pub struct EvaluatedCreature {
     pub metrics: FitnessMetrics,
     pub trial_seeds: Vec<u64>,
     pub mutations: Vec<MutationRecord>,
+    #[serde(default)]
+    pub unstable_trials: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct GenerationTiming {
+    pub total_wall_seconds: f64,
+    pub evaluation_pool_generation_seconds: f64,
+    pub evaluation_seconds: f64,
+    pub sorting_seconds: f64,
+    pub result_statistics_seconds: f64,
+    pub timeline_seconds: f64,
+    pub diversity_seconds: f64,
+    pub species_seconds: f64,
+    pub lineage_seconds: f64,
+    pub pareto_seconds: f64,
+    pub map_elites_seconds: f64,
+    pub champion_archive_seconds: f64,
+    pub offspring_generation_seconds: f64,
+    pub checkpoint_build_seconds: f64,
+    pub checkpoint_write_seconds: f64,
+    pub generation_callback_seconds: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PopulationTelemetry {
+    pub candidate_count: usize,
+    pub total_parts: usize,
+    pub total_joints: usize,
+    pub average_segments: f64,
+    pub average_joints: f64,
+    pub min_segments: usize,
+    pub max_segments: usize,
+    pub min_joints: usize,
+    pub max_joints: usize,
+    pub brain_nodes_total: usize,
+    pub brain_nodes_average: f64,
+    pub brain_nodes_min: usize,
+    pub brain_nodes_max: usize,
+    pub unstable_simulation_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct OffspringTelemetry {
+    pub attempted_offspring: usize,
+    pub accepted_offspring: usize,
+    pub discarded_invalid_offspring: usize,
+    pub offspring_retries: usize,
+    pub mutation_attempts: usize,
+    pub crossover_count: usize,
+}
+
+impl OffspringTelemetry {
+    fn accumulate(&mut self, other: &Self) {
+        self.attempted_offspring += other.attempted_offspring;
+        self.accepted_offspring += other.accepted_offspring;
+        self.discarded_invalid_offspring += other.discarded_invalid_offspring;
+        self.offspring_retries += other.offspring_retries;
+        self.mutation_attempts += other.mutation_attempts;
+        self.crossover_count += other.crossover_count;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -154,6 +218,12 @@ pub struct GenerationSummary {
     pub evaluations_completed: usize,
     pub evaluation_pool_size: usize,
     pub execution: ExecutionPerformance,
+    #[serde(default)]
+    pub timing: GenerationTiming,
+    #[serde(default)]
+    pub population_telemetry: PopulationTelemetry,
+    #[serde(default)]
+    pub offspring: OffspringTelemetry,
     pub effective_settings: EffectiveEvolutionSettings,
     pub active_timeline_events: Vec<String>,
     pub triggered_timeline_events: Vec<String>,
@@ -306,6 +376,10 @@ where
     }
 
     for generation in start_generation..=config.generations {
+        let generation_started = Instant::now();
+        let mut timing = GenerationTiming::default();
+        let mut offspring_telemetry = OffspringTelemetry::default();
+
         let mut settings = EffectiveEvolutionSettings::from(config);
         config
             .timeline
@@ -320,7 +394,8 @@ where
             ));
         }
 
-        let evaluation_pool = expand_evaluation_pool(
+        let pool_generation_started = Instant::now();
+        let (evaluation_pool, expansion_telemetry) = expand_evaluation_pool(
             &pool,
             &population,
             evaluation_pool_target,
@@ -329,12 +404,21 @@ where
             &mut rng,
             &mut next_individual_id,
         )?;
+        timing.evaluation_pool_generation_seconds = pool_generation_started.elapsed().as_secs_f64();
+        offspring_telemetry.accumulate(&expansion_telemetry);
+
+        let evaluation_started = Instant::now();
         let (mut evaluated, execution) =
             evaluate_population(&pool, &evaluation_pool, &settings, &config.accelerator)?;
+        timing.evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
         evaluations_completed += evaluated.len() * settings.trials_per_creature;
+        let population_telemetry = summarize_population_telemetry(&evaluated);
 
+        let sorting_started = Instant::now();
         evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        timing.sorting_seconds = sorting_started.elapsed().as_secs_f64();
 
+        let statistics_started = Instant::now();
         let best = evaluated
             .first()
             .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
@@ -344,7 +428,9 @@ where
         let average =
             evaluated.iter().map(|item| item.fitness).sum::<f32>() / evaluated.len() as f32;
         let median_fitness = median(evaluated.iter().map(|item| item.fitness).collect());
+        timing.result_statistics_seconds = statistics_started.elapsed().as_secs_f64();
 
+        let timeline_started = Instant::now();
         let context = ConditionContext {
             best_fitness: best.fitness,
             average_fitness: average,
@@ -356,18 +442,33 @@ where
         for id in &triggered {
             active_condition_ids.insert(id.clone());
         }
-
         let mut active_timeline_events: Vec<String> =
             active_condition_ids.iter().cloned().collect();
         active_timeline_events.sort();
+        timing.timeline_seconds = timeline_started.elapsed().as_secs_f64();
 
+        let diversity_started = Instant::now();
         let diversity = summarize_diversity(&evaluated);
+        timing.diversity_seconds = diversity_started.elapsed().as_secs_f64();
+
+        let species_started = Instant::now();
         let species = summarize_species(&evaluated);
+        timing.species_seconds = species_started.elapsed().as_secs_f64();
+
+        let lineage_started = Instant::now();
         let lineage_count = settings.population_size.min(evaluated.len());
         let lineage = build_lineage_records(generation, &evaluated[..lineage_count]);
-        let pareto_front = build_pareto_front(generation, &evaluated);
-        let map_elites = build_map_elites(generation, &evaluated);
+        timing.lineage_seconds = lineage_started.elapsed().as_secs_f64();
 
+        let pareto_started = Instant::now();
+        let pareto_front = build_pareto_front(generation, &evaluated);
+        timing.pareto_seconds = pareto_started.elapsed().as_secs_f64();
+
+        let map_elites_started = Instant::now();
+        let map_elites = build_map_elites(generation, &evaluated);
+        timing.map_elites_seconds = map_elites_started.elapsed().as_secs_f64();
+
+        let champion_archive_started = Instant::now();
         champion_archive.push(ChampionArchiveEntry {
             generation,
             individual_id: best.individual_id,
@@ -379,6 +480,7 @@ where
             mutations: best.mutations.clone(),
             genome: best.genome.clone(),
         });
+        timing.champion_archive_seconds = champion_archive_started.elapsed().as_secs_f64();
 
         let summary = GenerationSummary {
             generation,
@@ -397,6 +499,9 @@ where
             evaluations_completed,
             evaluation_pool_size: evaluated.len(),
             execution,
+            timing: timing.clone(),
+            population_telemetry,
+            offspring: offspring_telemetry.clone(),
             effective_settings: settings.clone(),
             active_timeline_events,
             triggered_timeline_events: triggered,
@@ -414,11 +519,6 @@ where
         final_champion = Some(best.clone());
         final_settings = settings;
         history.push(summary);
-        on_generation(
-            history
-                .last()
-                .expect("generation summary was just appended"),
-        )?;
 
         if generation < config.generations {
             let mut next_settings = EffectiveEvolutionSettings::from(config);
@@ -426,7 +526,8 @@ where
                 .timeline
                 .apply_to(generation + 1, &active_condition_ids, &mut next_settings);
             validate_effective_settings(&next_settings)?;
-            population = breed_next_generation(
+            let offspring_started = Instant::now();
+            let (next_population, breeding_telemetry) = breed_next_generation(
                 &pool,
                 &evaluated,
                 config,
@@ -434,10 +535,19 @@ where
                 &mut rng,
                 &mut next_individual_id,
             )?;
+            timing.offspring_generation_seconds = offspring_started.elapsed().as_secs_f64();
+            offspring_telemetry.accumulate(&breeding_telemetry);
+            population = next_population;
         } else {
             population.clear();
         }
 
+        if let Some(last) = history.last_mut() {
+            last.timing = timing.clone();
+            last.offspring = offspring_telemetry.clone();
+        }
+
+        let checkpoint_build_started = Instant::now();
         let mut active_ids: Vec<String> = active_condition_ids.iter().cloned().collect();
         active_ids.sort();
         let checkpoint = EvolutionCheckpoint {
@@ -459,7 +569,29 @@ where
             history: history.clone(),
         };
         checkpoint.validate()?;
+        timing.checkpoint_build_seconds = checkpoint_build_started.elapsed().as_secs_f64();
+
+        let checkpoint_write_started = Instant::now();
         on_checkpoint(&checkpoint)?;
+        timing.checkpoint_write_seconds = checkpoint_write_started.elapsed().as_secs_f64();
+        timing.total_wall_seconds = generation_started.elapsed().as_secs_f64();
+
+        if let Some(last) = history.last_mut() {
+            last.timing = timing.clone();
+            last.offspring = offspring_telemetry.clone();
+        }
+
+        let callback_started = Instant::now();
+        on_generation(
+            history
+                .last()
+                .expect("generation summary was just appended"),
+        )?;
+        timing.generation_callback_seconds = callback_started.elapsed().as_secs_f64();
+        timing.total_wall_seconds = generation_started.elapsed().as_secs_f64();
+        if let Some(last) = history.last_mut() {
+            last.timing = timing;
+        }
     }
 
     finish_evolution(
@@ -601,24 +733,35 @@ struct MutationPlan {
     seeds: [u64; 5],
 }
 
+struct MutationAttemptOutcome {
+    result: Option<MutationResult>,
+    attempts: usize,
+}
+
 fn execute_mutation_plans(
     pool: &rayon::ThreadPool,
     plans: &[MutationPlan],
     mutations_per_child: usize,
     mutation: &MutationConfig,
-) -> Vec<Option<MutationResult>> {
+) -> Vec<MutationAttemptOutcome> {
     pool.install(|| {
         plans
             .par_iter()
             .map(|plan| {
-                for seed in plan.seeds {
+                for (attempt_index, seed) in plan.seeds.into_iter().enumerate() {
                     if let Ok(result) =
                         mutate_genome(&plan.base, seed, mutations_per_child, mutation)
                     {
-                        return Some(result);
+                        return MutationAttemptOutcome {
+                            result: Some(result),
+                            attempts: attempt_index + 1,
+                        };
                     }
                 }
-                None
+                MutationAttemptOutcome {
+                    result: None,
+                    attempts: plan.seeds.len(),
+                }
             })
             .collect()
     })
@@ -632,7 +775,7 @@ fn expand_evaluation_pool(
     settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
     next_individual_id: &mut u64,
-) -> Result<Vec<Candidate>, String> {
+) -> Result<(Vec<Candidate>, OffspringTelemetry), String> {
     if population.is_empty() {
         return Err("cannot expand an empty evolution population".into());
     }
@@ -640,19 +783,19 @@ fn expand_evaluation_pool(
     let target_size = target_size.max(population.len());
     let mut expanded = Vec::with_capacity(target_size);
     expanded.extend(population.iter().cloned());
+    let mut telemetry = OffspringTelemetry::default();
 
     while expanded.len() < target_size {
         let needed = target_size - expanded.len();
         let mut plans = Vec::with_capacity(needed);
 
-        // Selection/crossover planning remains serial so a fixed seed produces
-        // the exact same parent choices and seed stream. The expensive mutation
-        // and validation work is executed in parallel below.
         for _ in 0..needed {
             let parent = &population[rng.range_usize(population.len())];
             let mut parent_ids = vec![parent.individual_id];
+            let use_crossover = population.len() > 1 && rng.chance(config.crossover_chance);
 
-            let base = if population.len() > 1 && rng.chance(config.crossover_chance) {
+            let base = if use_crossover {
+                telemetry.crossover_count += 1;
                 let donor = &population[rng.range_usize(population.len())];
                 if donor.individual_id != parent.individual_id {
                     parent_ids.push(donor.individual_id);
@@ -675,6 +818,7 @@ fn expand_evaluation_pool(
             });
         }
 
+        telemetry.attempted_offspring += plans.len();
         let results = execute_mutation_plans(
             pool,
             &plans,
@@ -682,12 +826,14 @@ fn expand_evaluation_pool(
             &settings.mutation,
         );
 
-        let mut accepted_any = false;
-        for (plan, result) in plans.into_iter().zip(results) {
-            let Some(mutation_result) = result else {
+        for (plan, outcome) in plans.into_iter().zip(results) {
+            telemetry.mutation_attempts += outcome.attempts;
+            telemetry.offspring_retries += outcome.attempts.saturating_sub(1);
+            let Some(mutation_result) = outcome.result else {
+                telemetry.discarded_invalid_offspring += 1;
                 continue;
             };
-            accepted_any = true;
+            telemetry.accepted_offspring += 1;
 
             let individual_id = *next_individual_id;
             *next_individual_id += 1;
@@ -702,17 +848,11 @@ fn expand_evaluation_pool(
                 break;
             }
         }
-
-        if !accepted_any {
-            return Err(
-                "could not generate any valid CUDA evaluation offspring after five retries each"
-                    .into(),
-            );
-        }
     }
 
-    Ok(expanded)
+    Ok((expanded, telemetry))
 }
+
 fn evaluate_population(
     pool: &rayon::ThreadPool,
     population: &[Candidate],
@@ -722,12 +862,14 @@ fn evaluate_population(
     let requested_mode = accelerator.mode;
 
     if requested_mode != AcceleratorMode::Cpu {
+        let preparation_started = Instant::now();
         let mut gpu_genomes = Vec::with_capacity(population.len() * settings.trials_per_creature);
         for candidate in population {
             for _ in 0..settings.trials_per_creature {
                 gpu_genomes.push(candidate.genome.clone());
             }
         }
+        let host_preparation_seconds = preparation_started.elapsed().as_secs_f64();
 
         match run_cuda_creature_batch(
             &gpu_genomes,
@@ -736,12 +878,17 @@ fn evaluate_population(
             accelerator,
         ) {
             Ok(batch) => {
+                let result_processing_started = Instant::now();
                 let mut evaluated = Vec::with_capacity(population.len());
                 for (candidate_index, candidate) in population.iter().enumerate() {
                     let start = candidate_index * settings.trials_per_creature;
                     let end = start + settings.trials_per_creature;
-                    let result =
-                        aggregate_trials(&batch.fitness[start..end], settings.trial_aggregation);
+                    let trial_results = &batch.fitness[start..end];
+                    let result = aggregate_trials(trial_results, settings.trial_aggregation);
+                    let unstable_trials = trial_results
+                        .iter()
+                        .filter(|trial| trial.score <= -1.0e29)
+                        .count();
 
                     let mut trial_seeds = Vec::with_capacity(settings.trials_per_creature);
                     for trial_index in 0..settings.trials_per_creature {
@@ -762,24 +909,31 @@ fn evaluate_population(
                         metrics: result.metrics,
                         trial_seeds,
                         mutations: candidate.mutations.clone(),
+                        unstable_trials,
                     });
                 }
-                return Ok((evaluated, batch.execution));
+                let result_processing_seconds = result_processing_started.elapsed().as_secs_f64();
+                let mut execution = batch.execution;
+                execution.host_preparation_seconds += host_preparation_seconds;
+                execution.result_processing_seconds += result_processing_seconds;
+                return Ok((evaluated, execution));
             }
             Err(error) if !accelerator.cpu_fallback => return Err(error),
             Err(_) => {}
         }
     }
 
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let results: Vec<Result<EvaluatedCreature, String>> = pool.install(|| {
         population
             .par_iter()
             .map(|candidate| evaluate_creature(candidate, settings))
             .collect()
     });
+    let worker_seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
+    let result_processing_started = Instant::now();
     let evaluated: Vec<EvaluatedCreature> = results.into_iter().collect::<Result<_, _>>()?;
-    let wall_seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
+    let result_processing_seconds = result_processing_started.elapsed().as_secs_f64();
     let item_count = evaluated.len() * settings.trials_per_creature;
     let physics_steps = item_count as u64 * settings.simulation.step_count() as u64;
     let fallback_items = if requested_mode == AcceleratorMode::Cpu {
@@ -794,10 +948,13 @@ fn evaluate_population(
         cpu_items: item_count,
         gpu_items: 0,
         fallback_items,
-        wall_seconds,
-        items_per_second: item_count as f64 / wall_seconds,
-        physics_steps_per_second: physics_steps as f64 / wall_seconds,
+        wall_seconds: worker_seconds,
+        items_per_second: item_count as f64 / worker_seconds,
+        physics_steps_per_second: physics_steps as f64 / worker_seconds,
         devices: Vec::new(),
+        host_preparation_seconds: 0.0,
+        result_processing_seconds,
+        cuda: Default::default(),
     };
 
     Ok((evaluated, performance))
@@ -810,6 +967,7 @@ fn evaluate_creature(
     let genome = &candidate.genome;
     let mut trials = Vec::with_capacity(settings.trials_per_creature);
     let mut trial_seeds = Vec::with_capacity(settings.trials_per_creature);
+    let mut unstable_trials = 0usize;
 
     for trial_index in 0..settings.trials_per_creature {
         let mut simulation = settings.simulation.clone();
@@ -820,6 +978,7 @@ fn evaluate_creature(
         match evaluate_fitness(genome, &simulation, &settings.fitness) {
             Ok(result) => trials.push(result),
             Err(error) if error.starts_with("unstable physics:") => {
+                unstable_trials += 1;
                 trials.push(FitnessResult {
                     score: -1.0e30,
                     metrics: FitnessMetrics::default(),
@@ -840,6 +999,7 @@ fn evaluate_creature(
         metrics: result.metrics,
         trial_seeds,
         mutations: candidate.mutations.clone(),
+        unstable_trials,
     })
 }
 
@@ -962,8 +1122,9 @@ fn breed_next_generation(
     next_settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
     next_individual_id: &mut u64,
-) -> Result<Vec<Candidate>, String> {
+) -> Result<(Vec<Candidate>, OffspringTelemetry), String> {
     let mut next = Vec::with_capacity(next_settings.population_size);
+    let mut telemetry = OffspringTelemetry::default();
     let elite_count = config
         .elite_count
         .min(next_settings.population_size.saturating_sub(1))
@@ -989,8 +1150,10 @@ fn breed_next_generation(
             let parent_index = tournament_select(evaluated, tournament_size, rng);
             let parent = &evaluated[parent_index];
             let mut parent_ids = vec![parent.individual_id];
+            let use_crossover = rng.chance(config.crossover_chance);
 
-            let base = if rng.chance(config.crossover_chance) {
+            let base = if use_crossover {
+                telemetry.crossover_count += 1;
                 let donor_index = tournament_select(evaluated, tournament_size, rng);
                 let donor = &evaluated[donor_index];
                 if donor.individual_id != parent.individual_id {
@@ -1014,6 +1177,7 @@ fn breed_next_generation(
             });
         }
 
+        telemetry.attempted_offspring += plans.len();
         let results = execute_mutation_plans(
             pool,
             &plans,
@@ -1021,12 +1185,14 @@ fn breed_next_generation(
             &next_settings.mutation,
         );
 
-        let mut accepted_any = false;
-        for (plan, result) in plans.into_iter().zip(results) {
-            let Some(mutation_result) = result else {
+        for (plan, outcome) in plans.into_iter().zip(results) {
+            telemetry.mutation_attempts += outcome.attempts;
+            telemetry.offspring_retries += outcome.attempts.saturating_sub(1);
+            let Some(mutation_result) = outcome.result else {
+                telemetry.discarded_invalid_offspring += 1;
                 continue;
             };
-            accepted_any = true;
+            telemetry.accepted_offspring += 1;
 
             let individual_id = *next_individual_id;
             *next_individual_id += 1;
@@ -1041,14 +1207,11 @@ fn breed_next_generation(
                 break;
             }
         }
-
-        if !accepted_any {
-            return Err("could not generate any valid offspring after five retries each".into());
-        }
     }
 
-    Ok(next)
+    Ok((next, telemetry))
 }
+
 fn analysis_species_id(genome: &CreatureGenome) -> u64 {
     let segment_count = genome.segments.len() as u64;
     let brain_bucket = (genome.brain.node_count() / 8) as u64;
@@ -1069,6 +1232,77 @@ fn morphology_signature(genome: &CreatureGenome) -> String {
         genome.joints.len(),
         parts.join(",")
     )
+}
+
+fn summarize_population_telemetry(evaluated: &[EvaluatedCreature]) -> PopulationTelemetry {
+    if evaluated.is_empty() {
+        return PopulationTelemetry::default();
+    }
+
+    let candidate_count = evaluated.len();
+    let total_parts = evaluated
+        .iter()
+        .map(|item| item.genome.segments.len())
+        .sum::<usize>();
+    let total_joints = evaluated
+        .iter()
+        .map(|item| item.genome.joints.len())
+        .sum::<usize>();
+    let min_segments = evaluated
+        .iter()
+        .map(|item| item.genome.segments.len())
+        .min()
+        .unwrap_or(0);
+    let max_segments = evaluated
+        .iter()
+        .map(|item| item.genome.segments.len())
+        .max()
+        .unwrap_or(0);
+    let min_joints = evaluated
+        .iter()
+        .map(|item| item.genome.joints.len())
+        .min()
+        .unwrap_or(0);
+    let max_joints = evaluated
+        .iter()
+        .map(|item| item.genome.joints.len())
+        .max()
+        .unwrap_or(0);
+    let brain_nodes_total = evaluated
+        .iter()
+        .map(|item| item.genome.brain.node_count())
+        .sum::<usize>();
+    let brain_nodes_min = evaluated
+        .iter()
+        .map(|item| item.genome.brain.node_count())
+        .min()
+        .unwrap_or(0);
+    let brain_nodes_max = evaluated
+        .iter()
+        .map(|item| item.genome.brain.node_count())
+        .max()
+        .unwrap_or(0);
+    let unstable_simulation_count = evaluated
+        .iter()
+        .map(|item| item.unstable_trials)
+        .sum::<usize>();
+
+    PopulationTelemetry {
+        candidate_count,
+        total_parts,
+        total_joints,
+        average_segments: total_parts as f64 / candidate_count as f64,
+        average_joints: total_joints as f64 / candidate_count as f64,
+        min_segments,
+        max_segments,
+        min_joints,
+        max_joints,
+        brain_nodes_total,
+        brain_nodes_average: brain_nodes_total as f64 / candidate_count as f64,
+        brain_nodes_min,
+        brain_nodes_max,
+        unstable_simulation_count,
+    }
 }
 
 fn summarize_diversity(evaluated: &[EvaluatedCreature]) -> DiversitySummary {
@@ -1271,13 +1505,18 @@ mod tests {
 
     fn clear_runtime_timing(history: &mut [GenerationSummary]) {
         for summary in history {
+            summary.timing = Default::default();
             summary.execution.wall_seconds = 0.0;
             summary.execution.items_per_second = 0.0;
             summary.execution.physics_steps_per_second = 0.0;
+            summary.execution.host_preparation_seconds = 0.0;
+            summary.execution.result_processing_seconds = 0.0;
+            summary.execution.cuda = Default::default();
             for device in &mut summary.execution.devices {
                 device.wall_seconds = 0.0;
                 device.items_per_second = 0.0;
                 device.physics_steps_per_second = 0.0;
+                device.cuda = Default::default();
             }
         }
     }

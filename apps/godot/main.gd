@@ -231,6 +231,9 @@ var _benchmark_last_generation_ms := -1
 var _benchmark_phase_eval_seconds := 0.0
 var _benchmark_phase_items := 0
 var _benchmark_phase_physics_steps := 0.0
+var _benchmark_phase_timing_totals: Dictionary = {}
+var _benchmark_phase_execution_totals: Dictionary = {}
+var _benchmark_phase_cuda_totals: Dictionary = {}
 var _benchmark_cuda_summary: Dictionary = {}
 var _benchmark_cpu_summary: Dictionary = {}
 
@@ -4300,7 +4303,7 @@ func _begin_full_evolution_benchmark() -> void:
 
     var stamp := _benchmark_timestamp()
     _benchmark_base_path = _portable_benchmarks_dir().path_join("benchmark_" + stamp)
-    _benchmark_log_path = _benchmark_base_path + ".log"
+    _benchmark_log_path = _benchmark_base_path + ".txt"
     var log_file := FileAccess.open(_benchmark_log_path, FileAccess.WRITE)
     if log_file == null:
         _benchmark_active = false
@@ -4330,6 +4333,14 @@ func _begin_full_evolution_benchmark() -> void:
     var git_status := _benchmark_capture_command(
         "git",
         PackedStringArray(["-C", _repo_root_path(), "status", "--porcelain"])
+    )
+    var rust_version := _benchmark_capture_command(
+        "rustc",
+        PackedStringArray(["--version"])
+    )
+    var cuda_toolkit_version := _benchmark_capture_command(
+        "nvcc",
+        PackedStringArray(["--version"])
     )
     var gpu_info := _benchmark_capture_command(
         "nvidia-smi",
@@ -4364,10 +4375,13 @@ func _begin_full_evolution_benchmark() -> void:
         + "Git working tree: %s\n"
             % ("clean" if git_status.is_empty() else "\n" + git_status)
         + "Godot: %s\n" % JSON.stringify(Engine.get_version_info())
+        + "Rust: %s\n" % rust_version
+        + "CUDA Toolkit / nvcc: %s\n" % cuda_toolkit_version
         + "OS: %s %s\n" % [OS.get_name(), OS.get_version()]
         + "Processor count reported by Godot: %d\n" % OS.get_processor_count()
         + "System: %s\n" % system_info
         + "NVIDIA GPU(s):\n%s\n" % gpu_info
+        + "Backend CUDA device details: %s\n" % JSON.stringify(_cuda_devices)
         + "Requested evaluation pool: %d\n" % _benchmark_requested_eval_pool
         + "GPU batch setting: %d\n" % int(_gpu_batch_spin.value)
         + "GPU max parts/joints: %d / %d\n"
@@ -4375,6 +4389,12 @@ func _begin_full_evolution_benchmark() -> void:
         + "Throughput policy: %s\n" % _throughput_mode
         + "CUDA GPU IDs: %s\n" % _gpu_ids_for_cli()
         + "CPU workers: %d\n" % int(_workers_spin.value)
+        + "GUI CPU fallback setting: %s\n" % _yes_no(_cpu_fallback)
+        + "Benchmark CPU fallback: disabled (CUDA must not silently fall back)\n"
+        + "Simulation seconds: %.9f\n" % float(_seconds_spin.value)
+        + "Physics dt: %.9f\n" % float(_dt_spin.value)
+        + "Physics steps / simulation: %d\n"
+            % int(ceil(float(_seconds_spin.value) / float(_dt_spin.value)))
         + "\n--- COMPLETE BENCHMARK CONFIGURATION ---\n"
         + JSON.stringify(experiment, "\t")
         + "\n--- END CONFIGURATION ---\n\n"
@@ -4455,6 +4475,9 @@ func _benchmark_start_phase(phase: String) -> void:
     _benchmark_phase_eval_seconds = 0.0
     _benchmark_phase_items = 0
     _benchmark_phase_physics_steps = 0.0
+    _benchmark_phase_timing_totals.clear()
+    _benchmark_phase_execution_totals.clear()
+    _benchmark_phase_cuda_totals.clear()
 
     var evaluation_pool := _benchmark_requested_eval_pool
     if phase == "cpu" and _benchmark_cuda_eval_pool > 0:
@@ -4477,8 +4500,8 @@ func _benchmark_start_phase(phase: String) -> void:
 
     _benchmark_start_gpu_telemetry()
     _set_status(
-        "Benchmark %s • full evolution • waiting for generation 1"
-        % phase.to_upper()
+        "Benchmark %s/2 • %s evolution • waiting for generation 1"
+        % [("1" if phase == "cuda" else "2"), phase.to_upper()]
     )
 
 
@@ -4520,6 +4543,10 @@ func _benchmark_stop_gpu_telemetry(append_to_log: bool = true) -> Dictionary:
         "power_avg_w": 0.0,
         "power_max_w": 0.0,
         "sm_clock_avg_mhz": 0.0,
+        "memory_clock_avg_mhz": 0.0,
+        "memory_clock_max_mhz": 0.0,
+        "vram_used_avg_mib": 0.0,
+        "vram_used_max_mib": 0.0,
         "temperature_max_c": 0.0,
     }
 
@@ -4540,6 +4567,8 @@ func _benchmark_stop_gpu_telemetry(append_to_log: bool = true) -> Dictionary:
     var memory_util_sum := 0.0
     var power_sum := 0.0
     var clock_sum := 0.0
+    var memory_clock_sum := 0.0
+    var vram_used_sum := 0.0
     var sample_count := 0
 
     for line in raw.split("\n", false):
@@ -4548,25 +4577,38 @@ func _benchmark_stop_gpu_telemetry(append_to_log: bool = true) -> Dictionary:
             continue
         var gpu_util_text := str(fields[4]).strip_edges()
         var mem_util_text := str(fields[5]).strip_edges()
+        var vram_used_text := str(fields[6]).strip_edges()
         var power_text := str(fields[8]).strip_edges()
         var clock_text := str(fields[10]).strip_edges()
+        var memory_clock_text := str(fields[11]).strip_edges()
         var temp_text := str(fields[12]).strip_edges()
         if not gpu_util_text.is_valid_float():
             continue
 
         var gpu_util := float(gpu_util_text)
         var memory_util := float(mem_util_text) if mem_util_text.is_valid_float() else 0.0
+        var vram_used := float(vram_used_text) if vram_used_text.is_valid_float() else 0.0
         var power := float(power_text) if power_text.is_valid_float() else 0.0
         var clock := float(clock_text) if clock_text.is_valid_float() else 0.0
+        var memory_clock := (
+            float(memory_clock_text) if memory_clock_text.is_valid_float() else 0.0
+        )
         var temperature := float(temp_text) if temp_text.is_valid_float() else 0.0
 
         sample_count += 1
         util_sum += gpu_util
         memory_util_sum += memory_util
+        vram_used_sum += vram_used
         power_sum += power
         clock_sum += clock
+        memory_clock_sum += memory_clock
         stats["gpu_util_max"] = maxf(float(stats["gpu_util_max"]), gpu_util)
         stats["power_max_w"] = maxf(float(stats["power_max_w"]), power)
+        stats["vram_used_max_mib"] = maxf(float(stats["vram_used_max_mib"]), vram_used)
+        stats["memory_clock_max_mhz"] = maxf(
+            float(stats["memory_clock_max_mhz"]),
+            memory_clock
+        )
         stats["temperature_max_c"] = maxf(
             float(stats["temperature_max_c"]),
             temperature
@@ -4578,6 +4620,8 @@ func _benchmark_stop_gpu_telemetry(append_to_log: bool = true) -> Dictionary:
         stats["memory_util_avg"] = memory_util_sum / sample_count
         stats["power_avg_w"] = power_sum / sample_count
         stats["sm_clock_avg_mhz"] = clock_sum / sample_count
+        stats["memory_clock_avg_mhz"] = memory_clock_sum / sample_count
+        stats["vram_used_avg_mib"] = vram_used_sum / sample_count
 
     if append_to_log:
         _benchmark_log(
@@ -4592,6 +4636,76 @@ func _benchmark_stop_gpu_telemetry(append_to_log: bool = true) -> Dictionary:
         )
 
     return stats
+
+
+func _benchmark_accumulate_numeric_totals(
+    target: Dictionary,
+    source_value,
+    max_keys: Array = []
+) -> void:
+    if typeof(source_value) != TYPE_DICTIONARY:
+        return
+    var source: Dictionary = source_value
+    for key_value in source.keys():
+        var key := str(key_value)
+        var value = source[key_value]
+        if typeof(value) not in [TYPE_INT, TYPE_FLOAT]:
+            continue
+        if key in max_keys:
+            target[key] = maxf(float(target.get(key, 0.0)), float(value))
+        else:
+            target[key] = float(target.get(key, 0.0)) + float(value)
+
+
+func _benchmark_ranked_bottlenecks(summary: Dictionary) -> Array:
+    var timing: Dictionary = summary.get("timing_totals", {})
+    var execution: Dictionary = summary.get("execution_totals", {})
+    var cuda: Dictionary = summary.get("cuda_totals", {})
+    var rows: Array = [
+        {"name": "CUDA kernel window", "seconds": float(cuda.get("kernel_execution_seconds", 0.0))},
+        {"name": "Evaluation-pool offspring generation", "seconds": float(timing.get("evaluation_pool_generation_seconds", 0.0))},
+        {"name": "Next-generation breeding/mutation", "seconds": float(timing.get("offspring_generation_seconds", 0.0))},
+        {"name": "Host genome packing", "seconds": float(cuda.get("host_packing_seconds", 0.0))},
+        {"name": "Host evaluation preparation", "seconds": float(execution.get("host_preparation_seconds", 0.0))},
+        {"name": "H->D upload", "seconds": float(cuda.get("h_to_d_seconds", 0.0))},
+        {"name": "D->H download", "seconds": float(cuda.get("d_to_h_seconds", 0.0))},
+        {"name": "Evaluation result processing", "seconds": float(execution.get("result_processing_seconds", 0.0)) + float(cuda.get("result_decode_seconds", 0.0))},
+        {"name": "Sorting", "seconds": float(timing.get("sorting_seconds", 0.0))},
+        {"name": "Diversity analysis", "seconds": float(timing.get("diversity_seconds", 0.0))},
+        {"name": "Species analysis", "seconds": float(timing.get("species_seconds", 0.0))},
+        {"name": "Lineage", "seconds": float(timing.get("lineage_seconds", 0.0))},
+        {"name": "Pareto", "seconds": float(timing.get("pareto_seconds", 0.0))},
+        {"name": "MAP-Elites", "seconds": float(timing.get("map_elites_seconds", 0.0))},
+        {"name": "Checkpoint build/write", "seconds": float(timing.get("checkpoint_build_seconds", 0.0)) + float(timing.get("checkpoint_write_seconds", 0.0))},
+    ]
+    for left in range(rows.size()):
+        for right in range(left + 1, rows.size()):
+            if (
+                float(rows[right].get("seconds", 0.0))
+                > float(rows[left].get("seconds", 0.0))
+            ):
+                var swap_value = rows[left]
+                rows[left] = rows[right]
+                rows[right] = swap_value
+    return rows
+
+
+func _benchmark_bottleneck_text(summary: Dictionary) -> String:
+    var rows := _benchmark_ranked_bottlenecks(summary)
+    var total := float(summary.get("full_wall_seconds", 0.0))
+    var labels := ["Primary bottleneck", "Secondary", "Third"]
+    var text := ""
+    for index in range(mini(3, rows.size())):
+        var row: Dictionary = rows[index]
+        var seconds := float(row.get("seconds", 0.0))
+        var percent := seconds / total * 100.0 if total > 0.0 else 0.0
+        text += "%s: %s — %.6f s (%.2f%% of CUDA run)\n" % [
+            labels[index],
+            str(row.get("name", "unknown")),
+            seconds,
+            percent,
+        ]
+    return text
 
 
 func _benchmark_append_results_file() -> void:
@@ -4656,7 +4770,59 @@ func _benchmark_handle_event(event: Dictionary) -> void:
             if typeof(execution_value) == TYPE_DICTIONARY:
                 execution = execution_value
 
-            var eval_seconds := float(execution.get("wall_seconds", 0.0))
+            var timing_value = event.get("timing", {})
+            var timing: Dictionary = {}
+            if typeof(timing_value) == TYPE_DICTIONARY:
+                timing = timing_value
+
+            var population_value = event.get("population_telemetry", {})
+            var population_telemetry: Dictionary = {}
+            if typeof(population_value) == TYPE_DICTIONARY:
+                population_telemetry = population_value
+
+            var offspring_value = event.get("offspring", {})
+            var offspring: Dictionary = {}
+            if typeof(offspring_value) == TYPE_DICTIONARY:
+                offspring = offspring_value
+
+            var cuda_value = execution.get("cuda", {})
+            var cuda: Dictionary = {}
+            if typeof(cuda_value) == TYPE_DICTIONARY:
+                cuda = cuda_value
+
+            _benchmark_accumulate_numeric_totals(
+                _benchmark_phase_timing_totals,
+                timing
+            )
+            _benchmark_accumulate_numeric_totals(
+                _benchmark_phase_execution_totals,
+                execution
+            )
+            _benchmark_accumulate_numeric_totals(
+                _benchmark_phase_cuda_totals,
+                cuda,
+                [
+                    "stream_count",
+                    "device_buffer_capacity_bytes",
+                    "block_size",
+                    "creature_group_size",
+                    "creatures_per_block",
+                ]
+            )
+
+            var eval_seconds := float(
+                timing.get(
+                    "evaluation_seconds",
+                    execution.get("wall_seconds", 0.0)
+                )
+            )
+            var backend_wall_seconds := float(execution.get("wall_seconds", 0.0))
+            var generation_seconds := float(
+                timing.get("total_wall_seconds", interval_seconds)
+            )
+            if generation_seconds <= 0.0:
+                generation_seconds = interval_seconds
+
             var gpu_items := int(execution.get("gpu_items", 0))
             var cpu_items := int(execution.get("cpu_items", 0))
             var items := gpu_items + cpu_items
@@ -4666,7 +4832,7 @@ func _benchmark_handle_event(event: Dictionary) -> void:
             _benchmark_phase_items += items
             _benchmark_phase_physics_steps += (
                 float(execution.get("physics_steps_per_second", 0.0))
-                * eval_seconds
+                * backend_wall_seconds
             )
 
             var phase_fraction := float(generation) / float(generations)
@@ -4675,50 +4841,66 @@ func _benchmark_handle_event(event: Dictionary) -> void:
                 if _benchmark_phase == "cuda"
                 else 50.0 + phase_fraction * 50.0
             )
-            var overhead_seconds := maxf(0.0, interval_seconds - eval_seconds)
+            var overhead_seconds := maxf(0.0, generation_seconds - eval_seconds)
+            var phase_number := "1" if _benchmark_phase == "cuda" else "2"
             _set_status(
-                "Benchmark %s • generation %d/%d • eval %d • backend %.3fs • interval %.3fs"
+                "Benchmark %s/2 • %s evolution • Generation %d/%d • %.3f s"
                 % [
+                    phase_number,
                     _benchmark_phase.to_upper(),
                     generation,
                     generations,
-                    evaluation_pool,
-                    eval_seconds,
-                    interval_seconds,
+                    generation_seconds,
                 ]
             )
             _metrics.text = (
                 "[table=2]"
-                + "[cell]Benchmark phase[/cell][cell][b]%s[/b][/cell]"
-                    % _benchmark_phase.to_upper()
+                + "[cell]Benchmark phase[/cell][cell][b]%s/2 • %s[/b][/cell]"
+                    % [phase_number, _benchmark_phase.to_upper()]
                 + "[cell]Generation[/cell][cell]%d / %d[/cell]"
                     % [generation, generations]
                 + "[cell]Candidates[/cell][cell]%d[/cell]" % evaluation_pool
-                + "[cell]Backend eval time[/cell][cell]%.3f s[/cell]" % eval_seconds
-                + "[cell]Generation interval[/cell][cell]%.3f s[/cell]" % interval_seconds
-                + "[cell]Non-eval/CPU gap[/cell][cell]%.3f s[/cell]" % overhead_seconds
+                + "[cell]Generation wall[/cell][cell]%.3f s[/cell]" % generation_seconds
+                + "[cell]Evaluation[/cell][cell]%.3f s[/cell]" % eval_seconds
+                + "[cell]Measured non-evaluation[/cell][cell]%.3f s[/cell]" % overhead_seconds
+                + "[cell]Offspring generation[/cell][cell]%.3f s[/cell]"
+                    % (
+                        float(timing.get("evaluation_pool_generation_seconds", 0.0))
+                        + float(timing.get("offspring_generation_seconds", 0.0))
+                    )
+                + "[cell]Host packing[/cell][cell]%.3f s[/cell]"
+                    % float(cuda.get("host_packing_seconds", 0.0))
+                + "[cell]Kernel window[/cell][cell]%.3f s[/cell]"
+                    % float(cuda.get("kernel_execution_seconds", 0.0))
+                + "[cell]H->D / D->H[/cell][cell]%.3f / %.3f s[/cell]"
+                    % [
+                        float(cuda.get("h_to_d_seconds", 0.0)),
+                        float(cuda.get("d_to_h_seconds", 0.0)),
+                    ]
                 + "[cell]Items / second[/cell][cell]%.1f[/cell]"
                     % float(execution.get("items_per_second", 0.0))
                 + "[cell]Physics steps / second[/cell][cell]%.0f[/cell]"
                     % float(execution.get("physics_steps_per_second", 0.0))
-                + "[cell]GPU items[/cell][cell]%d[/cell]" % gpu_items
-                + "[cell]CPU items[/cell][cell]%d[/cell]" % cpu_items
-                + "[cell]Fallback items[/cell][cell]%d[/cell]"
-                    % int(execution.get("fallback_items", 0))
+                + "[cell]Parts / joints[/cell][cell]%d / %d[/cell]"
+                    % [
+                        int(population_telemetry.get("total_parts", 0)),
+                        int(population_telemetry.get("total_joints", 0)),
+                    ]
+                + "[cell]Invalid offspring discarded[/cell][cell]%d[/cell]"
+                    % int(offspring.get("discarded_invalid_offspring", 0))
+                + "[cell]Offspring retries[/cell][cell]%d[/cell]"
+                    % int(offspring.get("offspring_retries", 0))
                 + "[/table]"
             )
             _benchmark_log(
-                "GENERATION_TIMING phase=%s generation=%d interval_s=%.6f "
-                % [_benchmark_phase, generation, interval_seconds]
-                + "backend_eval_s=%.6f estimated_non_eval_s=%.6f "
-                    % [eval_seconds, overhead_seconds]
-                + "evaluation_pool=%d gpu_items=%d cpu_items=%d "
-                    % [evaluation_pool, gpu_items, cpu_items]
-                + "items_per_s=%.3f physics_steps_per_s=%.3f\n"
-                    % [
-                        float(execution.get("items_per_second", 0.0)),
-                        float(execution.get("physics_steps_per_second", 0.0)),
-                    ]
+                "GENERATION phase=%s generation=%d/%d measured_wall_s=%.6f "
+                % [_benchmark_phase, generation, generations, generation_seconds]
+                + "evaluation_s=%.6f measured_non_eval_s=%.6f evaluation_pool=%d\n"
+                    % [eval_seconds, overhead_seconds, evaluation_pool]
+                + "  TIMING %s\n" % JSON.stringify(timing)
+                + "  POPULATION %s\n" % JSON.stringify(population_telemetry)
+                + "  OFFSPRING %s\n" % JSON.stringify(offspring)
+                + "  EXECUTION %s\n" % JSON.stringify(execution)
             )
 
         "evolution_complete":
@@ -4750,6 +4932,9 @@ func _benchmark_handle_event(event: Dictionary) -> void:
                 "evaluations_completed": int(event.get("evaluations_completed", 0)),
                 "champion_fitness": float(event.get("champion_fitness", 0.0)),
                 "champion_distance": float(event.get("champion_distance", 0.0)),
+                "timing_totals": _benchmark_phase_timing_totals.duplicate(true),
+                "execution_totals": _benchmark_phase_execution_totals.duplicate(true),
+                "cuda_totals": _benchmark_phase_cuda_totals.duplicate(true),
                 "gpu_telemetry": telemetry,
             }
             _benchmark_log(
@@ -4763,7 +4948,8 @@ func _benchmark_handle_event(event: Dictionary) -> void:
                 _job_kind = ""
                 _dead_process_since_ms = -1
                 _set_status(
-                    "Benchmark CUDA complete • starting equal-work CPU evolution..."
+                    "Benchmark 1/2 • CUDA complete • %.2f s • starting CPU"
+                    % full_wall
                 )
                 call_deferred("_benchmark_start_phase", "cpu")
             else:
@@ -4771,6 +4957,7 @@ func _benchmark_handle_event(event: Dictionary) -> void:
                 _job_pid = 0
                 _job_kind = ""
                 _dead_process_since_ms = -1
+                _set_status("Benchmark 2/2 • CPU complete • %.2f s" % full_wall)
                 _benchmark_finish_success()
 
         "evolution_error":
@@ -4794,19 +4981,70 @@ func _benchmark_finish_success() -> void:
         _benchmark_cpu_summary.get("backend_evaluation_seconds", 0.0)
     )
     var eval_speedup := cpu_eval / cuda_eval if cuda_eval > 0.0 else 0.0
+    var cuda_eval_percent := (
+        cuda_eval / cuda_wall * 100.0 if cuda_wall > 0.0 else 0.0
+    )
+    var cpu_side_overhead_percent := (
+        maxf(0.0, cuda_wall - cuda_eval) / cuda_wall * 100.0
+        if cuda_wall > 0.0
+        else 0.0
+    )
+
+    var cuda_totals: Dictionary = _benchmark_cuda_summary.get("cuda_totals", {})
+    var kernel_window := float(cuda_totals.get("kernel_execution_seconds", 0.0))
+    var gpu_idle_wait_estimate := (
+        clampf((cuda_eval - kernel_window) / cuda_eval * 100.0, 0.0, 100.0)
+        if cuda_eval > 0.0
+        else 0.0
+    )
+    var gpu_telemetry: Dictionary = _benchmark_cuda_summary.get("gpu_telemetry", {})
+    var gpu_util_avg := float(gpu_telemetry.get("gpu_util_avg", 0.0))
+    var gpu_util_max := float(gpu_telemetry.get("gpu_util_max", 0.0))
+    var bottleneck_text := _benchmark_bottleneck_text(_benchmark_cuda_summary)
+    var bottlenecks := _benchmark_ranked_bottlenecks(_benchmark_cuda_summary)
+    var primary_bottleneck := (
+        str(bottlenecks[0].get("name", "unavailable"))
+        if not bottlenecks.is_empty()
+        else "unavailable"
+    )
 
     _benchmark_log(
         "\n================================================================================\n"
         + "FINAL CUDA VS CPU COMPARISON\n"
         + "================================================================================\n"
         + "Actual CUDA evaluation pool: %d\n" % _benchmark_cuda_eval_pool
-        + "CUDA full evolution wall: %.6f s\n" % cuda_wall
-        + "CPU full evolution wall: %.6f s\n" % cpu_wall
-        + "Full-run CPU/CUDA speedup: %.4fx\n" % speedup
-        + "CUDA backend evaluation total: %.6f s\n" % cuda_eval
-        + "CPU backend evaluation total: %.6f s\n" % cpu_eval
-        + "Evaluation-only CPU/CUDA speedup: %.4fx\n" % eval_speedup
-        + "CUDA summary: %s\n" % JSON.stringify(_benchmark_cuda_summary)
+        + "CUDA total evolution: %.6f s\n" % cuda_wall
+        + "CPU total evolution: %.6f s\n" % cpu_wall
+        + "Speedup: %.4fx\n" % speedup
+        + "CUDA evaluation total: %.6f s\n" % cuda_eval
+        + "CPU evaluation total: %.6f s\n" % cpu_eval
+        + "CUDA evaluation speedup: %.4fx\n" % eval_speedup
+        + "CUDA evaluation %% of total CUDA runtime: %.2f%%\n" % cuda_eval_percent
+        + "CPU-side overhead %% during CUDA run: %.2f%%\n" % cpu_side_overhead_percent
+        + "GPU idle/wait estimate: %.2f%%\n" % gpu_idle_wait_estimate
+        + "  Estimate formula: CUDA evaluation time outside measured kernel launch-to-sync windows.\n"
+        + "Average GPU utilization: %.2f%%\n" % gpu_util_avg
+        + "Peak GPU utilization: %.2f%%\n" % gpu_util_max
+        + "CUDA H->D bytes: %d\n" % int(cuda_totals.get("h_to_d_bytes", 0))
+        + "CUDA D->H bytes: %d\n" % int(cuda_totals.get("d_to_h_bytes", 0))
+        + "CUDA kernel launches: %d\n" % int(cuda_totals.get("kernel_launch_count", 0))
+        + "CUDA batch/chunk count: %d\n" % int(cuda_totals.get("batch_count", 0))
+        + "CUDA max streams: %d\n" % int(cuda_totals.get("stream_count", 0))
+        + "CUDA allocations / reallocations: %d / %d\n"
+            % [
+                int(cuda_totals.get("allocation_count", 0)),
+                int(cuda_totals.get("reallocation_count", 0)),
+            ]
+        + "CUDA device buffer capacity peak: %d bytes\n"
+            % int(cuda_totals.get("device_buffer_capacity_bytes", 0))
+        + "CUDA packed parts / joints: %d / %d\n"
+            % [
+                int(cuda_totals.get("total_packed_parts", 0)),
+                int(cuda_totals.get("total_packed_joints", 0)),
+            ]
+        + "\nMEASURED BOTTLENECK RANKING\n"
+        + bottleneck_text
+        + "\nCUDA summary: %s\n" % JSON.stringify(_benchmark_cuda_summary)
         + "CPU summary: %s\n" % JSON.stringify(_benchmark_cpu_summary)
         + "Completed: %s\n" % Time.get_datetime_string_from_system()
         + "================================================================================\n"
@@ -4816,31 +5054,28 @@ func _benchmark_finish_success() -> void:
     _benchmark_phase = ""
     _progress_bar.value = 100
     _finish_job_controls()
-    _set_status("Benchmark complete • log: %s" % _benchmark_log_path)
+    _set_status(
+        "Benchmark complete • CUDA %.2f s • CPU %.2f s • %.2fx • %s"
+        % [cuda_wall, cpu_wall, speedup, _benchmark_log_path]
+    )
     _metrics.text = (
         "[table=2]"
         + "[cell]Benchmark[/cell][cell][b]CUDA vs CPU full evolution[/b][/cell]"
         + "[cell]CUDA wall time[/cell][cell]%.3f s[/cell]" % cuda_wall
         + "[cell]CPU wall time[/cell][cell]%.3f s[/cell]" % cpu_wall
         + "[cell]Full-run speedup[/cell][cell][b]%.2fx[/b][/cell]" % speedup
-        + "[cell]CUDA eval time[/cell][cell]%.3f s[/cell]" % cuda_eval
+        + "[cell]CUDA eval time[/cell][cell]%.3f s (%.1f%%)[/cell]"
+            % [cuda_eval, cuda_eval_percent]
         + "[cell]CPU eval time[/cell][cell]%.3f s[/cell]" % cpu_eval
         + "[cell]Eval-only speedup[/cell][cell]%.2fx[/cell]" % eval_speedup
+        + "[cell]CPU-side overhead[/cell][cell]%.1f%%[/cell]"
+            % cpu_side_overhead_percent
+        + "[cell]GPU idle/wait estimate[/cell][cell]%.1f%%[/cell]"
+            % gpu_idle_wait_estimate
         + "[cell]CUDA GPU avg / max[/cell][cell]%.1f%% / %.1f%%[/cell]"
-            % [
-                float(
-                    _benchmark_cuda_summary.get("gpu_telemetry", {}).get(
-                        "gpu_util_avg",
-                        0.0
-                    )
-                ),
-                float(
-                    _benchmark_cuda_summary.get("gpu_telemetry", {}).get(
-                        "gpu_util_max",
-                        0.0
-                    )
-                ),
-            ]
+            % [gpu_util_avg, gpu_util_max]
+        + "[cell]Primary measured bottleneck[/cell][cell]%s[/cell]"
+            % primary_bottleneck
         + "[cell]Log[/cell][cell]%s[/cell]" % _benchmark_log_path
         + "[/table]"
     )

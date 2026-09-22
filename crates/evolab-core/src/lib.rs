@@ -22,8 +22,9 @@ mod timeline;
 mod world;
 
 pub use accelerator::{
-    AcceleratorConfig, AcceleratorMode, CudaDeviceInfo, DevicePerformance, DeviceWorkAssignment,
-    ExecutionPerformance, GpuCompatibility, ThroughputMode, schedule_gpu_work,
+    AcceleratorConfig, AcceleratorMode, CudaDeviceInfo, CudaExecutionTelemetry, DevicePerformance,
+    DeviceWorkAssignment, ExecutionPerformance, GpuCompatibility, ThroughputMode,
+    schedule_gpu_work,
 };
 pub use backend::{
     BackendCapabilities, PhysicsBackend, ProbeSpec, SimulationReport, WorldSnapshot,
@@ -50,8 +51,8 @@ pub use evolution::{
 pub use experiment::{EXPERIMENT_FORMAT_VERSION, ExperimentFile};
 pub use fitness::{FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, evaluate_fitness};
 pub use ga::{
-    EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, evolve_population,
-    evolve_population_checkpointed,
+    EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, GenerationTiming,
+    OffspringTelemetry, PopulationTelemetry, evolve_population, evolve_population_checkpointed,
 };
 pub use rapier_cpu::RapierCpuBackend;
 pub use results::{
