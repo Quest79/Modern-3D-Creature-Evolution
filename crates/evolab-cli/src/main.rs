@@ -1,4 +1,6 @@
-#![recursion_limit = "256"]\n\nuse std::fs;
+#![recursion_limit = "256"]
+
+use std::fs;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::ExitCode;
