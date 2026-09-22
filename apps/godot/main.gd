@@ -4314,12 +4314,14 @@ func _begin_full_evolution_benchmark() -> void:
         _benchmark_abort("Could not write benchmark world/timeline configuration.")
         return
 
-    _benchmark_parent_path = ""
-    if not _current_genome.is_empty():
-        _benchmark_parent_path = _benchmark_base_path + "_parent.json"
-        if not _write_genome_file(_benchmark_parent_path, _current_genome):
-            _benchmark_abort("Could not snapshot the benchmark parent genome.")
-            return
+    var benchmark_ancestor := _experiment_ancestor_dictionary()
+    if benchmark_ancestor.is_empty():
+        _benchmark_abort("Could not create the benchmark ancestor genome.")
+        return
+    _benchmark_parent_path = _benchmark_base_path + "_parent.json"
+    if not _write_genome_file(_benchmark_parent_path, benchmark_ancestor):
+        _benchmark_abort("Could not snapshot the benchmark parent genome.")
+        return
 
     var git_commit := _benchmark_capture_command(
         "git",
@@ -4350,6 +4352,8 @@ func _begin_full_evolution_benchmark() -> void:
         ])
     )
     var experiment := _experiment_dictionary("CUDA-vs-CPU Benchmark")
+    if not experiment.is_empty():
+        experiment["ancestor"] = benchmark_ancestor.duplicate(true)
 
     _benchmark_log(
         "================================================================================\n"
