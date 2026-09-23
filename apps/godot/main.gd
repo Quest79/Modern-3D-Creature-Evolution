@@ -116,6 +116,10 @@ var _results_diversity_graph: Control
 var _results_morphology_line: Line2D
 var _results_class_line: Line2D
 var _font_size_spin: SpinBox
+var _hud_scale_spin: SpinBox
+var _hud_field_height_spin: SpinBox
+var _hud_button_height_spin: SpinBox
+var _hud_section_header_height_spin: SpinBox
 var _camera_speed_spin: SpinBox
 var _mouse_sensitivity_spin: SpinBox
 var _playback_speed_spin: SpinBox
@@ -142,6 +146,10 @@ var _latest_results_path := ""
 var _cuda_devices: Array = []
 
 var _font_size := 16
+var _hud_scale_percent := 100
+var _hud_field_height := 29
+var _hud_button_height := 29
+var _hud_section_header_height := 29
 var _accelerator_mode := "cpu"
 var _gpu_ids := ""
 var _gpu_batch_size := 4096
@@ -1119,6 +1127,7 @@ func _build_ui() -> void:
     _capabilities_label.modulate = Color(0.64, 0.7, 0.8)
     status_section.add_child(_capabilities_label)
 
+    _apply_hud_metrics()
     _apply_font_size()
 
 
@@ -2434,8 +2443,8 @@ func _on_walkthrough_run_test() -> void:
 func _build_settings_window() -> void:
     _settings_window = Window.new()
     _settings_window.title = "Settings"
-    _settings_window.size = Vector2i(430, 310)
-    _settings_window.min_size = Vector2i(360, 260)
+    _settings_window.size = Vector2i(500, 500)
+    _settings_window.min_size = Vector2i(420, 430)
     _settings_window.visible = false
     _settings_window.theme = _ui_theme
     _settings_window.close_requested.connect(_settings_window.hide)
@@ -2460,6 +2469,48 @@ func _build_settings_window() -> void:
     _font_size_spin = _add_number_row(column, "Font size", 7, 20, _font_size, 1)
     _font_size_spin.value_changed.connect(_on_font_size_changed)
 
+    _hud_scale_spin = _add_number_row(
+        column,
+        "Overall HUD size (%)",
+        50,
+        200,
+        _hud_scale_percent,
+        1
+    )
+    _hud_scale_spin.value_changed.connect(_on_hud_scale_changed)
+
+    _hud_field_height_spin = _add_number_row(
+        column,
+        "Input / field height",
+        18,
+        80,
+        _hud_field_height,
+        1
+    )
+    _hud_field_height_spin.value_changed.connect(_on_hud_field_height_changed)
+
+    _hud_button_height_spin = _add_number_row(
+        column,
+        "Button height",
+        18,
+        80,
+        _hud_button_height,
+        1
+    )
+    _hud_button_height_spin.value_changed.connect(_on_hud_button_height_changed)
+
+    _hud_section_header_height_spin = _add_number_row(
+        column,
+        "Section header height",
+        18,
+        80,
+        _hud_section_header_height,
+        1
+    )
+    _hud_section_header_height_spin.value_changed.connect(
+        _on_hud_section_header_height_changed
+    )
+
     _camera_speed_spin = _add_number_row(
         column,
         "WASD move speed",
@@ -2481,7 +2532,7 @@ func _build_settings_window() -> void:
     _mouse_sensitivity_spin.value_changed.connect(_on_mouse_sensitivity_changed)
 
     var help := Label.new()
-    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. Drag the thin bar on the HUD's right edge to resize it; the width is saved automatically."
+    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. HUD scale, field/button/header heights, and width are saved automatically."
     help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     help.modulate = Color(0.70, 0.76, 0.86)
     column.add_child(help)
@@ -2495,6 +2546,30 @@ func _on_settings_pressed() -> void:
 func _on_font_size_changed(value: float) -> void:
     _font_size = int(value)
     _apply_font_size()
+    _save_settings()
+
+
+func _on_hud_scale_changed(value: float) -> void:
+    _hud_scale_percent = clampi(int(value), 50, 200)
+    _apply_hud_metrics()
+    _save_settings()
+
+
+func _on_hud_field_height_changed(value: float) -> void:
+    _hud_field_height = clampi(int(value), 18, 80)
+    _apply_hud_metrics()
+    _save_settings()
+
+
+func _on_hud_button_height_changed(value: float) -> void:
+    _hud_button_height = clampi(int(value), 18, 80)
+    _apply_hud_metrics()
+    _save_settings()
+
+
+func _on_hud_section_header_height_changed(value: float) -> void:
+    _hud_section_header_height = clampi(int(value), 18, 80)
+    _apply_hud_metrics()
     _save_settings()
 
 
@@ -2986,6 +3061,38 @@ func _set_world_controls_enabled(enabled: bool) -> void:
             check.disabled = not enabled
 
 
+func _hud_scale_factor() -> float:
+    return float(_hud_scale_percent) / 100.0
+
+
+func _apply_hud_metrics() -> void:
+    if not is_instance_valid(_hud_panel):
+        return
+
+    _apply_hud_metrics_to_node(_hud_panel)
+    _update_layout()
+
+
+func _apply_hud_metrics_to_node(node: Node) -> void:
+    if node is Control:
+        var control := node as Control
+        var minimum := control.custom_minimum_size
+
+        if control is SpinBox or control is LineEdit or control is OptionButton:
+            minimum.y = float(_hud_field_height)
+            control.custom_minimum_size = minimum
+        elif control is Button:
+            minimum.y = float(
+                _hud_section_header_height
+                if control.has_meta("hud_section_header")
+                else _hud_button_height
+            )
+            control.custom_minimum_size = minimum
+
+    for child in node.get_children():
+        _apply_hud_metrics_to_node(child)
+
+
 func _apply_font_size() -> void:
     if _ui_theme == null:
         return
@@ -3010,6 +3117,26 @@ func _load_settings() -> void:
 
     _font_size = int(config.get_value("ui", "font_size", _font_size))
     _font_size = clampi(_font_size, 7, 20)
+    _hud_scale_percent = int(
+        config.get_value("ui", "hud_scale_percent", _hud_scale_percent)
+    )
+    _hud_scale_percent = clampi(_hud_scale_percent, 50, 200)
+    _hud_field_height = int(
+        config.get_value("ui", "hud_field_height", _hud_field_height)
+    )
+    _hud_field_height = clampi(_hud_field_height, 18, 80)
+    _hud_button_height = int(
+        config.get_value("ui", "hud_button_height", _hud_button_height)
+    )
+    _hud_button_height = clampi(_hud_button_height, 18, 80)
+    _hud_section_header_height = int(
+        config.get_value(
+            "ui",
+            "hud_section_header_height",
+            _hud_section_header_height
+        )
+    )
+    _hud_section_header_height = clampi(_hud_section_header_height, 18, 80)
     _walkthrough_completed = bool(
         config.get_value("ui", "walkthrough_completed", _walkthrough_completed)
     )
@@ -3155,6 +3282,14 @@ func _load_settings() -> void:
 func _save_settings() -> void:
     var config := ConfigFile.new()
     config.set_value("ui", "font_size", _font_size)
+    config.set_value("ui", "hud_scale_percent", _hud_scale_percent)
+    config.set_value("ui", "hud_field_height", _hud_field_height)
+    config.set_value("ui", "hud_button_height", _hud_button_height)
+    config.set_value(
+        "ui",
+        "hud_section_header_height",
+        _hud_section_header_height
+    )
     config.set_value("ui", "hud_width", _hud_width)
     config.set_value("ui", "walkthrough_completed", _walkthrough_completed)
     config.set_value("ui", "walkthrough_version", _walkthrough_version)
@@ -3216,22 +3351,27 @@ func _save_settings() -> void:
 
 func _update_layout() -> void:
     var viewport_size := get_viewport().get_visible_rect().size
+    var hud_scale := _hud_scale_factor()
     var max_for_window := maxf(
         MIN_HUD_WIDTH,
-        minf(MAX_HUD_WIDTH, viewport_size.x - 240.0)
+        minf(
+            MAX_HUD_WIDTH,
+            maxf(0.0, viewport_size.x - 240.0) / hud_scale
+        )
     )
     var requested_width := clampf(_hud_width, MIN_HUD_WIDTH, max_for_window)
 
     if is_instance_valid(_hud_panel):
-        # Container children can force the panel wider than the requested size.
-        # Use that real minimum so the resize handle stays on the actual edge.
+        # Minimum sizes are logical HUD pixels. The panel itself is scaled so
+        # text, controls, spacing, and custom heights all shrink/grow together.
         var content_min_width := _hud_panel.get_combined_minimum_size().x
-        _visible_hud_width = maxf(requested_width, content_min_width)
+        var logical_width := maxf(requested_width, content_min_width)
         _hud_panel.position = Vector2.ZERO
-        _hud_panel.size = Vector2(_visible_hud_width, viewport_size.y)
-        _visible_hud_width = _hud_panel.size.x
+        _hud_panel.scale = Vector2(hud_scale, hud_scale)
+        _hud_panel.size = Vector2(logical_width, viewport_size.y / hud_scale)
+        _visible_hud_width = _hud_panel.size.x * hud_scale
     else:
-        _visible_hud_width = requested_width
+        _visible_hud_width = requested_width * hud_scale
 
     if is_instance_valid(_hud_resize_handle):
         _hud_resize_handle.position = Vector2(
@@ -3245,19 +3385,23 @@ func _on_hud_resize_input(event: InputEvent) -> void:
     if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
         _hud_dragging = event.pressed
         if not event.pressed:
-            _hud_width = _visible_hud_width
+            _hud_width = _visible_hud_width / _hud_scale_factor()
             _save_settings()
         get_viewport().set_input_as_handled()
         return
 
     if event is InputEventMouseMotion and _hud_dragging:
         var viewport_width := get_viewport().get_visible_rect().size.x
+        var hud_scale := _hud_scale_factor()
         var max_for_window := maxf(
             MIN_HUD_WIDTH,
-            minf(MAX_HUD_WIDTH, viewport_width - 240.0)
+            minf(
+                MAX_HUD_WIDTH,
+                maxf(0.0, viewport_width - 240.0) / hud_scale
+            )
         )
         _hud_width = clampf(
-            get_viewport().get_mouse_position().x,
+            get_viewport().get_mouse_position().x / hud_scale,
             MIN_HUD_WIDTH,
             max_for_window
         )
@@ -3389,6 +3533,7 @@ func _add_collapsible_section(
     var header := Button.new()
     header.alignment = HORIZONTAL_ALIGNMENT_LEFT
     header.focus_mode = Control.FOCUS_NONE
+    header.set_meta("hud_section_header", true)
     header.text = ("▼ " if expanded else "▶ ") + title
     wrapper.add_child(header)
 
