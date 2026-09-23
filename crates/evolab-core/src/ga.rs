@@ -34,6 +34,11 @@ pub struct EvolutionConfig {
     /// This lets offspring inherit unchanged, receive one mutation, or receive several.
     #[serde(default = "default_mutation_probability")]
     pub mutation_probability: f32,
+    /// When true, generation 1 preserves the supplied ancestor exactly and
+    /// fills the remaining population with independently mutated descendants.
+    /// When false, generation 1 is composed of independently randomized creatures.
+    #[serde(default)]
+    pub seed_population_from_ancestor: bool,
     pub seed: u64,
     pub worker_threads: usize,
     pub simulation: SimulationConfig,
@@ -62,6 +67,7 @@ impl Default for EvolutionConfig {
             crossover_chance: 0.5,
             mutations_per_child: 8,
             mutation_probability: default_mutation_probability(),
+            seed_population_from_ancestor: false,
             seed: 1,
             worker_threads: 0,
             simulation: SimulationConfig {
@@ -368,8 +374,13 @@ where
         validate_effective_settings(&first_settings)?;
 
         let mut next_individual_id = 1_u64;
-        let population =
-            initial_population(ancestor, &first_settings, &mut rng, &mut next_individual_id)?;
+        let population = initial_population(
+            ancestor,
+            &first_settings,
+            &mut rng,
+            &mut next_individual_id,
+            config.seed_population_from_ancestor,
+        )?;
 
         (
             1,
@@ -679,12 +690,62 @@ fn sample_mutation_count(rng: &mut GenomeRng, opportunities: usize, probability:
 }
 
 fn initial_population(
-    _ancestor: &CreatureGenome,
+    ancestor: &CreatureGenome,
     settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
     next_individual_id: &mut u64,
+    seed_from_ancestor: bool,
 ) -> Result<Vec<Candidate>, String> {
     let mut population = Vec::with_capacity(settings.population_size);
+
+    if seed_from_ancestor {
+        // Continue Champion must never throw away the champion that was supplied.
+        // Keep one exact copy as the baseline, then create independent mutated
+        // descendants so the rest of the population is still diverse.
+        let ancestor_id = *next_individual_id;
+        *next_individual_id += 1;
+        population.push(Candidate {
+            individual_id: ancestor_id,
+            parent_ids: Vec::new(),
+            genome: ancestor.clone(),
+            mutations: Vec::new(),
+        });
+
+        while population.len() < settings.population_size {
+            let mut accepted = None;
+            for _ in 0..5 {
+                let mutation_count = sample_mutation_count(
+                    rng,
+                    settings.mutations_per_child,
+                    settings.mutation_probability,
+                )
+                .max(1);
+                let seed = rng.next_seed();
+                if let Ok(mutated) =
+                    mutate_genome(ancestor, seed, mutation_count, &settings.mutation)
+                {
+                    accepted = Some(mutated);
+                    break;
+                }
+            }
+
+            let Some(mutated) = accepted else {
+                continue;
+            };
+
+            let individual_id = *next_individual_id;
+            *next_individual_id += 1;
+            population.push(Candidate {
+                individual_id,
+                parent_ids: vec![ancestor_id],
+                genome: mutated.genome,
+                mutations: mutated.mutations,
+            });
+        }
+
+        return Ok(population);
+    }
+
     let min_segments = settings.mutation.min_segments;
     let segment_span = settings
         .mutation
