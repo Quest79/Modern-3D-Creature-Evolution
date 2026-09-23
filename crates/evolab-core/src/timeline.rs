@@ -62,6 +62,8 @@ pub struct TimelineChanges {
     #[serde(default)]
     pub mutations_per_child: Option<usize>,
     #[serde(default)]
+    pub mutation_probability: Option<f32>,
+    #[serde(default)]
     pub structural_mutation_chance: Option<f32>,
     #[serde(default)]
     pub motor_strength_multiplier: Option<f32>,
@@ -90,6 +92,11 @@ impl TimelineChanges {
             && value == 0
         {
             return Err("timeline mutations_per_child must be greater than 0".into());
+        }
+        if let Some(value) = self.mutation_probability
+            && (!value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err("timeline mutation_probability must be between 0 and 1".into());
         }
         if let Some(value) = self.structural_mutation_chance
             && (!value.is_finite() || !(0.0..=1.0).contains(&value))
@@ -207,6 +214,7 @@ impl TimelineConfig {
 pub struct EffectiveEvolutionSettings {
     pub population_size: usize,
     pub mutations_per_child: usize,
+    pub mutation_probability: f32,
     pub mutation: MutationConfig,
     pub simulation: SimulationConfig,
     pub fitness: FitnessConfig,
@@ -227,6 +235,9 @@ impl EffectiveEvolutionSettings {
         }
         if let Some(value) = changes.mutations_per_child {
             self.mutations_per_child = value;
+        }
+        if let Some(value) = changes.mutation_probability {
+            self.mutation_probability = value;
         }
         if let Some(value) = changes.structural_mutation_chance {
             self.mutation.structural_mutation_chance = value;
