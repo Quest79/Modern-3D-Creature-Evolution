@@ -138,6 +138,7 @@ var _has_evolution_champion := false
 var _champion_world: Dictionary = {}
 var _champion_motor_strength := 1.0
 var _results_data: Dictionary = {}
+var _latest_results_path := ""
 var _cuda_devices: Array = []
 
 var _font_size := 16
@@ -1365,7 +1366,9 @@ func _build_results_window() -> void:
 
 func _on_results_pressed() -> void:
     if _results_data.is_empty():
-        return
+        if _latest_results_path.is_empty() or not _load_results_file(_latest_results_path):
+            _set_status("Could not load evolution results.")
+            return
     _set_mouse_look(false)
     _refresh_results_window()
     _results_window.popup_centered()
@@ -1902,7 +1905,10 @@ func _on_replay_lineage_creature() -> void:
 
     var genome_value = record.get("genome", {})
     if typeof(genome_value) != TYPE_DICTIONARY:
-        _set_status("This results file does not retain that creature genome.")
+        _set_status(
+            "Compact results keep full genomes for generation champions only. "
+            + "Use the Champions tab to replay/continue a saved winner."
+        )
         return
 
     var summary := _result_generation_summary(int(record.get("generation", 0)))
@@ -1961,7 +1967,10 @@ func _on_load_lineage_creature() -> void:
 
     var genome_value = record.get("genome", {})
     if typeof(genome_value) != TYPE_DICTIONARY:
-        _set_status("This results file does not retain that creature genome.")
+        _set_status(
+            "Compact results keep full genomes for generation champions only. "
+            + "Use the Champions tab to replay/continue a saved winner."
+        )
         return
 
     _current_genome = genome_value.duplicate(true)
@@ -2023,7 +2032,10 @@ func _on_fork_lineage_creature() -> void:
 
     var genome_value = record.get("genome", {})
     if typeof(genome_value) != TYPE_DICTIONARY:
-        _set_status("This results file does not retain that creature genome.")
+        _set_status(
+            "Compact results keep full genomes for generation champions only. "
+            + "Use the Champions tab to replay/continue a saved winner."
+        )
         return
 
     _current_genome = genome_value.duplicate(true)
@@ -3578,6 +3590,7 @@ func _start_evolution_run(continue_current: bool) -> void:
     _progress_bar.value = 0
     _has_evolution_champion = false
     _results_data.clear()
+    _latest_results_path = ""
     _results_button.disabled = true
     _watch_champion_button.disabled = true
     _continue_champion_button.disabled = true
@@ -4324,6 +4337,7 @@ func _load_results_file(path: String) -> bool:
         return false
 
     _results_data = parsed
+    _latest_results_path = path
     _results_button.disabled = false
     _refresh_results_window()
     return true
@@ -5684,7 +5698,8 @@ func _handle_event(event: Dictionary) -> void:
 
             var results_file := str(event.get("results_file", ""))
             if results_file != "":
-                _load_results_file(results_file)
+                _latest_results_path = results_file
+                _results_button.disabled = false
 
             var archived_champion := _archive_current_champion(
                 float(event.get("champion_fitness", 0.0))
