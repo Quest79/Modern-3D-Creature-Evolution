@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile,
-    FitnessConfig, FitnessWeights, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
     SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed, mutate_genome, random_creature,
     run_cuda_probe_batch,
@@ -206,9 +206,13 @@ enum Command {
 
     /// Evolve a population for distance traveled.
     Evolve {
-        /// Optional ancestor genome JSON. Defaults to the built-in three-segment creature.
+        /// Optional ancestor genome JSON. Used for explicitly continuing a saved champion.
         #[arg(long)]
         genome: Option<PathBuf>,
+
+        /// Start from a newly generated random morphology instead of the built-in walker.
+        #[arg(long, default_value_t = false)]
+        random_ancestor: bool,
 
         #[arg(long, default_value_t = 50)]
         population: usize,
@@ -243,6 +247,11 @@ enum Command {
         /// Chance that an occurring mutation attempts a structural body change.
         #[arg(long, default_value_t = 0.30)]
         structural_mutation_chance: f32,
+
+        /// Fraction of structural mutations that make a larger morphology jump,
+        /// such as adding a 2-4 segment limb.
+        #[arg(long, default_value_t = 0.10)]
+        major_structural_mutation_chance: f32,
 
         #[arg(long, default_value_t = 12)]
         max_segments: usize,
@@ -517,6 +526,7 @@ fn run() -> Result<(), String> {
         } => run_genome_generate(&output, seed, random_segments, mutations, max_segments),
         Command::Evolve {
             genome,
+            random_ancestor,
             population,
             evaluation_pool,
             generations,
@@ -526,6 +536,7 @@ fn run() -> Result<(), String> {
             mutations,
             mutation_probability,
             structural_mutation_chance,
+            major_structural_mutation_chance,
             max_segments,
             seed,
             workers,
@@ -560,6 +571,7 @@ fn run() -> Result<(), String> {
             json,
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
+            random_ancestor,
             population,
             evaluation_pool,
             generations,
@@ -569,6 +581,7 @@ fn run() -> Result<(), String> {
             mutations,
             mutation_probability,
             structural_mutation_chance,
+            major_structural_mutation_chance,
             max_segments,
             seed,
             workers,
@@ -1157,6 +1170,7 @@ fn run_genome_generate(
 
 struct EvolveRequest<'a> {
     genome_path: Option<&'a PathBuf>,
+    random_ancestor: bool,
     population: usize,
     evaluation_pool: usize,
     generations: usize,
@@ -1166,6 +1180,7 @@ struct EvolveRequest<'a> {
     mutations: usize,
     mutation_probability: f32,
     structural_mutation_chance: f32,
+    major_structural_mutation_chance: f32,
     max_segments: usize,
     seed: u64,
     workers: usize,
@@ -1221,7 +1236,14 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
 }
 
 fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> Result<(), String> {
-    let ancestor = if let Some(path) = request.genome_path {
+    let mutation_config = MutationConfig {
+        max_segments: request.max_segments.max(2),
+        structural_mutation_chance: request.structural_mutation_chance,
+        major_structural_mutation_chance: request.major_structural_mutation_chance,
+        ..MutationConfig::default()
+    };
+
+    let (ancestor, ancestor_source) = if let Some(path) = request.genome_path {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read genome {}: {err}", path.display()))?;
         let mut genome = parse_creature_genome_json(&raw)
@@ -1230,9 +1252,25 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             .brain
             .sync_with_structure(&genome.joints, &genome.segments);
         genome.validate()?;
-        genome
+        (genome, format!("champion:{}", path.display()))
+    } else if request.random_ancestor {
+        let mut ancestor_rng = GenomeRng::new(request.seed ^ 0xA5A5_D3C4_91E1_77B9);
+        let max_segments = request.max_segments.max(2);
+        let target_segments = 2 + ancestor_rng.range_usize(max_segments - 1);
+        let generated = random_creature(
+            ancestor_rng.next_seed(),
+            target_segments,
+            &mutation_config,
+        )?;
+        (
+            generated.genome,
+            format!("random:{target_segments}-segments"),
+        )
     } else {
-        CreatureGenome::three_segment_walker()
+        (
+            CreatureGenome::three_segment_walker(),
+            "built-in-three-segment".to_string(),
+        )
     };
 
     let mut simulation = simulation_config(
@@ -1268,11 +1306,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 energy: request.fitness_energy,
             },
         },
-        mutation: MutationConfig {
-            max_segments: request.max_segments.max(2),
-            structural_mutation_chance: request.structural_mutation_chance,
-            ..MutationConfig::default()
-        },
+        mutation: mutation_config,
         trials_per_creature: request.trials,
         trial_aggregation,
         accelerator: AcceleratorConfig {
@@ -1318,6 +1352,10 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "mutations_per_child": config.mutations_per_child,
                 "mutation_probability": config.mutation_probability,
                 "structural_mutation_chance": config.mutation.structural_mutation_chance,
+                "major_structural_mutation_chance":
+                    config.mutation.major_structural_mutation_chance,
+                "ancestor_source": ancestor_source,
+                "ancestor_segments": ancestor.segments.len(),
                 "fitness_weights": config.fitness.weights,
                 "motor_strength_multiplier": config.simulation.motor_strength_multiplier,
                 "trials_per_creature": config.trials_per_creature,
