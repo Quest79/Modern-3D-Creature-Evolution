@@ -672,11 +672,7 @@ impl From<Candidate> for CheckpointCandidate {
     }
 }
 
-fn sample_mutation_count(
-    rng: &mut GenomeRng,
-    opportunities: usize,
-    probability: f32,
-) -> usize {
+fn sample_mutation_count(rng: &mut GenomeRng, opportunities: usize, probability: f32) -> usize {
     (0..opportunities)
         .filter(|_| rng.chance(probability))
         .count()
