@@ -770,8 +770,7 @@ fn add_limb(
     let mut added_ids = Vec::with_capacity(limb_segments);
 
     for _ in 0..limb_segments {
-        let Some((_record, child_id)) =
-            add_segment_to_parent(genome, rng, config, parent_id)
+        let Some((_record, child_id)) = add_segment_to_parent(genome, rng, config, parent_id)
         else {
             *genome = original;
             return None;
