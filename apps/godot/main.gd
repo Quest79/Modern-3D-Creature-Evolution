@@ -239,8 +239,14 @@ var _benchmark_phase_cuda_totals: Dictionary = {}
 var _benchmark_cuda_summary: Dictionary = {}
 var _benchmark_cpu_summary: Dictionary = {}
 
+# Normal evolution is stochastic. The numeric Seed control remains useful for
+# reproducible benchmark/debug runs, while creature mutation/evolution actions
+# draw a fresh run seed from this RNG.
+var _evolution_rng := RandomNumberGenerator.new()
+
 
 func _ready() -> void:
+    _evolution_rng.randomize()
     _ensure_portable_directories()
     _load_settings()
     _ui_theme = Theme.new()
@@ -641,6 +647,10 @@ func _build_ui() -> void:
     var creature_section := _add_collapsible_section(column, "Creature Generation & Files", false)
 
     _seed_spin = _add_number_row(creature_section, "Seed", 1, 999999999, 1, 1)
+    _seed_spin.tooltip_text = (
+        "Normal Mutate/Random/Evolution runs choose a fresh seed automatically. "
+        + "The shown value records the latest evolution seed and is used for reproducible benchmarks/debugging."
+    )
     _mutation_spin = _add_number_row(creature_section, "Mutation operations", 0, 500, 12, 1)
     _random_segments_spin = _add_number_row(creature_section, "Random creature segments", 2, 40, 5, 1)
     _max_segments_spin = _add_number_row(creature_section, "Maximum segments", 2, 40, 12, 1)
@@ -3338,15 +3348,24 @@ func _load_capabilities() -> void:
     )
 
 
+func _fresh_evolution_seed() -> int:
+    return int(_evolution_rng.randi_range(1, 999999999))
+
+
 func _base_creature_args(
     world_override = null,
-    motor_strength_override := -1.0
+    motor_strength_override := -1.0,
+    seed_override := -1
 ) -> PackedStringArray:
     var world_file := _world_file_for_cli(world_override)
 
     var motor_strength := float(_motor_strength_spin.value)
     if motor_strength_override >= 0.0:
         motor_strength = motor_strength_override
+
+    var run_seed := int(_seed_spin.value)
+    if seed_override > 0:
+        run_seed = int(seed_override)
 
     return PackedStringArray([
         "creature-stream",
@@ -3355,7 +3374,7 @@ func _base_creature_args(
         "--dt", str(_dt_spin.value),
         "--frame-hz", "60",
         "--playback-speed", "%.2f" % _playback_speed,
-        "--seed", str(int(_seed_spin.value)),
+        "--seed", str(run_seed),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--world-file", world_file,
         "--motor-strength", str(motor_strength),
@@ -3384,7 +3403,8 @@ func _on_mutate_pressed() -> void:
         return
 
     _prepare_creature_run()
-    var args := _base_creature_args()
+    var mutation_seed := _fresh_evolution_seed()
+    var args := _base_creature_args(null, -1.0, mutation_seed)
     args.append_array(PackedStringArray([
         "--mutations", str(int(_mutation_spin.value)),
     ]))
@@ -3405,7 +3425,8 @@ func _on_random_pressed() -> void:
         return
 
     _prepare_creature_run()
-    var args := _base_creature_args()
+    var mutation_seed := _fresh_evolution_seed()
+    var args := _base_creature_args(null, -1.0, mutation_seed)
     args.append_array(PackedStringArray([
         "--random-segments", str(int(_random_segments_spin.value)),
         "--mutations", str(int(_mutation_spin.value)),
@@ -3450,6 +3471,12 @@ func _on_evolve_pressed() -> void:
         _set_status("Could not write runtime experiment configuration.")
         return
 
+    # A normal evolution run should explore a new stochastic lineage every time.
+    # Store the generated seed in the control/results so this exact run can still
+    # be reproduced deliberately if needed.
+    var evolution_seed := _fresh_evolution_seed()
+    _seed_spin.value = evolution_seed
+
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
@@ -3461,7 +3488,7 @@ func _on_evolve_pressed() -> void:
         "--mutations", str(int(_evolution_mutations_spin.value)),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
-        "--seed", str(int(_seed_spin.value)),
+        "--seed", str(evolution_seed),
         "--workers", str(int(_workers_spin.value)),
         "--seconds", str(_seconds_spin.value),
         "--dt", str(_dt_spin.value),
