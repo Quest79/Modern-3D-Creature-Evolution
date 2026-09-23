@@ -97,6 +97,7 @@ var _metrics: RichTextLabel
 var _capabilities_label: Label
 var _hud_panel: PanelContainer
 var _title_label: Label
+var _version_label: Label
 var _section_headings: Array[Label] = []
 var _ui_theme: Theme
 var _settings_window: Window
@@ -414,6 +415,37 @@ func _repo_root_path() -> String:
     return project_dir.path_join("../..").simplify_path()
 
 
+func _git_short_revision() -> String:
+    var output: Array = []
+    var exit_code := OS.execute(
+        "git",
+        PackedStringArray([
+            "-C",
+            _repo_root_path(),
+            "rev-parse",
+            "--short=7",
+            "HEAD",
+        ]),
+        output,
+        true,
+        false
+    )
+    if exit_code != 0 or output.is_empty():
+        return ""
+
+    return str(output[0]).strip_edges()
+
+
+func _display_version() -> String:
+    var app_version := str(
+        ProjectSettings.get_setting("application/config/version", "0.1.0")
+    )
+    var revision := _git_short_revision()
+    if revision.is_empty():
+        return "v%s" % app_version
+    return "v%s • commit %s" % [app_version, revision]
+
+
 func _portable_data_root() -> String:
     return _repo_root_path().path_join(PORTABLE_DATA_DIR_NAME)
 
@@ -585,6 +617,12 @@ func _build_ui() -> void:
     subtitle.text = "Step 8 • GPU / Multi-GPU Acceleration"
     subtitle.modulate = Color(0.72, 0.78, 0.88)
     column.add_child(subtitle)
+
+    _version_label = Label.new()
+    _version_label.text = _display_version()
+    _version_label.modulate = Color(0.56, 0.62, 0.72)
+    _version_label.tooltip_text = "Application version and current Git commit."
+    column.add_child(_version_label)
 
     column.add_child(HSeparator.new())
 
