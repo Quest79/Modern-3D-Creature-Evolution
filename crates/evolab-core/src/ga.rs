@@ -28,7 +28,12 @@ pub struct EvolutionConfig {
     pub tournament_size: usize,
     pub elite_count: usize,
     pub crossover_chance: f32,
+    /// Maximum mutation opportunities presented to each non-elite child.
     pub mutations_per_child: usize,
+    /// Independent probability that each mutation opportunity actually occurs.
+    /// This lets offspring inherit unchanged, receive one mutation, or receive several.
+    #[serde(default = "default_mutation_probability")]
+    pub mutation_probability: f32,
     pub seed: u64,
     pub worker_threads: usize,
     pub simulation: SimulationConfig,
@@ -42,6 +47,10 @@ pub struct EvolutionConfig {
     pub timeline: TimelineConfig,
 }
 
+fn default_mutation_probability() -> f32 {
+    0.20
+}
+
 impl Default for EvolutionConfig {
     fn default() -> Self {
         Self {
@@ -52,6 +61,7 @@ impl Default for EvolutionConfig {
             elite_count: 2,
             crossover_chance: 0.5,
             mutations_per_child: 8,
+            mutation_probability: default_mutation_probability(),
             seed: 1,
             worker_threads: 0,
             simulation: SimulationConfig {
@@ -95,6 +105,11 @@ impl EvolutionConfig {
         if self.mutations_per_child == 0 {
             return Err("mutations_per_child must be greater than 0".into());
         }
+        if !self.mutation_probability.is_finite()
+            || !(0.0..=1.0).contains(&self.mutation_probability)
+        {
+            return Err("mutation_probability must be between 0 and 1".into());
+        }
         if !(1..=100).contains(&self.trials_per_creature) {
             return Err("trials_per_creature must be between 1 and 100".into());
         }
@@ -115,6 +130,7 @@ impl From<&EvolutionConfig> for EffectiveEvolutionSettings {
         Self {
             population_size: config.population_size,
             mutations_per_child: config.mutations_per_child,
+            mutation_probability: config.mutation_probability,
             mutation: config.mutation.clone(),
             simulation: config.simulation.clone(),
             fitness: config.fitness,
@@ -656,6 +672,16 @@ impl From<Candidate> for CheckpointCandidate {
     }
 }
 
+fn sample_mutation_count(
+    rng: &mut GenomeRng,
+    opportunities: usize,
+    probability: f32,
+) -> usize {
+    (0..opportunities)
+        .filter(|_| rng.chance(probability))
+        .count()
+}
+
 fn initial_population(
     ancestor: &CreatureGenome,
     settings: &EffectiveEvolutionSettings,
@@ -676,13 +702,23 @@ fn initial_population(
     while population.len() < settings.population_size {
         let mut accepted = None;
         for _ in 0..5 {
-            let seed = rng.next_seed();
-            if let Ok(mutation_result) = mutate_genome(
-                ancestor,
-                seed,
+            let mutation_count = sample_mutation_count(
+                rng,
                 settings.mutations_per_child,
-                &settings.mutation,
-            ) {
+                settings.mutation_probability,
+            );
+            if mutation_count == 0 {
+                accepted = Some(MutationResult {
+                    genome: ancestor.clone(),
+                    mutations: Vec::new(),
+                });
+                break;
+            }
+
+            let seed = rng.next_seed();
+            if let Ok(mutation_result) =
+                mutate_genome(ancestor, seed, mutation_count, &settings.mutation)
+            {
                 accepted = Some(mutation_result);
                 break;
             }
@@ -715,6 +751,7 @@ fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
 struct MutationPlan {
     parent_ids: Vec<u64>,
     base: CreatureGenome,
+    mutation_count: usize,
     seeds: [u64; 5],
 }
 
@@ -726,16 +763,25 @@ struct MutationAttemptOutcome {
 fn execute_mutation_plans(
     pool: &rayon::ThreadPool,
     plans: &[MutationPlan],
-    mutations_per_child: usize,
     mutation: &MutationConfig,
 ) -> Vec<MutationAttemptOutcome> {
     pool.install(|| {
         plans
             .par_iter()
             .map(|plan| {
+                if plan.mutation_count == 0 {
+                    return MutationAttemptOutcome {
+                        result: Some(MutationResult {
+                            genome: plan.base.clone(),
+                            mutations: Vec::new(),
+                        }),
+                        attempts: 0,
+                    };
+                }
+
                 for (attempt_index, seed) in plan.seeds.into_iter().enumerate() {
                     if let Ok(result) =
-                        mutate_genome(&plan.base, seed, mutations_per_child, mutation)
+                        mutate_genome(&plan.base, seed, plan.mutation_count, mutation)
                     {
                         return MutationAttemptOutcome {
                             result: Some(result),
@@ -790,9 +836,15 @@ fn expand_evaluation_pool(
                 parent.genome.clone()
             };
 
+            let mutation_count = sample_mutation_count(
+                rng,
+                settings.mutations_per_child,
+                settings.mutation_probability,
+            );
             plans.push(MutationPlan {
                 parent_ids,
                 base,
+                mutation_count,
                 seeds: [
                     rng.next_seed(),
                     rng.next_seed(),
@@ -804,12 +856,7 @@ fn expand_evaluation_pool(
         }
 
         telemetry.attempted_offspring += plans.len();
-        let results = execute_mutation_plans(
-            pool,
-            &plans,
-            settings.mutations_per_child,
-            &settings.mutation,
-        );
+        let results = execute_mutation_plans(pool, &plans, &settings.mutation);
 
         for (plan, outcome) in plans.into_iter().zip(results) {
             telemetry.mutation_attempts += outcome.attempts;
@@ -1149,9 +1196,15 @@ fn breed_next_generation(
                 parent.genome.clone()
             };
 
+            let mutation_count = sample_mutation_count(
+                rng,
+                next_settings.mutations_per_child,
+                next_settings.mutation_probability,
+            );
             plans.push(MutationPlan {
                 parent_ids,
                 base,
+                mutation_count,
                 seeds: [
                     rng.next_seed(),
                     rng.next_seed(),
@@ -1163,12 +1216,7 @@ fn breed_next_generation(
         }
 
         telemetry.attempted_offspring += plans.len();
-        let results = execute_mutation_plans(
-            pool,
-            &plans,
-            next_settings.mutations_per_child,
-            &next_settings.mutation,
-        );
+        let results = execute_mutation_plans(pool, &plans, &next_settings.mutation);
 
         for (plan, outcome) in plans.into_iter().zip(results) {
             telemetry.mutation_attempts += outcome.attempts;
