@@ -1330,10 +1330,6 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         resume_checkpoint.as_ref(),
         request.checkpoint_output.is_some(),
         |summary| {
-            if let Some(path) = request.champion_output {
-                write_genome(path, &summary.champion)?;
-            }
-
             if let Some(socket) = socket {
                 send_event(
                     socket,
@@ -1384,9 +1380,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                         "effective_world": summary.effective_settings.simulation.world,
                         "active_timeline_events": summary.active_timeline_events,
                         "triggered_timeline_events": summary.triggered_timeline_events,
-                        "champion_file": request
-                            .champion_output
-                            .map(|path| path.to_string_lossy().to_string()),
+                        // Champion state remains in RAM during evolution.
+                        // The final champion is persisted once after the timed run.
                     }),
                 );
             } else {
