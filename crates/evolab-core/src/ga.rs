@@ -1446,7 +1446,6 @@ fn build_lineage_records(generation: usize, evaluated: &[EvaluatedCreature]) -> 
             brain_nodes: item.genome.brain.node_count(),
             trial_seeds: item.trial_seeds.clone(),
             mutations: item.mutations.clone(),
-            genome: item.genome.clone(),
         })
         .collect()
 }
