@@ -961,11 +961,11 @@ func _build_ui() -> void:
     _playback_speed_spin.tooltip_text = "Live viewer speed. 0.01x = 100× slower, 2.00x = 2× faster."
     _playback_speed_spin.value_changed.connect(_on_playback_speed_changed)
     _batch_spin = _add_number_row(
-        sim_section, "Parallel simulations / generation", 1, 1000000, 1000, 1
+        sim_section, "Parallel probe simulations", 1, 1000000, 1000, 1
     )
     _batch_spin.tooltip_text = (
-        "Benchmark world count. During CUDA evolution this is also the candidate "
-        + "evaluation pool per generation; Population remains the survivor/parent pool."
+        "Parallel world count for probe/throughput tests. Evolution candidate count "
+        + "is always the Population value on both CPU and CUDA."
     )
     _workers_spin = _add_number_row(sim_section, "CPU workers (0 = auto)", 0, 256, 0, 1)
 
@@ -3453,7 +3453,7 @@ func _on_evolve_pressed() -> void:
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
-        "--evaluation-pool", str(int(_batch_spin.value)),
+        "--evaluation-pool", str(int(_population_spin.value)),
         "--generations", str(int(_generations_spin.value)),
         "--tournament", str(int(_tournament_spin.value)),
         "--elite", str(int(_elite_spin.value)),
@@ -3526,7 +3526,7 @@ func _on_resume_evolution_pressed() -> void:
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
-        "--evaluation-pool", str(int(_batch_spin.value)),
+        "--evaluation-pool", str(int(_population_spin.value)),
         "--generations", str(int(_generations_spin.value)),
         "--tournament", str(int(_tournament_spin.value)),
         "--elite", str(int(_elite_spin.value)),
@@ -3677,7 +3677,7 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
         "ancestor": ancestor,
         "evolution": {
             "population_size": int(_population_spin.value),
-            "evaluation_pool_size": int(_batch_spin.value),
+            "evaluation_pool_size": int(_population_spin.value),
             "generations": int(_generations_spin.value),
             "tournament_size": int(_tournament_spin.value),
             "elite_count": int(_elite_spin.value),
@@ -4296,7 +4296,7 @@ func _begin_full_evolution_benchmark() -> void:
     _ensure_portable_directories()
     _benchmark_active = true
     _benchmark_phase = "cuda"
-    _benchmark_requested_eval_pool = int(_batch_spin.value)
+    _benchmark_requested_eval_pool = int(_population_spin.value)
     _benchmark_cuda_eval_pool = 0
     _benchmark_cuda_summary.clear()
     _benchmark_cpu_summary.clear()
@@ -4401,8 +4401,8 @@ func _begin_full_evolution_benchmark() -> void:
         + JSON.stringify(experiment, "\t")
         + "\n--- END CONFIGURATION ---\n\n"
         + "Benchmark order: CUDA first, CPU second.\n"
-        + "CPU evaluation pool is forced to the actual CUDA evaluation-pool size "
-        + "observed during phase 1 so both backends evaluate the same number of candidates.\n"
+        + "CPU and CUDA evaluate the same Population-sized candidate set each generation.\n"
+        + "Acceleration changes wall-clock completion time only; it never changes workload.\n"
         + "CPU fallback is disabled during the CUDA phase.\n\n"
     )
 
@@ -4415,14 +4415,6 @@ func _begin_full_evolution_benchmark() -> void:
 
 
 func _benchmark_evolution_args(backend: String, evaluation_pool: int) -> PackedStringArray:
-    var champion_path := _benchmark_phase_file("champion.json")
-    var results_path := _benchmark_phase_file("results.evoresults")
-    var checkpoint_path := _benchmark_phase_file("checkpoint.evockpt")
-
-    for path in [champion_path, results_path, checkpoint_path]:
-        if FileAccess.file_exists(path):
-            DirAccess.remove_absolute(path)
-
     var args := PackedStringArray([
         "evolve",
         "--population", str(int(_population_spin.value)),
@@ -4449,10 +4441,7 @@ func _benchmark_evolution_args(backend: String, evaluation_pool: int) -> PackedS
         "--fitness-energy", str(_fitness_energy_spin.value),
         "--world-file", _benchmark_world_file,
         "--event-port", str(_event_port),
-        "--champion-output", champion_path,
-        "--result-output", results_path,
         "--experiment-name", "CUDA-vs-CPU Benchmark " + backend.to_upper(),
-        "--checkpoint-output", checkpoint_path,
         "--accelerator", backend,
         "--gpus", _gpu_ids_for_cli(),
         "--gpu-batch-size", str(int(_gpu_batch_spin.value)),
@@ -4481,9 +4470,7 @@ func _benchmark_start_phase(phase: String) -> void:
     _benchmark_phase_execution_totals.clear()
     _benchmark_phase_cuda_totals.clear()
 
-    var evaluation_pool := _benchmark_requested_eval_pool
-    if phase == "cpu" and _benchmark_cuda_eval_pool > 0:
-        evaluation_pool = _benchmark_cuda_eval_pool
+    var evaluation_pool := int(_population_spin.value)
 
     var args := _benchmark_evolution_args(phase, evaluation_pool)
     _benchmark_log(
@@ -4855,25 +4842,6 @@ func _benchmark_bottleneck_text(summary: Dictionary) -> String:
     return text
 
 
-func _benchmark_append_results_file() -> void:
-    var results_path := _benchmark_phase_file("results.evoresults")
-    var file := FileAccess.open(results_path, FileAccess.READ)
-    if file == null:
-        _benchmark_log(
-            "Full results file unavailable for %s: %s\n"
-            % [_benchmark_phase.to_upper(), results_path]
-        )
-        return
-    var text := file.get_as_text()
-    file.close()
-    _benchmark_log(
-        "\n--- %s FULL EVOLUTION RESULTS JSON ---\n" % _benchmark_phase.to_upper()
-        + text
-        + ("" if text.ends_with("\n") else "\n")
-        + "--- END FULL RESULTS JSON ---\n"
-    )
-
-
 func _benchmark_handle_event(event: Dictionary) -> void:
     var kind := str(event.get("kind", ""))
     _benchmark_log("EVENT %s\n" % JSON.stringify(event))
@@ -5053,7 +5021,6 @@ func _benchmark_handle_event(event: Dictionary) -> void:
         "evolution_complete":
             var process_telemetry := _benchmark_stop_process_telemetry(true)
             var telemetry := _benchmark_stop_gpu_telemetry(true)
-            _benchmark_append_results_file()
 
             var full_wall := float(event.get("wall_seconds", 0.0))
             var eval_wall := _benchmark_phase_eval_seconds
