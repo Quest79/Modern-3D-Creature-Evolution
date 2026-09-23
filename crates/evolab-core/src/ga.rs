@@ -12,7 +12,7 @@ use crate::{
     EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
     MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    TrialAggregation, crossover_brain_subtree, discover_cuda_devices, evaluate_fitness,
+    TrialAggregation, crossover_brain_subtree, evaluate_fitness,
     mutate_genome, run_cuda_creature_batch,
 };
 
