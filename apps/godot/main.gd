@@ -3479,7 +3479,6 @@ func _on_evolve_pressed() -> void:
         "--champion-output", champion_path,
         "--result-output", results_path,
         "--experiment-name", _experiment_name,
-        "--checkpoint-output", checkpoint_path,
     ])
     args.append_array(_accelerator_cli_args())
 
@@ -3552,7 +3551,6 @@ func _on_resume_evolution_pressed() -> void:
         "--champion-output", champion_path,
         "--result-output", results_path,
         "--experiment-name", _experiment_name,
-        "--checkpoint-output", checkpoint_path,
         "--resume-checkpoint", checkpoint_path,
     ])
     args.append_array(_accelerator_cli_args())
