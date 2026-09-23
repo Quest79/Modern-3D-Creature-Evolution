@@ -232,10 +232,15 @@ enum Command {
         #[arg(long, default_value_t = 0.5)]
         crossover: f32,
 
+        /// Maximum mutation opportunities per non-elite child.
         #[arg(long, default_value_t = 8)]
         mutations: usize,
 
-        /// Chance that a mutation operation attempts a structural body change.
+        /// Independent probability that each mutation opportunity occurs.
+        #[arg(long, default_value_t = 0.20)]
+        mutation_probability: f32,
+
+        /// Chance that an occurring mutation attempts a structural body change.
         #[arg(long, default_value_t = 0.30)]
         structural_mutation_chance: f32,
 
@@ -519,6 +524,7 @@ fn run() -> Result<(), String> {
             elite,
             crossover,
             mutations,
+            mutation_probability,
             structural_mutation_chance,
             max_segments,
             seed,
@@ -561,6 +567,7 @@ fn run() -> Result<(), String> {
             elite,
             crossover,
             mutations,
+            mutation_probability,
             structural_mutation_chance,
             max_segments,
             seed,
@@ -1157,6 +1164,7 @@ struct EvolveRequest<'a> {
     elite: usize,
     crossover: f32,
     mutations: usize,
+    mutation_probability: f32,
     structural_mutation_chance: f32,
     max_segments: usize,
     seed: u64,
@@ -1247,6 +1255,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         elite_count: request.elite,
         crossover_chance: request.crossover,
         mutations_per_child: request.mutations,
+        mutation_probability: request.mutation_probability,
         seed: request.seed,
         worker_threads: request.workers,
         simulation,
@@ -1307,6 +1316,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "elite": config.elite_count,
                 "crossover_chance": config.crossover_chance,
                 "mutations_per_child": config.mutations_per_child,
+                "mutation_probability": config.mutation_probability,
                 "structural_mutation_chance": config.mutation.structural_mutation_chance,
                 "fitness_weights": config.fitness.weights,
                 "motor_strength_multiplier": config.simulation.motor_strength_multiplier,
@@ -1366,6 +1376,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                         "offspring": summary.offspring,
                         "effective_population": summary.effective_settings.population_size,
                         "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
+                        "effective_mutation_probability": summary.effective_settings.mutation_probability,
                         "effective_structural_mutation_chance":
                             summary.effective_settings.mutation.structural_mutation_chance,
                         "effective_motor_strength_multiplier":
