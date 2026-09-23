@@ -18,31 +18,21 @@ jobs:
           p = Path('crates/evolab-core/src/ga.rs')
           s = p.read_text()
           pattern = r'    pub fn effective_evaluation_pool_size\(&self\) -> usize \{.*?\n    \}\n'
-          repl = '''    pub fn effective_evaluation_pool_size(&self) -> usize {
-              // CPU and CUDA evaluate the same survivor population. Acceleration changes only wall time.
-              self.population_size
-          }
-'''
+          repl = "    pub fn effective_evaluation_pool_size(&self) -> usize {\n        // CPU and CUDA evaluate the same survivor population. Acceleration changes only wall time.\n        self.population_size\n    }\n"
           s, n = re.subn(pattern, repl, s, count=1, flags=re.S)
-          if n != 1:
-              raise SystemExit(f'expected one effective_evaluation_pool_size function, replaced {n}')
+          if n != 1: raise SystemExit(f'expected one pool function, replaced {n}')
           pattern2 = r'fn cuda_saturation_pool_target\(config: &EvolutionConfig\) -> usize \{.*?\n\}'
-          repl2 = '''fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
-              config.effective_evaluation_pool_size()
-          }'''
+          repl2 = "fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {\n    config.effective_evaluation_pool_size()\n}"
           s, n2 = re.subn(pattern2, repl2, s, count=1, flags=re.S)
-          if n2 != 1:
-              raise SystemExit(f'expected one cuda_saturation_pool_target function, replaced {n2}')
+          if n2 != 1: raise SystemExit(f'expected one CUDA pool function, replaced {n2}')
           p.write_text(s)
       - name: Verify identical workload
         shell: python
         run: |
           from pathlib import Path
           s = Path('crates/evolab-core/src/ga.rs').read_text()
-          if 'saturation_target' in s:
-              raise SystemExit('CUDA saturation expansion still present')
-          if 'pub fn effective_evaluation_pool_size(&self) -> usize {\n        // CPU and CUDA evaluate the same survivor population. Acceleration changes only wall time.\n        self.population_size\n    }' not in s:
-              raise SystemExit('backend-independent candidate workload not installed')
+          if 'saturation_target' in s: raise SystemExit('CUDA saturation expansion still present')
+          if 'CPU and CUDA evaluate the same survivor population' not in s: raise SystemExit('identical workload change missing')
       - name: Commit fix
         run: |
           git config user.name "github-actions[bot]"
