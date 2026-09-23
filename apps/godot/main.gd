@@ -34,6 +34,7 @@ var _tournament_spin: SpinBox
 var _elite_spin: SpinBox
 var _crossover_spin: SpinBox
 var _evolution_mutations_spin: SpinBox
+var _mutation_probability_spin: SpinBox
 var _structural_mutation_spin: SpinBox
 var _motor_strength_spin: SpinBox
 var _trials_spin: SpinBox
@@ -720,7 +721,19 @@ func _build_ui() -> void:
     _elite_spin = _add_number_row(evolution_section, "Elite kept", 1, 999, 2, 1)
     _crossover_spin = _add_number_row(evolution_section, "Brain crossover", 0.0, 1.0, 0.5, 0.05)
     _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
-    _evolution_mutations_spin = _add_number_row(evolution_section, "Mutations / child", 1, 500, 8, 1)
+    _evolution_mutations_spin = _add_number_row(
+        evolution_section, "Mutation opportunities / child", 1, 500, 8, 1
+    )
+    _evolution_mutations_spin.tooltip_text = (
+        "Maximum independent mutation opportunities for each non-elite child."
+    )
+    _mutation_probability_spin = _add_number_row(
+        evolution_section, "Mutation probability", 0.0, 1.0, 0.20, 0.01
+    )
+    _mutation_probability_spin.tooltip_text = (
+        "Chance each mutation opportunity actually occurs. With 8 opportunities at 20%, "
+        + "offspring average 1.6 mutations and some inherit with none."
+    )
     _structural_mutation_spin = _add_number_row(
         evolution_section,
         "Structural mutation chance",
@@ -754,6 +767,7 @@ func _build_ui() -> void:
     _trial_aggregation_option.item_selected.connect(_on_trial_aggregation_selected)
     aggregation_row.add_child(_trial_aggregation_option)
 
+    _mutation_probability_spin.value_changed.connect(_on_schedule_base_changed)
     _structural_mutation_spin.value_changed.connect(_on_schedule_base_changed)
     _motor_strength_spin.value_changed.connect(_on_schedule_base_changed)
     _trials_spin.value_changed.connect(_on_schedule_base_changed)
@@ -2458,6 +2472,7 @@ func _timeline_snapshot_changes() -> Dictionary:
         "fitness": _fitness_config_dictionary(),
         "population_size": int(_population_spin.value),
         "mutations_per_child": int(_evolution_mutations_spin.value),
+        "mutation_probability": float(_mutation_probability_spin.value),
         "structural_mutation_chance": float(_structural_mutation_spin.value),
         "motor_strength_multiplier": float(_motor_strength_spin.value),
         "trial_duration_seconds": float(_seconds_spin.value),
@@ -3486,6 +3501,7 @@ func _on_evolve_pressed() -> void:
         "--elite", str(int(_elite_spin.value)),
         "--crossover", str(_crossover_spin.value),
         "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--mutation-probability", str(_mutation_probability_spin.value),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(evolution_seed),
@@ -3558,6 +3574,7 @@ func _on_resume_evolution_pressed() -> void:
         "--elite", str(int(_elite_spin.value)),
         "--crossover", str(_crossover_spin.value),
         "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--mutation-probability", str(_mutation_probability_spin.value),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(int(_seed_spin.value)),
@@ -3708,6 +3725,7 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
             "elite_count": int(_elite_spin.value),
             "crossover_chance": float(_crossover_spin.value),
             "mutations_per_child": int(_evolution_mutations_spin.value),
+            "mutation_probability": float(_mutation_probability_spin.value),
             "seed": int(_seed_spin.value),
             "worker_threads": int(_workers_spin.value),
             "simulation": {
@@ -3831,6 +3849,9 @@ func _apply_experiment_dictionary(experiment: Dictionary) -> bool:
     )
     _evolution_mutations_spin.value = int(
         evolution.get("mutations_per_child", _evolution_mutations_spin.value)
+    )
+    _mutation_probability_spin.value = float(
+        evolution.get("mutation_probability", _mutation_probability_spin.value)
     )
     _seed_spin.value = int(evolution.get("seed", _seed_spin.value))
     _workers_spin.value = int(
@@ -4449,6 +4470,7 @@ func _benchmark_evolution_args(backend: String, evaluation_pool: int) -> PackedS
         "--elite", str(int(_elite_spin.value)),
         "--crossover", str(_crossover_spin.value),
         "--mutations", str(int(_evolution_mutations_spin.value)),
+        "--mutation-probability", str(_mutation_probability_spin.value),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(int(_seed_spin.value)),
@@ -5499,6 +5521,11 @@ func _handle_event(event: Dictionary) -> void:
                     % str(event.get("effective_population", 0))
                 + "[cell]Candidates evaluated / gen[/cell][cell]%s[/cell]"
                     % str(event.get("evaluation_pool_size", event.get("effective_population", 0)))
+                + "[cell]Mutation probability[/cell][cell]%.0f%% × %s opportunities[/cell]"
+                    % [
+                        float(event.get("effective_mutation_probability", 0.20)) * 100.0,
+                        str(event.get("effective_mutations_per_child", 8)),
+                    ]
                 + "[cell]Trials / creature[/cell][cell]%s (%s)[/cell]"
                     % [
                         str(event.get("effective_trials_per_creature", 1)),
