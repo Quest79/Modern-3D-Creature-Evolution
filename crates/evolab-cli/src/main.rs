@@ -11,10 +11,10 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile,
-    FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
-    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
-    discover_cuda_devices, evolve_population_checkpointed, mutate_genome, random_creature,
-    run_cuda_probe_batch,
+    FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec,
+    RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation,
+    WorldConfig, WorldSnapshot, discover_cuda_devices, evolve_population_checkpointed,
+    mutate_genome, random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
@@ -1257,11 +1257,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         let mut ancestor_rng = GenomeRng::new(request.seed ^ 0xA5A5_D3C4_91E1_77B9);
         let max_segments = request.max_segments.max(2);
         let target_segments = 2 + ancestor_rng.range_usize(max_segments - 1);
-        let generated = random_creature(
-            ancestor_rng.next_seed(),
-            target_segments,
-            &mutation_config,
-        )?;
+        let generated =
+            random_creature(ancestor_rng.next_seed(), target_segments, &mutation_config)?;
         (
             generated.genome,
             format!("random:{target_segments}-segments"),
