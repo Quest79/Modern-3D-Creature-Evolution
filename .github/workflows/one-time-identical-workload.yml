@@ -1,0 +1,48 @@
+name: One-time fix identical CPU CUDA workload
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-identical-workload.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove CUDA-only evaluation pool inflation
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          p = Path('crates/evolab-core/src/ga.rs')
+          s = p.read_text()
+          pattern = r'fn cuda_saturation_pool_target\(config: &EvolutionConfig\) -> usize \{.*?\n\}\n\n#\[derive\(Clone\)\]'
+          repl = '''fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
+              // CPU and CUDA must perform identical evolutionary work. Hardware only changes wall time.
+              config.effective_evaluation_pool_size()
+          }
+
+          #[derive(Clone)]'''
+          s2, n = re.subn(pattern, repl, s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'expected exactly one CUDA saturation function, replaced {n}')
+          p.write_text(s2)
+      - name: Verify CPU pool behavior was not changed
+        shell: python
+        run: |
+          from pathlib import Path
+          s = Path('crates/evolab-core/src/ga.rs').read_text()
+          expected = '''if self.accelerator.mode != AcceleratorMode::Cuda || self.evaluation_pool_size == 0 {
+                      self.population_size'''
+          if expected not in s:
+              raise SystemExit('CPU evaluation-pool behavior changed unexpectedly; refusing commit')
+          if 'saturation_target' in s:
+              raise SystemExit('CUDA saturation expansion still present')
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/evolab-core/src/ga.rs
+          git commit -m "Keep CPU workload unchanged and stop CUDA pool inflation"
+          git push
