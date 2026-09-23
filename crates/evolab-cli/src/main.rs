@@ -1328,6 +1328,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         &ancestor,
         &config,
         resume_checkpoint.as_ref(),
+        request.checkpoint_output.is_some(),
         |summary| {
             if let Some(path) = request.champion_output {
                 write_genome(path, &summary.champion)?;
@@ -1524,6 +1525,7 @@ fn run_experiment(
         &experiment.ancestor,
         &experiment.evolution,
         checkpoint.as_ref(),
+        checkpoint_output.is_some(),
         |summary| {
             if !json_output {
                 println!(
