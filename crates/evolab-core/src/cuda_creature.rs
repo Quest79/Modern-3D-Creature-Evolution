@@ -12,6 +12,17 @@ pub struct CudaCreatureBatchResult {
     pub execution: ExecutionPerformance,
 }
 
+static CUDA_CREATURE_DEVICE_CACHE: std::sync::OnceLock<Result<Vec<crate::CudaDeviceInfo>, String>> =
+    std::sync::OnceLock::new();
+
+fn cached_cuda_devices() -> Result<&'static [crate::CudaDeviceInfo], String> {
+    CUDA_CREATURE_DEVICE_CACHE
+        .get_or_init(discover_cuda_devices)
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 pub fn run_cuda_creature_batch(
     genomes: &[CreatureGenome],
     simulation: &SimulationConfig,
@@ -37,11 +48,14 @@ pub fn run_cuda_creature_batch(
         }
     }
 
-    let devices = discover_cuda_devices()?;
+    // Device topology is stable for the lifetime of the app. Discovering devices
+    // creates a temporary CUDA context, so doing it every generation adds large
+    // host-side latency that has nothing to do with creature simulation.
+    let devices = cached_cuda_devices()?;
     if devices.is_empty() {
         return Err("no CUDA devices were found".into());
     }
-    let selected = accelerator.selected_gpu_ids(&devices)?;
+    let selected = accelerator.selected_gpu_ids(devices)?;
     if selected.is_empty() {
         return Err("no CUDA devices were selected".into());
     }
@@ -52,7 +66,7 @@ pub fn run_cuda_creature_batch(
         simulation,
         fitness,
         accelerator,
-        &devices,
+        devices,
         &assignments,
     )
 }
@@ -1253,16 +1267,10 @@ mod platform {
         let started = Instant::now();
         let mut all_results = Vec::with_capacity(genomes.len());
 
-        // Do not let a small UI batch setting split a saturation-sized generation
-        // into underfilled launches. The 8-lane creature kernel needs roughly
-        // 128 creatures per SM to keep enough independent warps ready.
-        let saturation_batch =
-            (device_info.multiprocessor_count.max(1) as usize).saturating_mul(128);
-        let batch_size = accelerator
-            .batch_size
-            .max(saturation_batch)
-            .max(1)
-            .min(genomes.len());
+        // A generation is one fixed evolutionary workload. Keep every candidate
+        // assigned to this GPU in the same CUDA launch instead of serializing it
+        // into smaller chunks based on a UI batch-size knob.
+        let batch_size = genomes.len().max(1);
         let mut offset = 0usize;
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
@@ -1398,10 +1406,13 @@ mod platform {
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
 
-        const CUDA_CONCURRENT_LANES: usize = 3;
-        const CUDA_GROUP_SIZE: u32 = 8;
-        const CUDA_BLOCK_SIZE: u32 = 64;
-        const CUDA_CREATURES_PER_BLOCK: u32 = CUDA_BLOCK_SIZE / CUDA_GROUP_SIZE;
+        // One full warp owns one creature. With one warp/block, a 50-creature
+        // generation launches 50 independent blocks so the GPU scheduler can
+        // place the whole generation across the SMs concurrently.
+        const CUDA_CONCURRENT_LANES: usize = 1;
+        const CUDA_GROUP_SIZE: u32 = 32;
+        const CUDA_BLOCK_SIZE: u32 = 32;
+        const CUDA_CREATURES_PER_BLOCK: u32 = 1;
         telemetry.block_size = CUDA_BLOCK_SIZE;
         telemetry.creature_group_size = CUDA_GROUP_SIZE;
         telemetry.creatures_per_block = CUDA_CREATURES_PER_BLOCK;
@@ -1681,20 +1692,17 @@ extern "C" __global__ void simulate_creatures(
     float weight_stability,
     float weight_energy
 ) {
-    // Eight-lane subwarps are a much better fit for the evolved creatures in
-    // this project (typically ~6-8 active joints/segments). Four creatures share
-    // each hardware warp and eight creatures share each 64-thread CUDA block.
-    const unsigned GROUP_SIZE = 8;
-    const unsigned CREATURES_PER_BLOCK = blockDim.x / GROUP_SIZE;
-    unsigned group_in_block = threadIdx.x / GROUP_SIZE;
-    unsigned lane = threadIdx.x & (GROUP_SIZE - 1);
-    unsigned local_world = blockIdx.x * CREATURES_PER_BLOCK + group_in_block;
+    // One hardware warp owns one creature. One 32-thread block therefore maps
+    // to one candidate, allowing a 50-candidate generation to expose 50
+    // independently schedulable blocks without changing the evolutionary work.
+    const unsigned GROUP_SIZE = 32;
+    const unsigned CREATURES_PER_BLOCK = 1;
+    unsigned lane = threadIdx.x & 31u;
+    unsigned local_world = blockIdx.x;
     if (local_world >= launch_world_count) return;
 
     unsigned world = world_start + local_world;
-    unsigned warp_lane = threadIdx.x & 31u;
-    unsigned subgroup_base = warp_lane & ~(GROUP_SIZE - 1u);
-    unsigned subgroup_mask = 0xFFu << subgroup_base;
+    const unsigned subgroup_mask = 0xFFFFFFFFu;
 
     unsigned pc = part_count[world];
     unsigned jc = joint_count[world];
@@ -1745,8 +1753,8 @@ extern "C" __global__ void simulate_creatures(
         }
         __syncwarp(subgroup_mask);
 
-        // Each lane owns one or more joint brains. With normal 6-8 joint
-        // creatures this keeps nearly the entire subgroup busy.
+        // Lanes cooperatively own the creature's joint brains. Larger creatures
+        // automatically spread work across more lanes of the same warp.
         for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
             unsigned js = joint_base + j;
             float target = eval_brain(
