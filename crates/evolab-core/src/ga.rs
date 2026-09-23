@@ -264,13 +264,21 @@ pub fn evolve_population<F>(
 where
     F: FnMut(&GenerationSummary) -> Result<(), String>,
 {
-    evolve_population_checkpointed(ancestor, config, None, on_generation, |_checkpoint| Ok(()))
+    evolve_population_checkpointed(
+        ancestor,
+        config,
+        None,
+        false,
+        on_generation,
+        |_checkpoint| Ok(()),
+    )
 }
 
 pub fn evolve_population_checkpointed<F, C>(
     ancestor: &CreatureGenome,
     config: &EvolutionConfig,
     resume: Option<&EvolutionCheckpoint>,
+    checkpointing_enabled: bool,
     mut on_generation: F,
     mut on_checkpoint: C,
 ) -> Result<EvolutionResult, String>
@@ -544,33 +552,35 @@ where
             last.offspring = offspring_telemetry.clone();
         }
 
-        let checkpoint_build_started = Instant::now();
-        let mut active_ids: Vec<String> = active_condition_ids.iter().cloned().collect();
-        active_ids.sort();
-        let checkpoint = EvolutionCheckpoint {
-            format_version: CHECKPOINT_FORMAT_VERSION,
-            config: config.clone(),
-            next_generation: generation + 1,
-            rng_state: rng.state(),
-            next_individual_id,
-            active_condition_ids: active_ids,
-            population: population
-                .iter()
-                .cloned()
-                .map(CheckpointCandidate::from)
-                .collect(),
-            evaluations_completed,
-            final_settings: final_settings.clone(),
-            last_champion: final_champion.clone(),
-            champion_archive: champion_archive.clone(),
-            history: history.clone(),
-        };
-        checkpoint.validate()?;
-        timing.checkpoint_build_seconds = checkpoint_build_started.elapsed().as_secs_f64();
+        if checkpointing_enabled {
+            let checkpoint_build_started = Instant::now();
+            let mut active_ids: Vec<String> = active_condition_ids.iter().cloned().collect();
+            active_ids.sort();
+            let checkpoint = EvolutionCheckpoint {
+                format_version: CHECKPOINT_FORMAT_VERSION,
+                config: config.clone(),
+                next_generation: generation + 1,
+                rng_state: rng.state(),
+                next_individual_id,
+                active_condition_ids: active_ids,
+                population: population
+                    .iter()
+                    .cloned()
+                    .map(CheckpointCandidate::from)
+                    .collect(),
+                evaluations_completed,
+                final_settings: final_settings.clone(),
+                last_champion: final_champion.clone(),
+                champion_archive: champion_archive.clone(),
+                history: history.clone(),
+            };
+            checkpoint.validate()?;
+            timing.checkpoint_build_seconds = checkpoint_build_started.elapsed().as_secs_f64();
 
-        let checkpoint_write_started = Instant::now();
-        on_checkpoint(&checkpoint)?;
-        timing.checkpoint_write_seconds = checkpoint_write_started.elapsed().as_secs_f64();
+            let checkpoint_write_started = Instant::now();
+            on_checkpoint(&checkpoint)?;
+            timing.checkpoint_write_seconds = checkpoint_write_started.elapsed().as_secs_f64();
+        }
         timing.total_wall_seconds = generation_started.elapsed().as_secs_f64();
 
         if let Some(last) = history.last_mut() {
