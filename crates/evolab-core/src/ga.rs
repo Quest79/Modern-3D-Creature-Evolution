@@ -105,11 +105,8 @@ impl EvolutionConfig {
     }
 
     pub fn effective_evaluation_pool_size(&self) -> usize {
-        if self.accelerator.mode != AcceleratorMode::Cuda || self.evaluation_pool_size == 0 {
-            self.population_size
-        } else {
-            self.evaluation_pool_size.max(self.population_size)
-        }
+        // CPU and CUDA evaluate the same survivor population. Acceleration changes only wall time.
+        self.population_size
     }
 }
 
@@ -701,7 +698,6 @@ fn initial_population(
 }
 
 fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
-    // CPU and CUDA must perform identical evolutionary work. Hardware only changes wall time.
     config.effective_evaluation_pool_size()
 }
 
