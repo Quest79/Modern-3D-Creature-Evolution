@@ -38,7 +38,6 @@ pub struct LineageRecord {
     pub brain_nodes: usize,
     pub trial_seeds: Vec<u64>,
     pub mutations: Vec<MutationRecord>,
-    pub genome: CreatureGenome,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
