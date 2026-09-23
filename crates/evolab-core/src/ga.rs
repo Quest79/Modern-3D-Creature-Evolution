@@ -701,29 +701,8 @@ fn initial_population(
 }
 
 fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
-    let requested = config.effective_evaluation_pool_size();
-    if config.accelerator.mode != AcceleratorMode::Cuda {
-        return requested;
-    }
-
-    let Ok(devices) = discover_cuda_devices() else {
-        return requested;
-    };
-    let Ok(selected) = config.accelerator.selected_gpu_ids(&devices) else {
-        return requested;
-    };
-
-    // The CUDA kernel packs four 8-lane creature groups into each hardware warp.
-    // Queue about 32 warps per SM so the scheduler has enough independent work
-    // to hide memory / transcendental latency without changing the survivor population.
-    let sm_count = devices
-        .iter()
-        .filter(|device| selected.contains(&device.id))
-        .map(|device| device.multiprocessor_count.max(0) as usize)
-        .sum::<usize>();
-    let saturation_target = sm_count.saturating_mul(32).saturating_mul(4);
-
-    requested.max(saturation_target).min(1_000_000)
+    // CPU and CUDA must perform identical evolutionary work. Hardware only changes wall time.
+    config.effective_evaluation_pool_size()
 }
 
 #[derive(Clone)]
