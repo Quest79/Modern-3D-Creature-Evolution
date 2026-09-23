@@ -1292,6 +1292,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         crossover_chance: request.crossover,
         mutations_per_child: request.mutations,
         mutation_probability: request.mutation_probability,
+        seed_population_from_ancestor: request.genome_path.is_some(),
         seed: request.seed,
         worker_threads: request.workers,
         simulation,
