@@ -14,6 +14,14 @@ pub struct MutationConfig {
     pub min_half_extent: f32,
     pub max_half_extent: f32,
     pub structural_mutation_chance: f32,
+    /// Fraction of structural mutations that become a larger morphology change
+    /// such as adding a multi-segment limb.
+    #[serde(default = "default_major_structural_mutation_chance")]
+    pub major_structural_mutation_chance: f32,
+}
+
+fn default_major_structural_mutation_chance() -> f32 {
+    0.10
 }
 
 impl Default for MutationConfig {
@@ -26,6 +34,7 @@ impl Default for MutationConfig {
             min_half_extent: 0.0001,
             max_half_extent: 15.0,
             structural_mutation_chance: 0.30,
+            major_structural_mutation_chance: default_major_structural_mutation_chance(),
         }
     }
 }
@@ -50,6 +59,11 @@ impl MutationConfig {
         {
             return Err("structural_mutation_chance must be between 0 and 1".into());
         }
+        if !self.major_structural_mutation_chance.is_finite()
+            || !(0.0..=1.0).contains(&self.major_structural_mutation_chance)
+        {
+            return Err("major_structural_mutation_chance must be between 0 and 1".into());
+        }
         Ok(())
     }
 }
@@ -67,6 +81,7 @@ pub enum MutationKind {
     WrapBrainExpression,
     WrapBrainSubtree,
     AddSegment,
+    AddLimb,
     RemoveLeafSegment,
 }
 
@@ -171,8 +186,15 @@ pub fn mutate_genome(
     for _ in 0..mutation_count {
         let structural = rng.chance(config.structural_mutation_chance);
         let record = if structural {
-            mutate_structure(&mut genome, &mut rng, config)
-                .or_else(|| mutate_numeric(&mut genome, &mut rng, config))
+            let major = rng.chance(config.major_structural_mutation_chance);
+            if major {
+                add_limb(&mut genome, &mut rng, config)
+                    .or_else(|| mutate_structure(&mut genome, &mut rng, config))
+                    .or_else(|| mutate_numeric(&mut genome, &mut rng, config))
+            } else {
+                mutate_structure(&mut genome, &mut rng, config)
+                    .or_else(|| mutate_numeric(&mut genome, &mut rng, config))
+            }
         } else {
             mutate_numeric(&mut genome, &mut rng, config)
                 .or_else(|| mutate_structure(&mut genome, &mut rng, config))
@@ -720,9 +742,70 @@ fn add_segment(
     if genome.segments.len() >= config.max_segments {
         return None;
     }
+    let parent_id = genome
+        .segments
+        .get(rng.range_usize(genome.segments.len()))?
+        .id;
+    add_segment_to_parent(genome, rng, config, parent_id).map(|(record, _)| record)
+}
 
-    let parent_index = rng.range_usize(genome.segments.len());
-    let parent = genome.segments.get(parent_index)?.clone();
+fn add_limb(
+    genome: &mut CreatureGenome,
+    rng: &mut GenomeRng,
+    config: &MutationConfig,
+) -> Option<MutationRecord> {
+    let available = config.max_segments.saturating_sub(genome.segments.len());
+    if available < 2 || genome.segments.is_empty() {
+        return None;
+    }
+
+    let original = genome.clone();
+    let root_parent_id = genome
+        .segments
+        .get(rng.range_usize(genome.segments.len()))?
+        .id;
+    let max_limb_segments = available.min(4);
+    let limb_segments = 2 + rng.range_usize(max_limb_segments - 1);
+    let mut parent_id = root_parent_id;
+    let mut added_ids = Vec::with_capacity(limb_segments);
+
+    for _ in 0..limb_segments {
+        let Some((_record, child_id)) =
+            add_segment_to_parent(genome, rng, config, parent_id)
+        else {
+            *genome = original;
+            return None;
+        };
+        added_ids.push(child_id);
+        parent_id = child_id;
+    }
+
+    Some(MutationRecord {
+        kind: MutationKind::AddLimb,
+        description: format!(
+            "major morphology mutation added {}-segment limb {:?} to parent {}",
+            added_ids.len(),
+            added_ids,
+            root_parent_id
+        ),
+    })
+}
+
+fn add_segment_to_parent(
+    genome: &mut CreatureGenome,
+    rng: &mut GenomeRng,
+    config: &MutationConfig,
+    parent_id: u32,
+) -> Option<(MutationRecord, u32)> {
+    if genome.segments.len() >= config.max_segments {
+        return None;
+    }
+
+    let parent = genome
+        .segments
+        .iter()
+        .find(|segment| segment.id == parent_id)?
+        .clone();
     let id = genome
         .segments
         .iter()
@@ -791,8 +874,6 @@ fn add_segment(
         motor_amplitude_radians: rng.range_f32(0.15, 0.85),
         motor_frequency_hz: seed_frequency_hz,
         motor_phase_radians: rng.range_f32(0.0, std::f32::consts::TAU),
-        // Kept in the file format for compatibility; runtime gains are derived
-        // from physical inertia and the current biological torque ceiling.
         motor_stiffness: 0.0,
         motor_damping: 0.0,
         motor_max_torque: 0.0,
@@ -801,19 +882,18 @@ fn add_segment(
     joint.motor_max_torque = biological_torque_limit * rng.range_f32(0.05, 0.15);
     genome.joints.push(joint);
 
-    // If a downward structural mutation would intersect the floor, translate
-    // the entire morphology together. Moving only the new child would separate
-    // the two joint anchors and force the constraint solver to inject energy.
     lift_genome_above_floor(genome, 0.001);
-
     genome
         .brain
         .sync_with_structure(&genome.joints, &genome.segments);
 
-    Some(MutationRecord {
-        kind: MutationKind::AddSegment,
-        description: format!("added segment {id} to parent {}", parent.id),
-    })
+    Some((
+        MutationRecord {
+            kind: MutationKind::AddSegment,
+            description: format!("added segment {id} to parent {}", parent.id),
+        },
+        id,
+    ))
 }
 
 fn lift_genome_above_floor(genome: &mut CreatureGenome, clearance_m: f32) {
@@ -890,6 +970,21 @@ mod tests {
         let result = random_creature(42, 6, &config).unwrap();
         assert_eq!(result.genome.segments.len(), 6);
         assert!(result.genome.validate().is_ok());
+    }
+
+    #[test]
+    fn major_structural_mutation_can_add_a_multi_segment_limb() {
+        let mut genome = CreatureGenome::three_segment_walker();
+        let mut rng = super::GenomeRng::new(12345);
+        let config = MutationConfig {
+            max_segments: 12,
+            ..MutationConfig::default()
+        };
+        let before = genome.segments.len();
+        let record = super::add_limb(&mut genome, &mut rng, &config).unwrap();
+        assert_eq!(record.kind, super::MutationKind::AddLimb);
+        assert!(genome.segments.len() >= before + 2);
+        assert!(genome.validate().is_ok());
     }
 
     #[test]
