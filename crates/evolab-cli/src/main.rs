@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -1696,10 +1697,19 @@ fn write_results_file(
         result.clone(),
     );
     results.validate()?;
-    let json = serde_json::to_string_pretty(&results)
+
+    // Stream compact JSON directly to disk instead of first constructing one
+    // enormous pretty-printed String in memory. Results can contain thousands
+    // of lineage rows, so the old path caused a large end-of-run allocation and
+    // a visible pause before the write even began.
+    let file = fs::File::create(path)
+        .map_err(|err| format!("failed to create results {}: {err}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(&mut writer, &results)
         .map_err(|err| format!("failed to serialize evolution results: {err}"))?;
-    fs::write(path, json)
-        .map_err(|err| format!("failed to write results {}: {err}", path.display()))
+    writer
+        .flush()
+        .map_err(|err| format!("failed to flush results {}: {err}", path.display()))
 }
 
 fn write_genome(path: &PathBuf, genome: &CreatureGenome) -> Result<(), String> {
