@@ -1,4 +1,4 @@
-name: One-time fix identical CPU CUDA workload
+name: One-time enforce identical CPU CUDA workload
 on:
   push:
     paths:
@@ -10,39 +10,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Remove CUDA-only evaluation pool inflation
+      - name: Make candidate workload backend-independent
         shell: python
         run: |
           from pathlib import Path
           import re
           p = Path('crates/evolab-core/src/ga.rs')
           s = p.read_text()
-          pattern = r'fn cuda_saturation_pool_target\(config: &EvolutionConfig\) -> usize \{.*?\n\}\n\n#\[derive\(Clone\)\]'
-          repl = '''fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
-              // CPU and CUDA must perform identical evolutionary work. Hardware only changes wall time.
-              config.effective_evaluation_pool_size()
+          pattern = r'    pub fn effective_evaluation_pool_size\(&self\) -> usize \{.*?\n    \}\n'
+          repl = '''    pub fn effective_evaluation_pool_size(&self) -> usize {
+              // CPU and CUDA evaluate the same survivor population. Acceleration changes only wall time.
+              self.population_size
           }
-
-          #[derive(Clone)]'''
-          s2, n = re.subn(pattern, repl, s, count=1, flags=re.S)
+'''
+          s, n = re.subn(pattern, repl, s, count=1, flags=re.S)
           if n != 1:
-              raise SystemExit(f'expected exactly one CUDA saturation function, replaced {n}')
-          p.write_text(s2)
-      - name: Verify CPU pool behavior was not changed
+              raise SystemExit(f'expected one effective_evaluation_pool_size function, replaced {n}')
+          pattern2 = r'fn cuda_saturation_pool_target\(config: &EvolutionConfig\) -> usize \{.*?\n\}'
+          repl2 = '''fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
+              config.effective_evaluation_pool_size()
+          }'''
+          s, n2 = re.subn(pattern2, repl2, s, count=1, flags=re.S)
+          if n2 != 1:
+              raise SystemExit(f'expected one cuda_saturation_pool_target function, replaced {n2}')
+          p.write_text(s)
+      - name: Verify identical workload
         shell: python
         run: |
           from pathlib import Path
           s = Path('crates/evolab-core/src/ga.rs').read_text()
-          expected = '''if self.accelerator.mode != AcceleratorMode::Cuda || self.evaluation_pool_size == 0 {
-                      self.population_size'''
-          if expected not in s:
-              raise SystemExit('CPU evaluation-pool behavior changed unexpectedly; refusing commit')
           if 'saturation_target' in s:
               raise SystemExit('CUDA saturation expansion still present')
+          if 'pub fn effective_evaluation_pool_size(&self) -> usize {\n        // CPU and CUDA evaluate the same survivor population. Acceleration changes only wall time.\n        self.population_size\n    }' not in s:
+              raise SystemExit('backend-independent candidate workload not installed')
       - name: Commit fix
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crates/evolab-core/src/ga.rs
-          git commit -m "Keep CPU workload unchanged and stop CUDA pool inflation"
+          git commit -m "Make CPU and CUDA process identical candidate workloads"
           git push
