@@ -36,6 +36,7 @@ var _crossover_spin: SpinBox
 var _evolution_mutations_spin: SpinBox
 var _mutation_probability_spin: SpinBox
 var _structural_mutation_spin: SpinBox
+var _major_structural_mutation_spin: SpinBox
 var _motor_strength_spin: SpinBox
 var _trials_spin: SpinBox
 var _trial_aggregation_option: OptionButton
@@ -80,6 +81,7 @@ var _load_button: Button
 var _live_button: Button
 var _batch_button: Button
 var _evolve_button: Button
+var _continue_champion_button: Button
 var _resume_evolution_button: Button
 var _watch_champion_button: Button
 var _stop_button: Button
@@ -178,6 +180,7 @@ var _motor_strength := 1.0
 var _trials_per_creature := 1
 var _trial_aggregation := "mean"
 var _structural_mutation_chance := 0.30
+var _major_structural_mutation_chance := 0.10
 var _timeline_entries: Array = []
 var _timeline_next_id := 1
 var _experiment_name := "Experiment"
@@ -617,26 +620,44 @@ func _build_ui() -> void:
     quick_section.add_child(quick_evolution_row)
 
     _evolve_button = Button.new()
-    _evolve_button.text = "🧬 Start Evolution"
+    _evolve_button.text = "🧬 Start New Evolution"
+    _evolve_button.tooltip_text = (
+        "Generate a fresh random founder morphology, then evolve it."
+    )
     _evolve_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _evolve_button.pressed.connect(_on_evolve_pressed)
     quick_evolution_row.add_child(_evolve_button)
 
+    _continue_champion_button = Button.new()
+    _continue_champion_button.text = "Continue Champion"
+    _continue_champion_button.tooltip_text = (
+        "Use the current/final champion as the founder and evolve it for the "
+        + "configured number of additional generations."
+    )
+    _continue_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _continue_champion_button.disabled = true
+    _continue_champion_button.pressed.connect(_on_continue_champion_pressed)
+    quick_evolution_row.add_child(_continue_champion_button)
+
+    var quick_evolution_row_2 := HBoxContainer.new()
+    quick_evolution_row_2.add_theme_constant_override("separation", 6)
+    quick_section.add_child(quick_evolution_row_2)
+
     _resume_evolution_button = Button.new()
-    _resume_evolution_button.text = "Resume"
+    _resume_evolution_button.text = "Resume Checkpoint"
     _resume_evolution_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _resume_evolution_button.disabled = not FileAccess.file_exists(
         _evolution_checkpoint_path()
     )
     _resume_evolution_button.pressed.connect(_on_resume_evolution_pressed)
-    quick_evolution_row.add_child(_resume_evolution_button)
+    quick_evolution_row_2.add_child(_resume_evolution_button)
 
     _watch_champion_button = Button.new()
     _watch_champion_button.text = "Watch Champion"
     _watch_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _watch_champion_button.disabled = true
     _watch_champion_button.pressed.connect(_on_watch_champion_pressed)
-    quick_evolution_row.add_child(_watch_champion_button)
+    quick_evolution_row_2.add_child(_watch_champion_button)
 
     _stop_button = Button.new()
     _stop_button.text = "■ Stop Current Run"
@@ -742,6 +763,20 @@ func _build_ui() -> void:
         _structural_mutation_chance,
         0.01
     )
+    _structural_mutation_spin.tooltip_text = (
+        "Chance an occurring mutation changes body structure instead of only a trait/brain value."
+    )
+    _major_structural_mutation_spin = _add_number_row(
+        evolution_section,
+        "Major structural mutation chance",
+        0.0,
+        1.0,
+        _major_structural_mutation_chance,
+        0.01
+    )
+    _major_structural_mutation_spin.tooltip_text = (
+        "Within structural mutations, chance of a larger jump such as adding a new 2-4 segment limb."
+    )
     _motor_strength_spin = _add_number_row(
         evolution_section, "Motor activation", 0.0, 1.0, _motor_strength, 0.01
     )
@@ -769,6 +804,7 @@ func _build_ui() -> void:
 
     _mutation_probability_spin.value_changed.connect(_on_schedule_base_changed)
     _structural_mutation_spin.value_changed.connect(_on_schedule_base_changed)
+    _major_structural_mutation_spin.value_changed.connect(_on_schedule_base_changed)
     _motor_strength_spin.value_changed.connect(_on_schedule_base_changed)
     _trials_spin.value_changed.connect(_on_schedule_base_changed)
 
@@ -1200,11 +1236,27 @@ func _build_results_window() -> void:
     load_champion_button.pressed.connect(_on_load_archived_champion)
     champion_buttons.add_child(load_champion_button)
 
+    var continue_champion_button := Button.new()
+    continue_champion_button.text = "Continue Selected Champion"
+    continue_champion_button.tooltip_text = (
+        "Start a new evolution lineage from this generation champion for the "
+        + "currently configured number of generations."
+    )
+    continue_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    continue_champion_button.pressed.connect(_on_continue_archived_champion)
+    champion_buttons.add_child(continue_champion_button)
+
     var compare_champion_button := Button.new()
     compare_champion_button.text = "Compare Selected vs Final"
     compare_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     compare_champion_button.pressed.connect(_on_compare_archived_champion)
     champion_buttons.add_child(compare_champion_button)
+
+    var open_champions_button := Button.new()
+    open_champions_button.text = "Open Saved Champions"
+    open_champions_button.tooltip_text = "Open the persistent champions folder."
+    open_champions_button.pressed.connect(_on_open_champions_folder)
+    champions_tab.add_child(open_champions_button)
 
     var lineage_tab := VBoxContainer.new()
     lineage_tab.name = "Lineage"
@@ -2022,6 +2074,39 @@ func _on_load_archived_champion() -> void:
     )
 
 
+func _on_continue_archived_champion() -> void:
+    var selected := _results_champion_list.get_selected_items()
+    if selected.is_empty() or _results_data.is_empty():
+        return
+
+    var result: Dictionary = _results_data.get("result", {})
+    var archive: Array = result.get("champion_archive", [])
+    var index := int(selected[0])
+    if index < 0 or index >= archive.size():
+        return
+    if typeof(archive[index]) != TYPE_DICTIONARY:
+        return
+
+    var entry: Dictionary = archive[index]
+    var genome_value = entry.get("genome", {})
+    if typeof(genome_value) != TYPE_DICTIONARY:
+        _set_status("This results file does not retain that champion genome.")
+        return
+
+    _current_genome = genome_value.duplicate(true)
+    _current_genome_source = "generation %d champion #%s" % [
+        int(entry.get("generation", 0)),
+        str(entry.get("individual_id", 0)),
+    ]
+    _results_window.hide()
+    _start_evolution_run(true)
+
+
+func _on_open_champions_folder() -> void:
+    _ensure_portable_directories()
+    OS.shell_open(_portable_champions_dir())
+
+
 func _on_compare_archived_champion() -> void:
     var selected := _results_champion_list.get_selected_items()
     if selected.is_empty() or _results_data.is_empty():
@@ -2427,6 +2512,7 @@ func _on_fitness_weights_changed(_value: float) -> void:
 
 func _on_schedule_base_changed(_value: float) -> void:
     _structural_mutation_chance = float(_structural_mutation_spin.value)
+    _major_structural_mutation_chance = float(_major_structural_mutation_spin.value)
     _motor_strength = float(_motor_strength_spin.value)
     _trials_per_creature = int(_trials_spin.value)
     _save_settings()
@@ -2990,6 +3076,16 @@ func _load_settings() -> void:
         )
     )
     _structural_mutation_chance = clampf(_structural_mutation_chance, 0.0, 1.0)
+    _major_structural_mutation_chance = float(
+        config.get_value(
+            "evolution",
+            "major_structural_mutation_chance",
+            _major_structural_mutation_chance
+        )
+    )
+    _major_structural_mutation_chance = clampf(
+        _major_structural_mutation_chance, 0.0, 1.0
+    )
 
     _accelerator_mode = str(
         config.get_value("accelerator", "mode", _accelerator_mode)
@@ -3083,6 +3179,11 @@ func _save_settings() -> void:
         "evolution",
         "structural_mutation_chance",
         _structural_mutation_chance
+    )
+    config.set_value(
+        "evolution",
+        "major_structural_mutation_chance",
+        _major_structural_mutation_chance
     )
     config.set_value("accelerator", "mode", _accelerator_mode)
     config.set_value("accelerator", "gpu_ids", _gpu_ids)
@@ -3452,9 +3553,20 @@ func _on_random_pressed() -> void:
 
 
 func _on_evolve_pressed() -> void:
+    _start_evolution_run(false)
+
+
+func _on_continue_champion_pressed() -> void:
+    _start_evolution_run(true)
+
+
+func _start_evolution_run(continue_current: bool) -> void:
     if not _can_start_action("evolution"):
         return
 
+    if continue_current and _current_genome.is_empty():
+        _set_status("No champion/creature is loaded to continue.")
+        return
     if int(_tournament_spin.value) > int(_population_spin.value):
         _set_status("Tournament size cannot exceed population.")
         return
@@ -3468,7 +3580,12 @@ func _on_evolve_pressed() -> void:
     _results_data.clear()
     _results_button.disabled = true
     _watch_champion_button.disabled = true
-    _metrics.text = "[color=#9aa7bd]Creating and evaluating generation 1...[/color]"
+    _continue_champion_button.disabled = true
+    _metrics.text = (
+        "[color=#9aa7bd]Continuing champion lineage...[/color]"
+        if continue_current
+        else "[color=#9aa7bd]Generating a fresh random founder and generation 1...[/color]"
+    )
 
     var champion_path := _evolution_champion_path()
     var results_path := _evolution_results_path()
@@ -3486,9 +3603,6 @@ func _on_evolve_pressed() -> void:
         _set_status("Could not write runtime experiment configuration.")
         return
 
-    # A normal evolution run should explore a new stochastic lineage every time.
-    # Store the generated seed in the control/results so this exact run can still
-    # be reproduced deliberately if needed.
     var evolution_seed := _fresh_evolution_seed()
     _seed_spin.value = evolution_seed
 
@@ -3503,6 +3617,8 @@ func _on_evolve_pressed() -> void:
         "--mutations", str(int(_evolution_mutations_spin.value)),
         "--mutation-probability", str(_mutation_probability_spin.value),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
+        "--major-structural-mutation-chance",
+            str(_major_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(evolution_seed),
         "--workers", str(int(_workers_spin.value)),
@@ -3525,16 +3641,19 @@ func _on_evolve_pressed() -> void:
     ])
     args.append_array(_accelerator_cli_args())
 
-    if not _current_genome.is_empty():
+    if continue_current:
         var parent_path := _runtime_path("evolution_parent.json")
         if not _write_genome_file(parent_path, _current_genome):
-            _set_status("Could not write evolution parent genome.")
+            _set_status("Could not prepare champion as the next founder.")
             return
         args.append_array(PackedStringArray(["--genome", parent_path]))
+    else:
+        args.append("--random-ancestor")
 
-    _set_status("Starting evolution process...")
+    var run_label := "champion continuation" if continue_current else "new random lineage"
+    _set_status("Starting %s..." % run_label)
     if _start_job("evolution", args):
-        _set_status("Evolution process started • waiting for generation 1")
+        _set_status("%s started • waiting for generation 1" % run_label.capitalize())
 
 
 func _on_resume_evolution_pressed() -> void:
@@ -3576,6 +3695,7 @@ func _on_resume_evolution_pressed() -> void:
         "--mutations", str(int(_evolution_mutations_spin.value)),
         "--mutation-probability", str(_mutation_probability_spin.value),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
+        "--major-structural-mutation-chance", str(_major_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(int(_seed_spin.value)),
         "--workers", str(int(_workers_spin.value)),
@@ -3743,6 +3863,8 @@ func _experiment_dictionary(name_override := "") -> Dictionary:
                 "max_half_extent": 15.0,
                 "structural_mutation_chance":
                     float(_structural_mutation_spin.value),
+                "major_structural_mutation_chance":
+                    float(_major_structural_mutation_spin.value),
             },
             "trials_per_creature": int(_trials_spin.value),
             "trial_aggregation": _trial_aggregation_value(),
@@ -3906,6 +4028,12 @@ func _apply_experiment_dictionary(experiment: Dictionary) -> bool:
             mutation.get(
                 "structural_mutation_chance",
                 _structural_mutation_spin.value
+            )
+        )
+        _major_structural_mutation_spin.value = float(
+            mutation.get(
+                "major_structural_mutation_chance",
+                _major_structural_mutation_spin.value
             )
         )
 
@@ -4472,6 +4600,7 @@ func _benchmark_evolution_args(backend: String, evaluation_pool: int) -> PackedS
         "--mutations", str(int(_evolution_mutations_spin.value)),
         "--mutation-probability", str(_mutation_probability_spin.value),
         "--structural-mutation-chance", str(_structural_mutation_spin.value),
+        "--major-structural-mutation-chance", str(_major_structural_mutation_spin.value),
         "--max-segments", str(int(_max_segments_spin.value)),
         "--seed", str(int(_seed_spin.value)),
         "--workers", str(int(_workers_spin.value)),
@@ -5397,6 +5526,9 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
     _live_button.disabled = disabled
     _batch_button.disabled = disabled
     _evolve_button.disabled = disabled
+    _continue_champion_button.disabled = (
+        disabled or _current_genome.is_empty()
+    )
     _resume_evolution_button.disabled = (
         disabled or not FileAccess.file_exists(_evolution_checkpoint_path())
     )
@@ -5457,10 +5589,11 @@ func _handle_event(event: Dictionary) -> void:
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
             _set_status(
-                "Evolution started • %s survivors • requested eval pool %s • %s generations"
+                "Evolution started • %s founder • %s segments • %s survivors • %s generations"
                 % [
+                    str(event.get("ancestor_source", "unknown")),
+                    str(event.get("ancestor_segments", 0)),
                     str(event.get("population", 0)),
-                    str(event.get("evaluation_pool", event.get("population", 0))),
                     str(event.get("generations", 0)),
                 ]
             )
@@ -5563,6 +5696,7 @@ func _handle_event(event: Dictionary) -> void:
             )
             _build_creature_from_genome(_current_genome)
             _has_evolution_champion = not _current_genome.is_empty()
+            _continue_champion_button.disabled = _current_genome.is_empty()
 
             var final_settings_value = event.get("final_settings", {})
             if typeof(final_settings_value) == TYPE_DICTIONARY:
@@ -5608,7 +5742,9 @@ func _handle_event(event: Dictionary) -> void:
                     ]
                 + "[cell]Brain outputs[/cell][cell]%s[/cell]" % str(event.get("champion_brain_outputs", 0))
                 + "[cell]Wall time[/cell][cell]%.3f s[/cell]" % float(event.get("wall_seconds", 0.0))
-                + "[cell]Next[/cell][cell]Click Watch Champion[/cell]"
+                + "[cell]Saved champion[/cell][cell]%s[/cell]" % archived_champion
+                + "[cell]Next[/cell][cell]Watch it, or Continue Champion for another %s generations[/cell]"
+                    % str(int(_generations_spin.value))
                 + "[/table]"
             )
             _job_pid = 0
