@@ -12,8 +12,8 @@ use crate::{
     EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
     MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    TrialAggregation, crossover_brain_subtree, evaluate_fitness,
-    mutate_genome, run_cuda_creature_batch,
+    TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
+    run_cuda_creature_batch,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
