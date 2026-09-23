@@ -12,7 +12,7 @@ use crate::{
     EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
     FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
     MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
+    TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome, random_creature,
     run_cuda_creature_batch,
 };
 
@@ -679,50 +679,31 @@ fn sample_mutation_count(rng: &mut GenomeRng, opportunities: usize, probability:
 }
 
 fn initial_population(
-    ancestor: &CreatureGenome,
+    _ancestor: &CreatureGenome,
     settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
     next_individual_id: &mut u64,
 ) -> Result<Vec<Candidate>, String> {
     let mut population = Vec::with_capacity(settings.population_size);
-
-    let ancestor_id = *next_individual_id;
-    *next_individual_id += 1;
-    population.push(Candidate {
-        individual_id: ancestor_id,
-        parent_ids: Vec::new(),
-        genome: ancestor.clone(),
-        mutations: Vec::new(),
-    });
+    let min_segments = settings.mutation.min_segments;
+    let segment_span = settings
+        .mutation
+        .max_segments
+        .saturating_sub(min_segments)
+        .saturating_add(1);
 
     while population.len() < settings.population_size {
         let mut accepted = None;
         for _ in 0..5 {
-            let mutation_count = sample_mutation_count(
-                rng,
-                settings.mutations_per_child,
-                settings.mutation_probability,
-            );
-            if mutation_count == 0 {
-                accepted = Some(MutationResult {
-                    genome: ancestor.clone(),
-                    mutations: Vec::new(),
-                });
-                break;
-            }
-
             let seed = rng.next_seed();
-            if let Ok(mutation_result) =
-                mutate_genome(ancestor, seed, mutation_count, &settings.mutation)
-            {
-                accepted = Some(mutation_result);
+            let target_segments = min_segments + rng.range_usize(segment_span);
+            if let Ok(randomized) = random_creature(seed, target_segments, &settings.mutation) {
+                accepted = Some(randomized);
                 break;
             }
         }
 
-        let Some(mutation_result) = accepted else {
-            // Reject this offspring after five invalid attempts. The outer loop
-            // immediately starts a fresh offspring attempt instead of stopping evolution.
+        let Some(randomized) = accepted else {
             continue;
         };
 
@@ -730,9 +711,9 @@ fn initial_population(
         *next_individual_id += 1;
         population.push(Candidate {
             individual_id,
-            parent_ids: vec![ancestor_id],
-            genome: mutation_result.genome,
-            mutations: mutation_result.mutations,
+            parent_ids: Vec::new(),
+            genome: randomized.genome,
+            mutations: randomized.mutations,
         });
     }
 
