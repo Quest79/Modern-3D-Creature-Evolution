@@ -1624,6 +1624,80 @@ extern "C" __device__ float sane(float x) {
     return clampf(x, -1000.0f, 1000.0f);
 }
 
+extern "C" __device__ void rotate_vec(
+    float qx, float qy, float qz, float qw,
+    float vx, float vy, float vz,
+    float* ox, float* oy, float* oz
+) {
+    float tx = 2.0f * (qy * vz - qz * vy);
+    float ty = 2.0f * (qz * vx - qx * vz);
+    float tz = 2.0f * (qx * vy - qy * vx);
+    *ox = vx + qw * tx + (qy * tz - qz * ty);
+    *oy = vy + qw * ty + (qz * tx - qx * tz);
+    *oz = vz + qw * tz + (qx * ty - qy * tx);
+}
+
+extern "C" __device__ void integrate_quat(
+    float* rotation,
+    unsigned slot,
+    float wx,
+    float wy,
+    float wz,
+    float dt
+) {
+    unsigned base = slot * 4;
+    float qx = rotation[base + 0];
+    float qy = rotation[base + 1];
+    float qz = rotation[base + 2];
+    float qw = rotation[base + 3];
+
+    float dx = 0.5f * ( wx * qw + wy * qz - wz * qy);
+    float dy = 0.5f * (-wx * qz + wy * qw + wz * qx);
+    float dz = 0.5f * ( wx * qy - wy * qx + wz * qw);
+    float dw = 0.5f * (-wx * qx - wy * qy - wz * qz);
+
+    qx += dx * dt;
+    qy += dy * dt;
+    qz += dz * dt;
+    qw += dw * dt;
+
+    float n2 = qx * qx + qy * qy + qz * qz + qw * qw;
+    if (!(n2 == n2) || n2 < 1.0e-12f) {
+        qx = 0.0f; qy = 0.0f; qz = 0.0f; qw = 1.0f;
+    } else {
+        float inv_n = rsqrtf(n2);
+        qx *= inv_n; qy *= inv_n; qz *= inv_n; qw *= inv_n;
+    }
+
+    rotation[base + 0] = qx;
+    rotation[base + 1] = qy;
+    rotation[base + 2] = qz;
+    rotation[base + 3] = qw;
+}
+
+extern "C" __device__ float projected_half_height(
+    const float* rotation,
+    const float* half_extents,
+    unsigned slot
+) {
+    unsigned qb = slot * 4;
+    float qx = rotation[qb + 0];
+    float qy = rotation[qb + 1];
+    float qz = rotation[qb + 2];
+    float qw = rotation[qb + 3];
+
+    float exx, exy, exz;
+    float eyx, eyy, eyz;
+    float ezx, ezy, ezz;
+    rotate_vec(qx, qy, qz, qw, 1.0f, 0.0f, 0.0f, &exx, &exy, &exz);
+    rotate_vec(qx, qy, qz, qw, 0.0f, 1.0f, 0.0f, &eyx, &eyy, &eyz);
+    rotate_vec(qx, qy, qz, qw, 0.0f, 0.0f, 1.0f, &ezx, &ezy, &ezz);
+
+    return fabsf(exy) * half_extents[slot * 3 + 0]
+        + fabsf(eyy) * half_extents[slot * 3 + 1]
+        + fabsf(ezy) * half_extents[slot * 3 + 2];
+}
+
 extern "C" __device__ float eval_brain(
     unsigned start,
     unsigned count,
@@ -1634,6 +1708,8 @@ extern "C" __device__ float eval_brain(
     float time_seconds,
     const float* position,
     const float* velocity,
+    const float* rotation,
+    const float* angular_velocity,
     const float* joint_angle,
     const float* joint_velocity,
     const float* contact,
@@ -1653,9 +1729,13 @@ extern "C" __device__ float eval_brain(
         else if (code == 3) stack[sp++] = velocity[root_slot * 3 + 0];
         else if (code == 4) stack[sp++] = velocity[root_slot * 3 + 1];
         else if (code == 5) stack[sp++] = velocity[root_slot * 3 + 2];
-        else if (code == 6 || code == 7 || code == 8) stack[sp++] = 0.0f;
-        else if (code == 9 || code == 10 || code == 11) stack[sp++] = 0.0f;
-        else if (code == 12) stack[sp++] = 1.0f;
+        else if (code == 6) stack[sp++] = angular_velocity[root_slot * 3 + 0];
+        else if (code == 7) stack[sp++] = angular_velocity[root_slot * 3 + 1];
+        else if (code == 8) stack[sp++] = angular_velocity[root_slot * 3 + 2];
+        else if (code == 9) stack[sp++] = rotation[root_slot * 4 + 0];
+        else if (code == 10) stack[sp++] = rotation[root_slot * 4 + 1];
+        else if (code == 11) stack[sp++] = rotation[root_slot * 4 + 2];
+        else if (code == 12) stack[sp++] = rotation[root_slot * 4 + 3];
         else if (code == 13) stack[sp++] = joint_angle[joint_base + target];
         else if (code == 14) stack[sp++] = joint_velocity[joint_base + target];
         else if (code == 15) stack[sp++] = contact[part_base + target];
@@ -1679,10 +1759,13 @@ extern "C" __global__ void simulate_creatures(
     const float* initial_position,
     const float* half_extents,
     const float* inv_mass,
+    const float* inv_inertia,
     const float* friction,
     const unsigned* parent,
     const unsigned* child,
     const float* axis,
+    const float* parent_anchor,
+    const float* child_anchor,
     const float* rest_relative,
     const float* limit_min,
     const float* limit_max,
@@ -1698,11 +1781,14 @@ extern "C" __global__ void simulate_creatures(
     const float* op_b,
     float* state_position,
     float* state_velocity,
+    float* state_rotation,
+    float* state_angular_velocity,
     float* state_contact,
     float* state_angle,
     float* state_angvel,
     float* state_target,
     float* joint_force,
+    float* joint_torque,
     float* out_score,
     float* out_distance,
     float* out_speed,
@@ -1723,11 +1809,7 @@ extern "C" __global__ void simulate_creatures(
     float weight_stability,
     float weight_energy
 ) {
-    // One hardware warp owns one creature. One 32-thread block therefore maps
-    // to one candidate, allowing a 50-candidate generation to expose 50
-    // independently schedulable blocks without changing the evolutionary work.
     const unsigned GROUP_SIZE = 32;
-    const unsigned CREATURES_PER_BLOCK = 1;
     unsigned lane = threadIdx.x & 31u;
     unsigned local_world = blockIdx.x;
     if (local_world >= launch_world_count) return;
@@ -1749,7 +1831,20 @@ extern "C" __global__ void simulate_creatures(
         state_velocity[slot * 3 + 0] = 0.0f;
         state_velocity[slot * 3 + 1] = 0.0f;
         state_velocity[slot * 3 + 2] = 0.0f;
-        state_contact[slot] = 0.0f;
+        state_angular_velocity[slot * 3 + 0] = 0.0f;
+        state_angular_velocity[slot * 3 + 1] = 0.0f;
+        state_angular_velocity[slot * 3 + 2] = 0.0f;
+        state_rotation[slot * 4 + 0] = 0.0f;
+        state_rotation[slot * 4 + 1] = 0.0f;
+        state_rotation[slot * 4 + 2] = 0.0f;
+        state_rotation[slot * 4 + 3] = 1.0f;
+
+        float tolerance = fmaxf(
+            fmaxf(half_extents[slot * 3 + 0], half_extents[slot * 3 + 1]),
+            half_extents[slot * 3 + 2]
+        ) * 0.02f;
+        float bottom_y = state_position[slot * 3 + 1] - half_extents[slot * 3 + 1];
+        state_contact[slot] = bottom_y <= ground_y + fmaxf(tolerance, 1.0e-6f) ? 1.0f : 0.0f;
     }
     for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
         unsigned js = joint_base + j;
@@ -1759,19 +1854,17 @@ extern "C" __global__ void simulate_creatures(
         joint_force[js * 3 + 0] = 0.0f;
         joint_force[js * 3 + 1] = 0.0f;
         joint_force[js * 3 + 2] = 0.0f;
+        joint_torque[js * 3 + 0] = 0.0f;
+        joint_torque[js * 3 + 1] = 0.0f;
+        joint_torque[js * 3 + 2] = 0.0f;
     }
     __syncwarp(subgroup_mask);
 
     float start_x = state_position[root_slot * 3 + 0];
     float start_z = state_position[root_slot * 3 + 2];
-    float start_root_height = fmaxf(
-        state_position[root_slot * 3 + 1] - ground_y,
-        half_extents[root_slot * 3 + 1]
-    );
-
     float speed_sum = 0.0f;
-    float upright_sum = 0.0f;
-    float stability_sum = 0.0f;
+    float upright_sum = lane == 0 ? 1.0f : 0.0f;
+    float stability_sum = lane == 0 ? 1.0f : 0.0f;
     float local_motor_work = 0.0f;
     unsigned group_unstable = 0;
 
@@ -1784,14 +1877,13 @@ extern "C" __global__ void simulate_creatures(
         }
         __syncwarp(subgroup_mask);
 
-        // Lanes cooperatively own the creature's joint brains. Larger creatures
-        // automatically spread work across more lanes of the same warp.
         for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
             unsigned js = joint_base + j;
             float target = eval_brain(
                 brain_start[js], brain_count[js], op_code, op_index, op_a, op_b,
-                time_seconds, state_position, state_velocity, state_angle, state_angvel,
-                state_contact, part_base, joint_base, root_slot
+                time_seconds, state_position, state_velocity, state_rotation,
+                state_angular_velocity, state_angle, state_angvel, state_contact,
+                part_base, joint_base, root_slot
             );
             state_target[js] = clampf(target, limit_min[js], limit_max[js]);
         }
@@ -1799,15 +1891,35 @@ extern "C" __global__ void simulate_creatures(
 
         for (unsigned j = lane; j < jc; j += GROUP_SIZE) {
             unsigned js = joint_base + j;
-            unsigned pi = parent[js];
-            unsigned ci = child[js];
-            unsigned ps = part_base + pi;
-            unsigned cs = part_base + ci;
+            unsigned ps = part_base + parent[js];
+            unsigned cs = part_base + child[js];
 
-            float target = state_target[js];
+            float pqx = state_rotation[ps * 4 + 0];
+            float pqy = state_rotation[ps * 4 + 1];
+            float pqz = state_rotation[ps * 4 + 2];
+            float pqw = state_rotation[ps * 4 + 3];
+            float cqx = state_rotation[cs * 4 + 0];
+            float cqy = state_rotation[cs * 4 + 1];
+            float cqz = state_rotation[cs * 4 + 2];
+            float cqw = state_rotation[cs * 4 + 3];
+
+            float wax, way, waz;
+            rotate_vec(
+                pqx, pqy, pqz, pqw,
+                axis[js * 3 + 0], axis[js * 3 + 1], axis[js * 3 + 2],
+                &wax, &way, &waz
+            );
+
+            float rel_wx = state_angular_velocity[cs * 3 + 0] - state_angular_velocity[ps * 3 + 0];
+            float rel_wy = state_angular_velocity[cs * 3 + 1] - state_angular_velocity[ps * 3 + 1];
+            float rel_wz = state_angular_velocity[cs * 3 + 2] - state_angular_velocity[ps * 3 + 2];
+            float omega = rel_wx * wax + rel_wy * way + rel_wz * waz;
+            state_angvel[js] = omega;
+
+            float angle = clampf(state_angle[js] + omega * dt, limit_min[js], limit_max[js]);
+            state_angle[js] = angle;
+
             float torque_cap = fminf(requested_torque[js], biological_torque[js]) * activation;
-            float angle = state_angle[js];
-            float omega = state_angvel[js];
             float power_cap = biological_power[js] * activation;
             if (fabsf(omega) > 1.0e-4f && power_cap > 0.0f)
                 torque_cap = fminf(torque_cap, power_cap / fabsf(omega));
@@ -1816,68 +1928,64 @@ extern "C" __global__ void simulate_creatures(
             float stiffness = torque_cap / fmaxf(span * 0.5f, 1.0e-3f);
             float damping = 2.0f * sqrtf(fmaxf(stiffness * inertia[js], 0.0f));
             float torque = clampf(
-                stiffness * (target - angle) - damping * omega,
+                stiffness * (state_target[js] - angle) - damping * omega,
                 -torque_cap,
                 torque_cap
             );
-
-            float angular_accel = torque / fmaxf(inertia[js], 1.0e-12f);
-            omega += angular_accel * dt;
-            angle += omega * dt;
-            if (angle < limit_min[js]) {
-                angle = limit_min[js];
-                if (omega < 0.0f) omega = 0.0f;
-            }
-            if (angle > limit_max[js]) {
-                angle = limit_max[js];
-                if (omega > 0.0f) omega = 0.0f;
-            }
-            state_angle[js] = angle;
-            state_angvel[js] = omega;
             local_motor_work += fabsf(torque * omega) * dt;
 
-            float ax = axis[js * 3 + 0];
-            float ay = axis[js * 3 + 1];
-            float az = axis[js * 3 + 2];
-            float rx = rest_relative[js * 3 + 0];
-            float ry = rest_relative[js * 3 + 1];
-            float rz = rest_relative[js * 3 + 2];
-            float s = sinf(angle);
-            float co = cosf(angle);
-            float dot = ax * rx + ay * ry + az * rz;
-            float cross_x = ay * rz - az * ry;
-            float cross_y = az * rx - ax * rz;
-            float cross_z = ax * ry - ay * rx;
-            float one_minus_c = 1.0f - co;
-            float desired_x = rx * co + cross_x * s + ax * dot * one_minus_c;
-            float desired_y = ry * co + cross_y * s + ay * dot * one_minus_c;
-            float desired_z = rz * co + cross_z * s + az * dot * one_minus_c;
+            joint_torque[js * 3 + 0] = wax * torque;
+            joint_torque[js * 3 + 1] = way * torque;
+            joint_torque[js * 3 + 2] = waz * torque;
 
-            float actual_x = state_position[cs * 3 + 0] - state_position[ps * 3 + 0];
-            float actual_y = state_position[cs * 3 + 1] - state_position[ps * 3 + 1];
-            float actual_z = state_position[cs * 3 + 2] - state_position[ps * 3 + 2];
-            float error_x = desired_x - actual_x;
-            float error_y = desired_y - actual_y;
-            float error_z = desired_z - actual_z;
-            float rel_vx = state_velocity[cs * 3 + 0] - state_velocity[ps * 3 + 0];
-            float rel_vy = state_velocity[cs * 3 + 1] - state_velocity[ps * 3 + 1];
-            float rel_vz = state_velocity[cs * 3 + 2] - state_velocity[ps * 3 + 2];
+            float pax, pay, paz;
+            float cax, cay, caz;
+            rotate_vec(
+                pqx, pqy, pqz, pqw,
+                parent_anchor[js * 3 + 0], parent_anchor[js * 3 + 1], parent_anchor[js * 3 + 2],
+                &pax, &pay, &paz
+            );
+            rotate_vec(
+                cqx, cqy, cqz, cqw,
+                child_anchor[js * 3 + 0], child_anchor[js * 3 + 1], child_anchor[js * 3 + 2],
+                &cax, &cay, &caz
+            );
 
-            float lever = fmaxf(sqrtf(rx * rx + ry * ry + rz * rz), 1.0e-4f);
-            float max_force = torque_cap / lever;
-            float k_linear = max_force / fmaxf(lever * 0.25f, 1.0e-5f);
+            float ppx = state_position[ps * 3 + 0] + pax;
+            float ppy = state_position[ps * 3 + 1] + pay;
+            float ppz = state_position[ps * 3 + 2] + paz;
+            float cpx = state_position[cs * 3 + 0] + cax;
+            float cpy = state_position[cs * 3 + 1] + cay;
+            float cpz = state_position[cs * 3 + 2] + caz;
+
+            float pwx = state_angular_velocity[ps * 3 + 0];
+            float pwy = state_angular_velocity[ps * 3 + 1];
+            float pwz = state_angular_velocity[ps * 3 + 2];
+            float cwx = state_angular_velocity[cs * 3 + 0];
+            float cwy = state_angular_velocity[cs * 3 + 1];
+            float cwz = state_angular_velocity[cs * 3 + 2];
+
+            float pvx = state_velocity[ps * 3 + 0] + (pwy * paz - pwz * pay);
+            float pvy = state_velocity[ps * 3 + 1] + (pwz * pax - pwx * paz);
+            float pvz = state_velocity[ps * 3 + 2] + (pwx * pay - pwy * pax);
+            float cvx = state_velocity[cs * 3 + 0] + (cwy * caz - cwz * cay);
+            float cvy = state_velocity[cs * 3 + 1] + (cwz * cax - cwx * caz);
+            float cvz = state_velocity[cs * 3 + 2] + (cwx * cay - cwy * cax);
+
+            float error_x = ppx - cpx;
+            float error_y = ppy - cpy;
+            float error_z = ppz - cpz;
+            float rel_vx = cvx - pvx;
+            float rel_vy = cvy - pvy;
+            float rel_vz = cvz - pvz;
+
             float reduced_mass = 1.0f / fmaxf(inv_mass[ps] + inv_mass[cs], 1.0e-12f);
-            float d_linear = 2.0f * sqrtf(fmaxf(k_linear * reduced_mass, 0.0f));
+            float constraint_omega = fminf(125.663706f, 0.35f / fmaxf(dt, 1.0e-6f));
+            float k_linear = reduced_mass * constraint_omega * constraint_omega;
+            float d_linear = 2.0f * reduced_mass * constraint_omega;
             float fx = error_x * k_linear - rel_vx * d_linear;
             float fy = error_y * k_linear - rel_vy * d_linear;
             float fz = error_z * k_linear - rel_vz * d_linear;
-            float force_mag = sqrtf(fx * fx + fy * fy + fz * fz);
-            if (force_mag > max_force && force_mag > 1.0e-8f) {
-                float scale = max_force / force_mag;
-                fx *= scale;
-                fy *= scale;
-                fz *= scale;
-            }
 
             joint_force[js * 3 + 0] = fx;
             joint_force[js * 3 + 1] = fy;
@@ -1891,32 +1999,79 @@ extern "C" __global__ void simulate_creatures(
             float fx = 0.0f;
             float fy = 0.0f;
             float fz = 0.0f;
+            float tx = 0.0f;
+            float ty = 0.0f;
+            float tz = 0.0f;
 
-            // Deterministic fixed-order gather; no global atomics are required.
             for (unsigned j = 0; j < jc; ++j) {
                 unsigned js = joint_base + j;
-                if (parent[js] == p) {
-                    fx -= joint_force[js * 3 + 0];
-                    fy -= joint_force[js * 3 + 1];
-                    fz -= joint_force[js * 3 + 2];
+                bool is_parent = parent[js] == p;
+                bool is_child = child[js] == p;
+                if (!is_parent && !is_child) continue;
+
+                float jfx = joint_force[js * 3 + 0];
+                float jfy = joint_force[js * 3 + 1];
+                float jfz = joint_force[js * 3 + 2];
+                float jtx = joint_torque[js * 3 + 0];
+                float jty = joint_torque[js * 3 + 1];
+                float jtz = joint_torque[js * 3 + 2];
+
+                float qx = state_rotation[slot * 4 + 0];
+                float qy = state_rotation[slot * 4 + 1];
+                float qz = state_rotation[slot * 4 + 2];
+                float qw = state_rotation[slot * 4 + 3];
+                float rx, ry, rz;
+
+                if (is_parent) {
+                    fx -= jfx; fy -= jfy; fz -= jfz;
+                    tx -= jtx; ty -= jty; tz -= jtz;
+                    rotate_vec(
+                        qx, qy, qz, qw,
+                        parent_anchor[js * 3 + 0], parent_anchor[js * 3 + 1], parent_anchor[js * 3 + 2],
+                        &rx, &ry, &rz
+                    );
+                    tx += ry * (-jfz) - rz * (-jfy);
+                    ty += rz * (-jfx) - rx * (-jfz);
+                    tz += rx * (-jfy) - ry * (-jfx);
                 }
-                if (child[js] == p) {
-                    fx += joint_force[js * 3 + 0];
-                    fy += joint_force[js * 3 + 1];
-                    fz += joint_force[js * 3 + 2];
+                if (is_child) {
+                    fx += jfx; fy += jfy; fz += jfz;
+                    tx += jtx; ty += jty; tz += jtz;
+                    rotate_vec(
+                        qx, qy, qz, qw,
+                        child_anchor[js * 3 + 0], child_anchor[js * 3 + 1], child_anchor[js * 3 + 2],
+                        &rx, &ry, &rz
+                    );
+                    tx += ry * jfz - rz * jfy;
+                    ty += rz * jfx - rx * jfz;
+                    tz += rx * jfy - ry * jfx;
                 }
             }
 
-            float impulse = inv_mass[slot] * dt;
-            state_velocity[slot * 3 + 0] += fx * impulse;
-            state_velocity[slot * 3 + 1] += fy * impulse;
-            state_velocity[slot * 3 + 2] += fz * impulse;
+            float linear_impulse = inv_mass[slot] * dt;
+            state_velocity[slot * 3 + 0] += fx * linear_impulse;
+            state_velocity[slot * 3 + 1] += fy * linear_impulse;
+            state_velocity[slot * 3 + 2] += fz * linear_impulse;
+
+            float angular_impulse = inv_inertia[slot] * dt;
+            state_angular_velocity[slot * 3 + 0] += tx * angular_impulse;
+            state_angular_velocity[slot * 3 + 1] += ty * angular_impulse;
+            state_angular_velocity[slot * 3 + 2] += tz * angular_impulse;
+
             state_position[slot * 3 + 0] += state_velocity[slot * 3 + 0] * dt;
             state_position[slot * 3 + 1] += state_velocity[slot * 3 + 1] * dt;
             state_position[slot * 3 + 2] += state_velocity[slot * 3 + 2] * dt;
+            integrate_quat(
+                state_rotation,
+                slot,
+                state_angular_velocity[slot * 3 + 0],
+                state_angular_velocity[slot * 3 + 1],
+                state_angular_velocity[slot * 3 + 2],
+                dt
+            );
 
             state_contact[slot] = 0.0f;
-            float floor_y = ground_y + half_extents[slot * 3 + 1];
+            float floor_y = ground_y + projected_half_height(state_rotation, half_extents, slot);
             if (state_position[slot * 3 + 1] < floor_y) {
                 state_position[slot * 3 + 1] = floor_y;
                 if (state_velocity[slot * 3 + 1] < 0.0f)
@@ -1932,23 +2087,33 @@ extern "C" __global__ void simulate_creatures(
                     state_velocity[slot * 3 + 0] *= scale;
                     state_velocity[slot * 3 + 2] *= scale;
                 }
+
+                float angular_drag = fmaxf(0.0f, 1.0f - friction[slot] * 2.0f * dt);
+                state_angular_velocity[slot * 3 + 0] *= angular_drag;
+                state_angular_velocity[slot * 3 + 1] *= angular_drag;
+                state_angular_velocity[slot * 3 + 2] *= angular_drag;
             }
 
             float vx = state_velocity[slot * 3 + 0];
             float vy = state_velocity[slot * 3 + 1];
             float vz = state_velocity[slot * 3 + 2];
+            float wx = state_angular_velocity[slot * 3 + 0];
+            float wy = state_angular_velocity[slot * 3 + 1];
+            float wz = state_angular_velocity[slot * 3 + 2];
             float x = state_position[slot * 3 + 0];
             float y = state_position[slot * 3 + 1];
             float z = state_position[slot * 3 + 2];
             float linear_speed_sq = vx * vx + vy * vy + vz * vz;
+            float angular_speed_sq = wx * wx + wy * wy + wz * wz;
             if (
                 !(vx == vx) || !(vy == vy) || !(vz == vz)
+                || !(wx == wx) || !(wy == wy) || !(wz == wz)
                 || !(x == x) || !(y == y) || !(z == z)
                 || !(linear_speed_sq == linear_speed_sq)
+                || !(angular_speed_sq == angular_speed_sq)
                 || linear_speed_sq > 10000.0f
+                || angular_speed_sq > 1000000.0f
             ) {
-                // Any body segment above 100 m/s is invalid, even if each
-                // individual velocity component is below 100 m/s.
                 lane_unstable = 1;
             }
         }
@@ -1957,29 +2122,21 @@ extern "C" __global__ void simulate_creatures(
 
         if (group_unstable) break;
 
-        float omega_partial = 0.0f;
-        for (unsigned j = lane; j < jc; j += GROUP_SIZE)
-            omega_partial += fabsf(state_angvel[joint_base + j]);
-
-        for (unsigned offset = GROUP_SIZE / 2; offset > 0; offset >>= 1)
-            omega_partial += __shfl_down_sync(
-                subgroup_mask, omega_partial, offset, GROUP_SIZE
-            );
-
         if (lane == 0) {
             float rvx = state_velocity[root_slot * 3 + 0];
             float rvz = state_velocity[root_slot * 3 + 2];
             speed_sum += sqrtf(rvx * rvx + rvz * rvz);
 
-            float root_height = state_position[root_slot * 3 + 1] - ground_y;
-            upright_sum += clampf(
-                root_height / fmaxf(start_root_height, 1.0e-6f),
-                0.0f,
-                1.0f
-            );
+            float qx = state_rotation[root_slot * 4 + 0];
+            float qz = state_rotation[root_slot * 4 + 2];
+            float up_y = 1.0f - 2.0f * (qx * qx + qz * qz);
+            upright_sum += clampf(up_y, 0.0f, 1.0f);
 
-            float omega_mean = jc > 0 ? omega_partial / (float)jc : 0.0f;
-            stability_sum += 1.0f / (1.0f + omega_mean);
+            float wx = state_angular_velocity[root_slot * 3 + 0];
+            float wy = state_angular_velocity[root_slot * 3 + 1];
+            float wz = state_angular_velocity[root_slot * 3 + 2];
+            float angular_speed = sqrtf(wx * wx + wy * wy + wz * wz);
+            stability_sum += 1.0f / (1.0f + angular_speed);
         }
         __syncwarp(subgroup_mask);
     }
@@ -2005,7 +2162,7 @@ extern "C" __global__ void simulate_creatures(
     float dx = state_position[root_slot * 3 + 0] - start_x;
     float dz = state_position[root_slot * 3 + 2] - start_z;
     float distance = sqrtf(dx * dx + dz * dz);
-    float denom = steps > 0 ? (float)steps : 1.0f;
+    float denom = (float)steps + 1.0f;
     float average_speed = speed_sum / denom;
     float upright = upright_sum / denom;
     float stability = stability_sum / denom;
