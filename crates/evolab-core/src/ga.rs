@@ -857,9 +857,11 @@ pub fn generate_initial_population_preview(
         config.seed_population_from_ancestor,
     )?;
 
-    Ok(population.into_iter().map(|candidate| candidate.genome).collect())
+    Ok(population
+        .into_iter()
+        .map(|candidate| candidate.genome)
+        .collect())
 }
-
 
 fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
     config.effective_evaluation_pool_size()
