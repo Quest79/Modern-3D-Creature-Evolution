@@ -99,10 +99,13 @@ struct PackedCreatureBatch {
     initial_position: Vec<f32>,
     half_extents: Vec<f32>,
     inv_mass: Vec<f32>,
+    inv_inertia: Vec<f32>,
     friction: Vec<f32>,
     parent: Vec<u32>,
     child: Vec<u32>,
     axis: Vec<f32>,
+    parent_anchor: Vec<f32>,
+    child_anchor: Vec<f32>,
     rest_relative: Vec<f32>,
     limit_min: Vec<f32>,
     limit_max: Vec<f32>,
@@ -143,10 +146,13 @@ impl PackedCreatureBatch {
             initial_position: vec![0.0; part_slots * 3],
             half_extents: vec![0.0; part_slots * 3],
             inv_mass: vec![0.0; part_slots],
+            inv_inertia: vec![0.0; part_slots],
             friction: vec![0.0; part_slots],
             parent: vec![0; joint_slots],
             child: vec![0; joint_slots],
             axis: vec![0.0; joint_slots * 3],
+            parent_anchor: vec![0.0; joint_slots * 3],
+            child_anchor: vec![0.0; joint_slots * 3],
             rest_relative: vec![0.0; joint_slots * 3],
             limit_min: vec![0.0; joint_slots],
             limit_max: vec![0.0; joint_slots],
@@ -182,6 +188,14 @@ impl PackedCreatureBatch {
                 }
                 let mass = segment.mass_kg().max(1.0e-12);
                 packed.inv_mass[slot] = mass.recip();
+                let hx = segment.half_extents[0];
+                let hy = segment.half_extents[1];
+                let hz = segment.half_extents[2];
+                let ixx = mass * (hy * hy + hz * hz) / 3.0;
+                let iyy = mass * (hx * hx + hz * hz) / 3.0;
+                let izz = mass * (hx * hx + hy * hy) / 3.0;
+                let average_inertia = ((ixx + iyy + izz) / 3.0).max(1.0e-12);
+                packed.inv_inertia[slot] = average_inertia.recip();
                 packed.friction[slot] = segment.friction;
             }
 
@@ -207,6 +221,8 @@ impl PackedCreatureBatch {
                 let axis_length = joint.axis.iter().map(|v| v * v).sum::<f32>().sqrt();
                 for component in 0..3 {
                     packed.axis[slot * 3 + component] = joint.axis[component] / axis_length;
+                    packed.parent_anchor[slot * 3 + component] = joint.parent_anchor[component];
+                    packed.child_anchor[slot * 3 + component] = joint.child_anchor[component];
                 }
 
                 let parent_segment = &genome.segments[parent as usize];
@@ -1345,10 +1361,13 @@ mod platform {
             workspace.upload(api, "initial_position", &packed.initial_position)?;
         let mut p_half_extents = workspace.upload(api, "half_extents", &packed.half_extents)?;
         let mut p_inv_mass = workspace.upload(api, "inv_mass", &packed.inv_mass)?;
+        let mut p_inv_inertia = workspace.upload(api, "inv_inertia", &packed.inv_inertia)?;
         let mut p_friction = workspace.upload(api, "friction", &packed.friction)?;
         let mut p_parent = workspace.upload(api, "parent", &packed.parent)?;
         let mut p_child = workspace.upload(api, "child", &packed.child)?;
         let mut p_axis = workspace.upload(api, "axis", &packed.axis)?;
+        let mut p_parent_anchor = workspace.upload(api, "parent_anchor", &packed.parent_anchor)?;
+        let mut p_child_anchor = workspace.upload(api, "child_anchor", &packed.child_anchor)?;
         let mut p_rest_relative = workspace.upload(api, "rest_relative", &packed.rest_relative)?;
         let mut p_limit_min = workspace.upload(api, "limit_min", &packed.limit_min)?;
         let mut p_limit_max = workspace.upload(api, "limit_max", &packed.limit_max)?;
@@ -1371,6 +1390,10 @@ mod platform {
             workspace.ensure(api, "state_position", part_slots * 3 * size_of::<f32>())?;
         let mut p_state_velocity =
             workspace.ensure(api, "state_velocity", part_slots * 3 * size_of::<f32>())?;
+        let mut p_state_rotation =
+            workspace.ensure(api, "state_rotation", part_slots * 4 * size_of::<f32>())?;
+        let mut p_state_angular_velocity =
+            workspace.ensure(api, "state_angular_velocity", part_slots * 3 * size_of::<f32>())?;
         let mut p_state_contact =
             workspace.ensure(api, "state_contact", part_slots * size_of::<f32>())?;
         let mut p_state_angle =
@@ -1381,6 +1404,8 @@ mod platform {
             workspace.ensure(api, "state_target", joint_slots * size_of::<f32>())?;
         let mut p_joint_force =
             workspace.ensure(api, "joint_force", joint_slots * 3 * size_of::<f32>())?;
+        let mut p_joint_torque =
+            workspace.ensure(api, "joint_torque", joint_slots * 3 * size_of::<f32>())?;
 
         let mut p_out_score = workspace.ensure(api, "out_score", world_count * size_of::<f32>())?;
         let mut p_out_distance =
@@ -1449,10 +1474,13 @@ mod platform {
                 (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_inv_mass as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_inv_inertia as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_friction as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_parent as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_child as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_axis as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_parent_anchor as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_child_anchor as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_rest_relative as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_limit_min as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_limit_max as *mut CuDevicePtr).cast::<c_void>(),
@@ -1468,11 +1496,14 @@ mod platform {
                 (&mut p_op_b as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_position as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_velocity as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_rotation as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_state_angular_velocity as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_contact as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_angle as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_angvel as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_state_target as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_joint_force as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_joint_torque as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_score as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_distance as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_speed as *mut CuDevicePtr).cast::<c_void>(),
