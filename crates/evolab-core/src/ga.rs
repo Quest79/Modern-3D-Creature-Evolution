@@ -1752,6 +1752,46 @@ mod tests {
     }
 
     #[test]
+    fn prepared_population_resumes_to_the_same_evolution_result() {
+        let config = EvolutionConfig {
+            population_size: 8,
+            generations: 2,
+            tournament_size: 3,
+            elite_count: 1,
+            mutations_per_child: 2,
+            worker_threads: 2,
+            seed: 2468,
+            simulation: SimulationConfig {
+                duration_seconds: 0.05,
+                ..SimulationConfig::default()
+            },
+            ..EvolutionConfig::default()
+        };
+        let ancestor = CreatureGenome::three_segment_walker();
+        let checkpoint = super::prepare_evolution_checkpoint(&ancestor, &config).unwrap();
+
+        let direct = evolve_population(&ancestor, &config, |_| Ok(())).unwrap();
+        let resumed = super::evolve_population_checkpointed(
+            &ancestor,
+            &config,
+            Some(&checkpoint),
+            false,
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(direct.champion, resumed.champion);
+        assert_eq!(direct.champion_fitness, resumed.champion_fitness);
+
+        let mut direct_history = direct.history.clone();
+        let mut resumed_history = resumed.history.clone();
+        clear_runtime_timing(&mut direct_history);
+        clear_runtime_timing(&mut resumed_history);
+        assert_eq!(direct_history, resumed_history);
+    }
+
+    #[test]
     fn continue_champion_starts_with_one_champion_and_random_rest() {
         let config = EvolutionConfig {
             population_size: 50,
