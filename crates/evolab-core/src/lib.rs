@@ -53,6 +53,7 @@ pub use fitness::{FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, 
 pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, GenerationTiming,
     OffspringTelemetry, PopulationTelemetry, evolve_population, evolve_population_checkpointed,
+    generate_initial_population_preview,
 };
 pub use rapier_cpu::RapierCpuBackend;
 pub use results::{
