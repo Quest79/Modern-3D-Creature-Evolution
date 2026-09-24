@@ -716,8 +716,10 @@ func _build_ui() -> void:
     quick_evolution_row_2.add_child(_watch_champion_button)
 
     _population_preview_check = CheckBox.new()
-    _population_preview_check.text = "Preview starting population before evolution"
     _population_preview_check.button_pressed = _preview_population_before_evolution
+    _population_preview_check.text = _population_preview_checkbox_text(
+        _preview_population_before_evolution
+    )
     _population_preview_check.tooltip_text = (
         "When enabled, Start New Evolution and Continue Champion pause before generation 1 "
         + "and display the exact starting population in a frozen grid."
@@ -5291,6 +5293,8 @@ func _benchmark_handle_event(event: Dictionary) -> void:
                 _pending_evolution_label = ""
                 _job_pid = 0
                 _job_kind = ""
+                _dead_process_since_ms = -1
+                _job_started_ms = -1
                 _set_status("Population preview could not be loaded.")
                 _finish_job_controls()
                 return
@@ -5805,6 +5809,9 @@ func _finish_job_controls() -> void:
     _set_timeline_controls_enabled(true)
     if _population_preview_check != null:
         _population_preview_check.disabled = false
+        _population_preview_check.text = _population_preview_checkbox_text(
+            _preview_population_before_evolution
+        )
     if _population_preview_continue_button != null:
         _population_preview_continue_button.visible = false
     _stop_button.disabled = true
@@ -6416,8 +6423,18 @@ func _quaternion_from_array(value) -> Quaternion:
     return Quaternion.IDENTITY
 
 
+func _population_preview_checkbox_text(enabled: bool) -> String:
+    return (
+        "☑ Preview starting population before evolution"
+        if enabled
+        else "☐ Preview starting population before evolution"
+    )
+
+
 func _on_population_preview_toggled(enabled: bool) -> void:
     _preview_population_before_evolution = enabled
+    if _population_preview_check != null:
+        _population_preview_check.text = _population_preview_checkbox_text(enabled)
     _save_settings()
 
 
