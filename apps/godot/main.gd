@@ -82,6 +82,8 @@ var _live_button: Button
 var _batch_button: Button
 var _evolve_button: Button
 var _continue_champion_button: Button
+var _preview_population_check: CheckBox
+var _preview_continue_button: Button
 var _resume_evolution_button: Button
 var _watch_champion_button: Button
 var _stop_button: Button
@@ -136,6 +138,13 @@ var _camera: Camera3D
 var _world_meshes: Array[MeshInstance3D] = []
 var _rendered_world_json := ""
 var _creature_meshes: Dictionary = {}
+var _population_preview_roots: Array[Node3D] = []
+var _population_preview_active := false
+var _population_preview_count := 0
+var _population_preview_checkpoint_path := ""
+var _population_preview_args := PackedStringArray()
+var _population_preview_camera_saved := false
+var _population_preview_saved_camera_transform := Transform3D.IDENTITY
 var _current_genome: Dictionary = {}
 var _current_genome_source := ""
 var _current_mutation_count := 0
@@ -191,6 +200,7 @@ var _trials_per_creature := 1
 var _trial_aggregation := "mean"
 var _structural_mutation_chance := 0.30
 var _major_structural_mutation_chance := 0.10
+var _preview_population_before_evolution := false
 var _timeline_entries: Array = []
 var _timeline_next_id := 1
 var _experiment_name := "Experiment"
@@ -371,6 +381,24 @@ func _process(delta: float) -> void:
                     _replay_final_time = float(
                         _replay_frames.back().get("simulated_seconds", 0.0)
                     )
+            elif ended_kind == "population_preview":
+                _job_kind = ""
+                if not _population_preview_active:
+                    _activate_population_preview(_population_preview_checkpoint_path)
+                if _population_preview_active:
+                    _finish_job_controls()
+                    _set_run_buttons_disabled(true)
+                    _preview_continue_button.visible = true
+                    _preview_continue_button.disabled = false
+                    _stop_button.text = "■ Cancel Population Preview"
+                    _stop_button.disabled = false
+                    _set_status(
+                        "Population preview paused • %d creatures • press Continue Evolution when ready"
+                        % _population_preview_count
+                    )
+                else:
+                    _set_status("Population preview process ended without a usable population.")
+                    _finish_job_controls()
             elif ended_kind == "evolution" and _load_genome_file(_evolution_champion_path()):
                 _job_kind = ""
                 _has_evolution_champion = true
@@ -685,6 +713,26 @@ func _build_ui() -> void:
     _continue_champion_button.disabled = true
     _continue_champion_button.pressed.connect(_on_continue_champion_pressed)
     quick_evolution_row.add_child(_continue_champion_button)
+
+    _preview_population_check = CheckBox.new()
+    _preview_population_check.text = "Preview starting population before evolution"
+    _preview_population_check.tooltip_text = (
+        "When enabled, Start New Evolution or Continue Champion first shows the exact "
+        + "generation-1 population frozen in a grid. Evolution begins only after Continue Evolution."
+    )
+    _preview_population_check.button_pressed = _preview_population_before_evolution
+    _preview_population_check.toggled.connect(_on_preview_population_toggled)
+    quick_section.add_child(_preview_population_check)
+
+    _preview_continue_button = Button.new()
+    _preview_continue_button.text = "▶ Continue Evolution"
+    _preview_continue_button.tooltip_text = (
+        "Run evolution using exactly the population currently shown in the preview."
+    )
+    _preview_continue_button.visible = false
+    _preview_continue_button.disabled = true
+    _preview_continue_button.pressed.connect(_on_population_preview_continue_pressed)
+    quick_section.add_child(_preview_continue_button)
 
     var quick_evolution_row_2 := HBoxContainer.new()
     quick_evolution_row_2.add_theme_constant_override("separation", 6)
@@ -3264,6 +3312,13 @@ func _load_settings() -> void:
     _major_structural_mutation_chance = clampf(
         _major_structural_mutation_chance, 0.0, 1.0
     )
+    _preview_population_before_evolution = bool(
+        config.get_value(
+            "evolution",
+            "preview_population_before_evolution",
+            _preview_population_before_evolution
+        )
+    )
 
     _accelerator_mode = str(
         config.get_value("accelerator", "mode", _accelerator_mode)
@@ -3370,6 +3425,11 @@ func _save_settings() -> void:
         "evolution",
         "major_structural_mutation_chance",
         _major_structural_mutation_chance
+    )
+    config.set_value(
+        "evolution",
+        "preview_population_before_evolution",
+        _preview_population_before_evolution
     )
     config.set_value("accelerator", "mode", _accelerator_mode)
     config.set_value("accelerator", "gpu_ids", _gpu_ids)
@@ -3847,10 +3907,247 @@ func _start_evolution_run(continue_current: bool) -> void:
     else:
         args.append("--random-ancestor")
 
+    args.append_array(PackedStringArray([
+        "--checkpoint-output", checkpoint_path,
+    ]))
+
     var run_label := "champion continuation" if continue_current else "new random lineage"
+    if _preview_population_check.button_pressed:
+        _population_preview_checkpoint_path = checkpoint_path
+        _population_preview_args = args.duplicate()
+        var preview_args := args.duplicate()
+        preview_args.append("--prepare-only")
+        _set_status("Preparing %s population preview..." % run_label)
+        if _start_job("population_preview", preview_args):
+            _metrics.text = (
+                "[color=#9aa7bd]Generating the exact starting population for visual inspection...[/color]"
+            )
+        return
+
     _set_status("Starting %s..." % run_label)
     if _start_job("evolution", args):
         _set_status("%s started • waiting for generation 1" % run_label.capitalize())
+
+
+func _on_preview_population_toggled(enabled: bool) -> void:
+    _preview_population_before_evolution = enabled
+    _save_settings()
+
+
+func _on_population_preview_continue_pressed() -> void:
+    if not _population_preview_active:
+        return
+    if not FileAccess.file_exists(_population_preview_checkpoint_path):
+        _set_status("Prepared population checkpoint is missing; cancel and preview again.")
+        return
+
+    var args := _population_preview_args.duplicate()
+    args.append_array(PackedStringArray([
+        "--resume-checkpoint", _population_preview_checkpoint_path,
+    ]))
+
+    _leave_population_preview(true)
+    _set_status("Starting evolution with the exact previewed population...")
+    if _start_job("evolution", args):
+        _set_status("Evolution started from preview • waiting for generation 1")
+
+
+func _cancel_population_preview() -> void:
+    _leave_population_preview(true)
+    _set_status("Population preview cancelled.")
+    _metrics.text = "[color=#9aa7bd]Population preview cancelled.[/color]"
+    _finish_job_controls()
+
+
+func _leave_population_preview(restore_camera: bool) -> void:
+    _clear_population_preview_meshes()
+    _population_preview_active = false
+    _population_preview_count = 0
+    _population_preview_args = PackedStringArray()
+    if is_instance_valid(_preview_continue_button):
+        _preview_continue_button.visible = false
+        _preview_continue_button.disabled = true
+    if is_instance_valid(_stop_button):
+        _stop_button.text = "■ Stop Current Run"
+    if restore_camera and _population_preview_camera_saved and is_instance_valid(_camera):
+        _camera.transform = _population_preview_saved_camera_transform
+        _camera_yaw = _camera.rotation.y
+        _camera_pitch = _camera.rotation.x
+    _population_preview_camera_saved = false
+
+
+func _activate_population_preview(checkpoint_path: String) -> bool:
+    if checkpoint_path.is_empty() or not FileAccess.file_exists(checkpoint_path):
+        return false
+
+    var raw := FileAccess.get_file_as_string(checkpoint_path)
+    var parsed = JSON.parse_string(raw)
+    if typeof(parsed) != TYPE_DICTIONARY:
+        return false
+
+    var checkpoint: Dictionary = parsed
+    var population_value = checkpoint.get("population", [])
+    if typeof(population_value) != TYPE_ARRAY or population_value.is_empty():
+        return false
+
+    _render_population_preview(checkpoint)
+    _population_preview_active = true
+    _population_preview_count = population_value.size()
+    _preview_continue_button.visible = true
+    _preview_continue_button.disabled = _job_pid > 0
+    _metrics.text = (
+        "[table=2]"
+        + "[cell]Population preview[/cell][cell][b]%d creatures[/b][/cell]"
+            % _population_preview_count
+        + "[cell]State[/cell][cell]Frozen before generation 1[/cell]"
+        + "[cell]Layout[/cell][cell]Separated grid[/cell]"
+        + "[cell]Champion[/cell][cell]%s[/cell]"
+            % ("Gold / slot 1" if bool(
+                checkpoint.get("config", {}).get("seed_population_from_ancestor", false)
+            ) else "None • all creatures are new")
+        + "[/table]"
+    )
+    return true
+
+
+func _render_population_preview(checkpoint: Dictionary) -> void:
+    _clear_creature_meshes()
+    _clear_population_preview_meshes()
+
+    var population: Array = checkpoint.get("population", [])
+    if population.is_empty():
+        return
+
+    var cell_span := 3.0
+    for candidate_value in population:
+        if typeof(candidate_value) != TYPE_DICTIONARY:
+            continue
+        var candidate: Dictionary = candidate_value
+        var genome_value = candidate.get("genome", {})
+        if typeof(genome_value) != TYPE_DICTIONARY:
+            continue
+        var genome: Dictionary = genome_value
+        var segments: Array = genome.get("segments", [])
+        if segments.is_empty():
+            continue
+
+        var min_x := INF
+        var max_x := -INF
+        var min_z := INF
+        var max_z := -INF
+        for segment_value in segments:
+            if typeof(segment_value) != TYPE_DICTIONARY:
+                continue
+            var segment: Dictionary = segment_value
+            var initial: Array = segment.get("initial_position", [0.0, 0.0, 0.0])
+            var half: Array = segment.get("half_extents", [0.25, 0.25, 0.25])
+            if initial.size() < 3 or half.size() < 3:
+                continue
+            min_x = minf(min_x, float(initial[0]) - float(half[0]))
+            max_x = maxf(max_x, float(initial[0]) + float(half[0]))
+            min_z = minf(min_z, float(initial[2]) - float(half[2]))
+            max_z = maxf(max_z, float(initial[2]) + float(half[2]))
+
+        if min_x != INF:
+            cell_span = maxf(cell_span, maxf(max_x - min_x, max_z - min_z) + 1.5)
+
+    var columns := maxi(1, int(ceil(sqrt(float(population.size())))))
+    var rows := maxi(1, int(ceil(float(population.size()) / float(columns))))
+    var champion_present := bool(
+        checkpoint.get("config", {}).get("seed_population_from_ancestor", false)
+    )
+
+    if is_instance_valid(_camera) and not _population_preview_camera_saved:
+        _population_preview_saved_camera_transform = _camera.transform
+        _population_preview_camera_saved = true
+
+    for index in population.size():
+        var candidate_value = population[index]
+        if typeof(candidate_value) != TYPE_DICTIONARY:
+            continue
+        var candidate: Dictionary = candidate_value
+        var genome_value = candidate.get("genome", {})
+        if typeof(genome_value) != TYPE_DICTIONARY:
+            continue
+        var genome: Dictionary = genome_value
+        var segments: Array = genome.get("segments", [])
+
+        var col := index % columns
+        var row := index / columns
+        var root := Node3D.new()
+        root.position = Vector3(
+            2.2 + (float(col) - float(columns - 1) * 0.5) * cell_span,
+            0.0,
+            (float(row) - float(rows - 1) * 0.5) * cell_span
+        )
+        add_child(root)
+        _population_preview_roots.append(root)
+
+        var is_champion := champion_present and index == 0
+        for segment_value in segments:
+            if typeof(segment_value) != TYPE_DICTIONARY:
+                continue
+            var segment: Dictionary = segment_value
+            var half: Array = segment.get("half_extents", [0.25, 0.25, 0.25])
+            var initial: Array = segment.get("initial_position", [0.0, 0.0, 0.0])
+
+            var instance := MeshInstance3D.new()
+            var box := BoxMesh.new()
+            if half.size() >= 3:
+                box.size = Vector3(
+                    float(half[0]) * 2.0,
+                    float(half[1]) * 2.0,
+                    float(half[2]) * 2.0
+                )
+            instance.mesh = box
+
+            var material := StandardMaterial3D.new()
+            material.albedo_color = (
+                Color(1.0, 0.72, 0.16)
+                if is_champion
+                else _segment_color(int(segment.get("id", 0)))
+            )
+            material.metallic = 0.08
+            material.roughness = 0.45
+            instance.material_override = material
+
+            if initial.size() >= 3:
+                instance.position = Vector3(
+                    float(initial[0]),
+                    float(initial[1]),
+                    float(initial[2])
+                )
+            root.add_child(instance)
+
+        if is_champion:
+            var champion_label := Label3D.new()
+            champion_label.text = "CHAMPION"
+            champion_label.position = Vector3(0.0, 2.0, 0.0)
+            champion_label.font_size = 32
+            champion_label.modulate = Color(1.0, 0.82, 0.28)
+            champion_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+            root.add_child(champion_label)
+
+    if is_instance_valid(_camera):
+        var grid_width := float(maxi(columns - 1, 1)) * cell_span
+        var grid_depth := float(maxi(rows - 1, 1)) * cell_span
+        var view_span := maxf(maxf(grid_width, grid_depth), 8.0)
+        var center := Vector3(2.2, 0.6, 0.0)
+        _camera.position = center + Vector3(
+            view_span * 0.58,
+            view_span * 0.62,
+            view_span * 0.72
+        )
+        _camera.look_at(center, Vector3.UP)
+        _camera_yaw = _camera.rotation.y
+        _camera_pitch = _camera.rotation.x
+
+
+func _clear_population_preview_meshes() -> void:
+    for root in _population_preview_roots:
+        if is_instance_valid(root):
+            root.queue_free()
+    _population_preview_roots.clear()
 
 
 func _on_resume_evolution_pressed() -> void:
@@ -5611,6 +5908,12 @@ func _benchmark_abort(reason: String) -> void:
 
 
 func _can_start_action(action_name: String) -> bool:
+    if _population_preview_active:
+        _set_status(
+            "Population preview is paused • Continue Evolution or cancel the preview first."
+        )
+        return false
+
     if _job_pid <= 0:
         return true
 
@@ -5658,6 +5961,9 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
 
 
 func _on_stop_pressed() -> void:
+    if _population_preview_active:
+        _cancel_population_preview()
+        return
     if _benchmark_active:
         _benchmark_abort("Cancelled by user.")
         return
@@ -5765,6 +6071,20 @@ func _handle_event(event: Dictionary) -> void:
             % str(event.get("message", "unknown error"))
         )
         _finish_job_controls()
+        return
+
+    if kind == "population_prepare_started":
+        _set_status(
+            "Generating %s starting creatures for population preview..."
+            % str(event.get("population", 0))
+        )
+        return
+
+    if kind == "population_prepared":
+        var preview_checkpoint := str(event.get("checkpoint_file", ""))
+        _population_preview_checkpoint_path = preview_checkpoint
+        if not _activate_population_preview(preview_checkpoint):
+            _set_status("Population preview was generated but could not be displayed.")
         return
 
     if kind == "creature_stream_error":

@@ -15,7 +15,7 @@ use evolab_core::{
     FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec,
     RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation,
     WorldConfig, WorldSnapshot, discover_cuda_devices, evolve_population_checkpointed,
-    mutate_genome, random_creature, run_cuda_probe_batch,
+    mutate_genome, prepare_evolution_checkpoint, random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
@@ -349,6 +349,11 @@ enum Command {
         #[arg(long)]
         checkpoint_output: Option<PathBuf>,
 
+        /// Generate generation 1 and write it as a checkpoint, but do not evaluate
+        /// or evolve it yet. Used by the GUI population preview.
+        #[arg(long, default_value_t = false)]
+        prepare_only: bool,
+
         /// Resume an evolution from a generation-boundary checkpoint.
         #[arg(long)]
         resume_checkpoint: Option<PathBuf>,
@@ -563,6 +568,7 @@ fn run() -> Result<(), String> {
             no_cpu_fallback,
             throughput_mode,
             checkpoint_output,
+            prepare_only,
             resume_checkpoint,
             event_port,
             event_host,
@@ -608,6 +614,7 @@ fn run() -> Result<(), String> {
             cpu_fallback: !no_cpu_fallback,
             throughput_mode: &throughput_mode,
             checkpoint_output: checkpoint_output.as_ref(),
+            prepare_only,
             resume_checkpoint: resume_checkpoint.as_ref(),
             event_port,
             event_host: &event_host,
@@ -1207,6 +1214,7 @@ struct EvolveRequest<'a> {
     cpu_fallback: bool,
     throughput_mode: &'a str,
     checkpoint_output: Option<&'a PathBuf>,
+    prepare_only: bool,
     resume_checkpoint: Option<&'a PathBuf>,
     event_port: Option<u16>,
     event_host: &'a str,
@@ -1320,6 +1328,55 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         timeline,
     };
     config.validate()?;
+
+    if request.prepare_only {
+        if request.resume_checkpoint.is_some() {
+            return Err("--prepare-only cannot be combined with --resume-checkpoint".into());
+        }
+        let checkpoint_path = request
+            .checkpoint_output
+            .ok_or_else(|| "--prepare-only requires --checkpoint-output".to_string())?;
+        if let Some(socket) = socket {
+            send_event(
+                socket,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "population_prepare_started",
+                    "population": config.population_size,
+                    "seed": config.seed,
+                }),
+            );
+        }
+
+        let checkpoint = prepare_evolution_checkpoint(&ancestor, &config)?;
+        write_checkpoint(checkpoint_path, &checkpoint)?;
+
+        let event = json!({
+            "protocol_version": 1,
+            "kind": "population_prepared",
+            "population": checkpoint.population.len(),
+            "checkpoint_file": checkpoint_path.to_string_lossy().to_string(),
+            "champion_index": if config.seed_population_from_ancestor {
+                Some(0usize)
+            } else {
+                None
+            },
+            "seed": config.seed,
+        });
+        if let Some(socket) = socket {
+            send_event(socket, &event);
+        }
+        if request.json_output {
+            println!("{event}");
+        } else if socket.is_none() {
+            println!(
+                "prepared {} starting creatures in {}",
+                checkpoint.population.len(),
+                checkpoint_path.display()
+            );
+        }
+        return Ok(());
+    }
 
     let resume_checkpoint = if let Some(path) = request.resume_checkpoint {
         Some(read_checkpoint(path)?)
