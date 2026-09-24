@@ -1937,9 +1937,51 @@ extern "C" __global__ void simulate_creatures(
             );
             local_motor_work += fabsf(torque * omega) * dt;
 
-            joint_torque[js * 3 + 0] = wax * torque;
-            joint_torque[js * 3 + 1] = way * torque;
-            joint_torque[js * 3 + 2] = waz * torque;
+            // Rapier's revolute joint constrains the two rotational axes that
+            // are perpendicular to the hinge. Match that instead of letting
+            // CUDA bodies freely twist around all three axes.
+            float half_angle = 0.5f * angle;
+            float hs = sinf(half_angle);
+            float hqx = axis[js * 3 + 0] * hs;
+            float hqy = axis[js * 3 + 1] * hs;
+            float hqz = axis[js * 3 + 2] * hs;
+            float hqw = cosf(half_angle);
+
+            // desired child orientation = parent * local hinge rotation.
+            float dqx = pqw * hqx + pqx * hqw + pqy * hqz - pqz * hqy;
+            float dqy = pqw * hqy - pqx * hqz + pqy * hqw + pqz * hqx;
+            float dqz = pqw * hqz + pqx * hqy - pqy * hqx + pqz * hqw;
+            float dqw = pqw * hqw - pqx * hqx - pqy * hqy - pqz * hqz;
+
+            // World-space correction quaternion: desired * inverse(actual).
+            float eqx = -dqw * cqx + dqx * cqw - dqy * cqz + dqz * cqy;
+            float eqy = -dqw * cqy + dqx * cqz + dqy * cqw - dqz * cqx;
+            float eqz = -dqw * cqz - dqx * cqy + dqy * cqx + dqz * cqw;
+            float eqw =  dqw * cqw + dqx * cqx + dqy * cqy + dqz * cqz;
+            float error_sign = eqw < 0.0f ? -1.0f : 1.0f;
+
+            float perp_wx = rel_wx - omega * wax;
+            float perp_wy = rel_wy - omega * way;
+            float perp_wz = rel_wz - omega * waz;
+            float reduced_inertia = 1.0f / fmaxf(inv_inertia[ps] + inv_inertia[cs], 1.0e-12f);
+            float rotation_constraint_omega =
+                fminf(125.663706f, 0.35f / fmaxf(dt, 1.0e-6f));
+            float rotation_k =
+                reduced_inertia * rotation_constraint_omega * rotation_constraint_omega;
+            float rotation_d = 2.0f * reduced_inertia * rotation_constraint_omega;
+            float align_tx = 2.0f * error_sign * eqx * rotation_k - perp_wx * rotation_d;
+            float align_ty = 2.0f * error_sign * eqy * rotation_k - perp_wy * rotation_d;
+            float align_tz = 2.0f * error_sign * eqz * rotation_k - perp_wz * rotation_d;
+
+            // Do not let alignment fight the legal hinge axis.
+            float align_along_axis = align_tx * wax + align_ty * way + align_tz * waz;
+            align_tx -= align_along_axis * wax;
+            align_ty -= align_along_axis * way;
+            align_tz -= align_along_axis * waz;
+
+            joint_torque[js * 3 + 0] = wax * torque + align_tx;
+            joint_torque[js * 3 + 1] = way * torque + align_ty;
+            joint_torque[js * 3 + 2] = waz * torque + align_tz;
 
             float pax, pay, paz;
             float cax, cay, caz;
