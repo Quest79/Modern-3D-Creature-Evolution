@@ -751,9 +751,9 @@ fn initial_population(
     let mut population = Vec::with_capacity(settings.population_size);
 
     if seed_from_ancestor {
-        // Continue Champion must never throw away the champion that was supplied.
-        // Keep one exact copy as the baseline, then create independent mutated
-        // descendants so the rest of the population is still diverse.
+        // Continue Champion means exactly one preserved champion plus a fresh
+        // independent random population. The other candidates must not be
+        // descendants or mutations of the champion.
         let ancestor_id = *next_individual_id;
         *next_individual_id += 1;
         population.push(Candidate {
@@ -763,25 +763,25 @@ fn initial_population(
             mutations: Vec::new(),
         });
 
+        let min_segments = settings.mutation.min_segments;
+        let segment_span = settings
+            .mutation
+            .max_segments
+            .saturating_sub(min_segments)
+            .saturating_add(1);
+
         while population.len() < settings.population_size {
             let mut accepted = None;
             for _ in 0..5 {
-                let mutation_count = sample_mutation_count(
-                    rng,
-                    settings.mutations_per_child,
-                    settings.mutation_probability,
-                )
-                .max(1);
                 let seed = rng.next_seed();
-                if let Ok(mutated) =
-                    mutate_genome(ancestor, seed, mutation_count, &settings.mutation)
-                {
-                    accepted = Some(mutated);
+                let target_segments = min_segments + rng.range_usize(segment_span);
+                if let Ok(randomized) = random_creature(seed, target_segments, &settings.mutation) {
+                    accepted = Some(randomized);
                     break;
                 }
             }
 
-            let Some(mutated) = accepted else {
+            let Some(randomized) = accepted else {
                 continue;
             };
 
@@ -789,9 +789,9 @@ fn initial_population(
             *next_individual_id += 1;
             population.push(Candidate {
                 individual_id,
-                parent_ids: vec![ancestor_id],
-                genome: mutated.genome,
-                mutations: mutated.mutations,
+                parent_ids: Vec::new(),
+                genome: randomized.genome,
+                mutations: randomized.mutations,
             });
         }
 
@@ -1688,6 +1688,44 @@ mod tests {
                 device.cuda = Default::default();
             }
         }
+    }
+
+    #[test]
+    fn continue_champion_starts_with_one_champion_and_random_rest() {
+        let config = EvolutionConfig {
+            population_size: 50,
+            generations: 1,
+            seed_population_from_ancestor: true,
+            seed: 12345,
+            ..EvolutionConfig::default()
+        };
+        let settings = super::EffectiveEvolutionSettings::from(&config);
+        let ancestor = CreatureGenome::three_segment_walker();
+        let mut rng = super::GenomeRng::new(config.seed);
+        let mut next_individual_id = 1;
+
+        let population = super::initial_population(
+            &ancestor,
+            &settings,
+            &mut rng,
+            &mut next_individual_id,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(population.len(), 50);
+        assert_eq!(population[0].genome, ancestor);
+        assert!(population[0].parent_ids.is_empty());
+        assert!(
+            population[1..]
+                .iter()
+                .all(|candidate| candidate.parent_ids.is_empty())
+        );
+        assert!(
+            population[1..]
+                .iter()
+                .all(|candidate| candidate.genome != ancestor)
+        );
     }
 
     #[test]

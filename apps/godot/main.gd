@@ -678,8 +678,8 @@ func _build_ui() -> void:
     _continue_champion_button = Button.new()
     _continue_champion_button.text = "Continue Champion"
     _continue_champion_button.tooltip_text = (
-        "Use the current/final champion as the founder and evolve it for the "
-        + "configured number of additional generations."
+        "Start generation 1 with exactly one copy of the current/final champion "
+        + "plus a completely fresh random population for every other slot."
     )
     _continue_champion_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _continue_champion_button.disabled = true
@@ -3779,7 +3779,7 @@ func _start_evolution_run(continue_current: bool) -> void:
     _watch_champion_button.disabled = true
     _continue_champion_button.disabled = true
     _metrics.text = (
-        "[color=#9aa7bd]Continuing champion lineage...[/color]"
+        "[color=#9aa7bd]Continuing champion with fresh random challengers...[/color]"
         if continue_current
         else "[color=#9aa7bd]Generating a fresh random founder and generation 1...[/color]"
     )
