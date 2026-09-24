@@ -451,36 +451,64 @@ where
         timing.sorting_seconds = sorting_started.elapsed().as_secs_f64();
 
         let statistics_started = Instant::now();
-        if execution.actual_mode == AcceleratorMode::Cuda {
-            // CUDA performs the full population search. Re-evaluate only the
-            // strongest few candidates with Rapier, then put those authoritative
-            // scores back into the ranked population before selection/breeding.
-            // This catches any remaining CUDA approximation error without moving
-            // the main evolutionary workload back to the CPU.
+        let verified_best = if execution.actual_mode == AcceleratorMode::Cuda {
+            // CUDA searches the whole population. Rapier verifies only a small
+            // finalist set, but the previously verified champion is always
+            // included again so elitism cannot lose score merely because that
+            // genome ranked lower in the approximate CUDA ordering this round.
             let verification_count = evaluated
                 .len()
                 .min(config.elite_count.saturating_mul(4).max(8));
+            let mut verification_candidates = evaluated[..verification_count].to_vec();
+
+            if let Some(previous_champion) = final_champion.as_ref() {
+                if !verification_candidates
+                    .iter()
+                    .any(|candidate| candidate.genome == previous_champion.genome)
+                {
+                    let carried_champion = evaluated
+                        .iter()
+                        .find(|candidate| candidate.genome == previous_champion.genome)
+                        .ok_or_else(|| {
+                            "elite champion disappeared from the next generation".to_string()
+                        })?;
+                    verification_candidates.push(carried_champion.clone());
+                }
+            }
+
             let verified = verify_top_candidates_with_rapier(
                 &pool,
-                &evaluated[..verification_count],
+                &verification_candidates,
                 &settings,
             )?;
+            let best_verified = verified
+                .iter()
+                .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
+                .cloned()
+                .ok_or_else(|| "Rapier verification produced no finalist".to_string())?;
+
             let mut verified_by_id = verified
                 .into_iter()
                 .map(|item| (item.individual_id, item))
                 .collect::<HashMap<_, _>>();
-
             for candidate in &mut evaluated {
                 if let Some(verified_candidate) = verified_by_id.remove(&candidate.individual_id) {
                     *candidate = verified_candidate;
                 }
             }
             evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-        }
+            Some(best_verified)
+        } else {
+            None
+        };
 
-        let best = evaluated
-            .first()
-            .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
+        let best = if let Some(best_verified) = verified_best.as_ref() {
+            best_verified
+        } else {
+            evaluated
+                .first()
+                .ok_or_else(|| "evolution population unexpectedly empty".to_string())?
+        };
         let worst = evaluated
             .last()
             .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
@@ -589,6 +617,7 @@ where
             let (next_population, breeding_telemetry) = breed_next_generation(
                 &pool,
                 &evaluated,
+                verified_best.as_ref(),
                 config,
                 &next_settings,
                 &mut rng,
@@ -1244,6 +1273,7 @@ fn validate_effective_settings(settings: &EffectiveEvolutionSettings) -> Result<
 fn breed_next_generation(
     pool: &rayon::ThreadPool,
     evaluated: &[EvaluatedCreature],
+    verified_champion: Option<&EvaluatedCreature>,
     config: &EvolutionConfig,
     next_settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
@@ -1257,7 +1287,26 @@ fn breed_next_generation(
         .max(1);
     let tournament_size = config.tournament_size.min(evaluated.len()).max(1);
 
-    for elite in evaluated.iter().take(elite_count) {
+    if let Some(champion) = verified_champion {
+        let individual_id = *next_individual_id;
+        *next_individual_id += 1;
+        next.push(Candidate {
+            individual_id,
+            parent_ids: vec![champion.individual_id],
+            genome: champion.genome.clone(),
+            mutations: Vec::new(),
+        });
+    }
+
+    for elite in evaluated.iter() {
+        if next.len() >= elite_count {
+            break;
+        }
+        if verified_champion
+            .is_some_and(|champion| champion.genome == elite.genome)
+        {
+            continue;
+        }
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
         next.push(Candidate {
