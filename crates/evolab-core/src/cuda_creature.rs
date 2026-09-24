@@ -1392,8 +1392,11 @@ mod platform {
             workspace.ensure(api, "state_velocity", part_slots * 3 * size_of::<f32>())?;
         let mut p_state_rotation =
             workspace.ensure(api, "state_rotation", part_slots * 4 * size_of::<f32>())?;
-        let mut p_state_angular_velocity =
-            workspace.ensure(api, "state_angular_velocity", part_slots * 3 * size_of::<f32>())?;
+        let mut p_state_angular_velocity = workspace.ensure(
+            api,
+            "state_angular_velocity",
+            part_slots * 3 * size_of::<f32>(),
+        )?;
         let mut p_state_contact =
             workspace.ensure(api, "state_contact", part_slots * size_of::<f32>())?;
         let mut p_state_angle =
