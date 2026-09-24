@@ -833,6 +833,36 @@ fn initial_population(
     Ok(population)
 }
 
+pub fn generate_initial_population_preview(
+    ancestor: &CreatureGenome,
+    config: &EvolutionConfig,
+) -> Result<Vec<CreatureGenome>, String> {
+    config.validate()?;
+    ancestor.validate()?;
+
+    let mut rng = GenomeRng::new(config.seed);
+    let active_condition_ids = HashSet::new();
+    let mut first_settings = EffectiveEvolutionSettings::from(config);
+    config
+        .timeline
+        .apply_to(1, &active_condition_ids, &mut first_settings);
+    validate_effective_settings(&first_settings)?;
+
+    let mut next_individual_id = 1_u64;
+    let population = initial_population(
+        ancestor,
+        &first_settings,
+        &mut rng,
+        &mut next_individual_id,
+        config.seed_population_from_ancestor,
+    )?;
+
+    Ok(population
+        .into_iter()
+        .map(|candidate| candidate.genome)
+        .collect())
+}
+
 fn cuda_saturation_pool_target(config: &EvolutionConfig) -> usize {
     config.effective_evaluation_pool_size()
 }
