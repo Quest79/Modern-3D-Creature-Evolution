@@ -1336,6 +1336,18 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         let checkpoint_path = request
             .checkpoint_output
             .ok_or_else(|| "--prepare-only requires --checkpoint-output".to_string())?;
+        if let Some(socket) = socket {
+            send_event(
+                socket,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "population_prepare_started",
+                    "population": config.population_size,
+                    "seed": config.seed,
+                }),
+            );
+        }
+
         let checkpoint = prepare_evolution_checkpoint(&ancestor, &config)?;
         write_checkpoint(checkpoint_path, &checkpoint)?;
 
