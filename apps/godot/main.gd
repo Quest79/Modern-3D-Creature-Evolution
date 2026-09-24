@@ -6425,9 +6425,9 @@ func _quaternion_from_array(value) -> Quaternion:
 
 func _population_preview_checkbox_text(enabled: bool) -> String:
     return (
-        "☑ Preview starting population before evolution"
+        "[X] Preview starting population before evolution"
         if enabled
-        else "☐ Preview starting population before evolution"
+        else "[ ] Preview starting population before evolution"
     )
 
 
