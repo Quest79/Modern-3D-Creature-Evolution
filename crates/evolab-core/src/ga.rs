@@ -476,11 +476,8 @@ where
                 }
             }
 
-            let verified = verify_top_candidates_with_rapier(
-                &pool,
-                &verification_candidates,
-                &settings,
-            )?;
+            let verified =
+                verify_top_candidates_with_rapier(&pool, &verification_candidates, &settings)?;
             let best_verified = verified
                 .iter()
                 .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
@@ -1302,9 +1299,7 @@ fn breed_next_generation(
         if next.len() >= elite_count {
             break;
         }
-        if verified_champion
-            .is_some_and(|champion| champion.genome == elite.genome)
-        {
+        if verified_champion.is_some_and(|champion| champion.genome == elite.genome) {
             continue;
         }
         let individual_id = *next_individual_id;
