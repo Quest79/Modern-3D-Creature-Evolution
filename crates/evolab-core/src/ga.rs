@@ -471,9 +471,7 @@ where
                 .collect::<HashMap<_, _>>();
 
             for candidate in &mut evaluated {
-                if let Some(verified_candidate) =
-                    verified_by_id.remove(&candidate.individual_id)
-                {
+                if let Some(verified_candidate) = verified_by_id.remove(&candidate.individual_id) {
                     *candidate = verified_candidate;
                 }
             }
