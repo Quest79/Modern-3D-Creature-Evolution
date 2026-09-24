@@ -1154,8 +1154,9 @@ func _build_ui() -> void:
 
     _metrics = RichTextLabel.new()
     _metrics.bbcode_enabled = true
-    _metrics.fit_content = false
-    _metrics.custom_minimum_size = Vector2(0, 155)
+    _metrics.fit_content = true
+    _metrics.scroll_active = false
+    _metrics.custom_minimum_size = Vector2(0, 0)
     _metrics.text = "[color=#9aa7bd]Generate, mutate, load, or watch a creature.[/color]"
     status_section.add_child(_metrics)
 
