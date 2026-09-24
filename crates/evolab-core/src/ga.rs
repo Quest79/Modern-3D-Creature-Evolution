@@ -461,19 +461,18 @@ where
                 .min(config.elite_count.saturating_mul(4).max(8));
             let mut verification_candidates = evaluated[..verification_count].to_vec();
 
-            if let Some(previous_champion) = final_champion.as_ref() {
-                if !verification_candidates
+            if let Some(previous_champion) = final_champion.as_ref()
+                && !verification_candidates
                     .iter()
                     .any(|candidate| candidate.genome == previous_champion.genome)
-                {
-                    let carried_champion = evaluated
-                        .iter()
-                        .find(|candidate| candidate.genome == previous_champion.genome)
-                        .ok_or_else(|| {
-                            "elite champion disappeared from the next generation".to_string()
-                        })?;
-                    verification_candidates.push(carried_champion.clone());
-                }
+            {
+                let carried_champion = evaluated
+                    .iter()
+                    .find(|candidate| candidate.genome == previous_champion.genome)
+                    .ok_or_else(|| {
+                        "elite champion disappeared from the next generation".to_string()
+                    })?;
+                verification_candidates.push(carried_champion.clone());
             }
 
             let verified =
