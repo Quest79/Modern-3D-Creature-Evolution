@@ -1909,13 +1909,15 @@ extern "C" __global__ void simulate_creatures(
             float x = state_position[slot * 3 + 0];
             float y = state_position[slot * 3 + 1];
             float z = state_position[slot * 3 + 2];
+            float linear_speed_sq = vx * vx + vy * vy + vz * vz;
             if (
                 !(vx == vx) || !(vy == vy) || !(vz == vz)
                 || !(x == x) || !(y == y) || !(z == z)
-                || fabsf(vx) > 10000.0f
-                || fabsf(vy) > 10000.0f
-                || fabsf(vz) > 10000.0f
+                || !(linear_speed_sq == linear_speed_sq)
+                || linear_speed_sq > 10000.0f
             ) {
+                // Any body segment above 100 m/s is invalid, even if each
+                // individual velocity component is below 100 m/s.
                 lane_unstable = 1;
             }
         }
