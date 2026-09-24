@@ -1358,9 +1358,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     "population": population.len(),
                     "preview_file": preview_path.to_string_lossy().to_string(),
                     "champion_index": if config.seed_population_from_ancestor {
-                        Some(0_usize)
+                        0_i64
                     } else {
-                        None
+                        -1_i64
                     },
                     "seed": config.seed,
                     "world": config.simulation.world,
