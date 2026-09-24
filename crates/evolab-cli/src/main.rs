@@ -15,7 +15,7 @@ use evolab_core::{
     FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec,
     RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation,
     WorldConfig, WorldSnapshot, discover_cuda_devices, evolve_population_checkpointed,
-    mutate_genome, random_creature, run_cuda_probe_batch,
+    generate_initial_population_preview, mutate_genome, random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
@@ -372,6 +372,14 @@ enum Command {
         #[arg(long, default_value = "Evolution")]
         experiment_name: String,
 
+        /// Generate the exact generation-1 population and stop before evaluation.
+        #[arg(long, default_value_t = false)]
+        preview_only: bool,
+
+        /// JSON file written by --preview-only.
+        #[arg(long)]
+        preview_output: Option<PathBuf>,
+
         /// Emit final evolution result as JSON.
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -569,6 +577,8 @@ fn run() -> Result<(), String> {
             champion_output,
             result_output,
             experiment_name,
+            preview_only,
+            preview_output,
             json,
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
@@ -614,6 +624,8 @@ fn run() -> Result<(), String> {
             champion_output: champion_output.as_ref(),
             result_output: result_output.as_ref(),
             experiment_name: &experiment_name,
+            preview_only,
+            preview_output: preview_output.as_ref(),
             json_output: json,
         }),
         Command::Run {
@@ -1213,6 +1225,8 @@ struct EvolveRequest<'a> {
     champion_output: Option<&'a PathBuf>,
     result_output: Option<&'a PathBuf>,
     experiment_name: &'a str,
+    preview_only: bool,
+    preview_output: Option<&'a PathBuf>,
     json_output: bool,
 }
 
@@ -1320,6 +1334,42 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         timeline,
     };
     config.validate()?;
+
+    if request.preview_only {
+        let preview_path = request
+            .preview_output
+            .ok_or_else(|| "--preview-only requires --preview-output".to_string())?;
+        let population = generate_initial_population_preview(&ancestor, &config)?;
+        let preview_json = serde_json::to_string_pretty(&population)
+            .map_err(|err| format!("failed to serialize population preview: {err}"))?;
+        fs::write(preview_path, preview_json).map_err(|err| {
+            format!(
+                "failed to write population preview {}: {err}",
+                preview_path.display()
+            )
+        })?;
+
+        if let Some(socket) = socket {
+            send_event(
+                socket,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "population_preview_ready",
+                    "population": population.len(),
+                    "preview_file": preview_path.to_string_lossy().to_string(),
+                    "champion_index": if config.seed_population_from_ancestor {
+                        Some(0_usize)
+                    } else {
+                        None
+                    },
+                    "seed": config.seed,
+                    "world": config.simulation.world,
+                    "world_geometry": config.simulation.world.geometry(),
+                }),
+            );
+        }
+        return Ok(());
+    }
 
     let resume_checkpoint = if let Some(path) = request.resume_checkpoint {
         Some(read_checkpoint(path)?)
