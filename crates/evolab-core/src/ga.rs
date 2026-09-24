@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     time::Instant,
 };
 
@@ -451,26 +451,38 @@ where
         timing.sorting_seconds = sorting_started.elapsed().as_secs_f64();
 
         let statistics_started = Instant::now();
-        let gpu_ranked_best = evaluated
-            .first()
-            .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
-        let verified_best = if execution.actual_mode == AcceleratorMode::Cuda {
-            let verification_count = evaluated.len().min(
-                config
-                    .tournament_size
-                    .saturating_mul(2)
-                    .max(config.elite_count.saturating_mul(4))
-                    .max(8),
-            );
-            Some(verify_top_candidates_with_rapier(
+        if execution.actual_mode == AcceleratorMode::Cuda {
+            // CUDA performs the full population search. Re-evaluate only the
+            // strongest few candidates with Rapier, then put those authoritative
+            // scores back into the ranked population before selection/breeding.
+            // This catches any remaining CUDA approximation error without moving
+            // the main evolutionary workload back to the CPU.
+            let verification_count = evaluated
+                .len()
+                .min(config.elite_count.saturating_mul(4).max(8));
+            let verified = verify_top_candidates_with_rapier(
                 &pool,
                 &evaluated[..verification_count],
                 &settings,
-            )?)
-        } else {
-            None
-        };
-        let best = verified_best.as_ref().unwrap_or(gpu_ranked_best);
+            )?;
+            let mut verified_by_id = verified
+                .into_iter()
+                .map(|item| (item.individual_id, item))
+                .collect::<HashMap<_, _>>();
+
+            for candidate in &mut evaluated {
+                if let Some(verified_candidate) =
+                    verified_by_id.remove(&candidate.individual_id)
+                {
+                    *candidate = verified_candidate;
+                }
+            }
+            evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        }
+
+        let best = evaluated
+            .first()
+            .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
         let worst = evaluated
             .last()
             .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
@@ -579,7 +591,6 @@ where
             let (next_population, breeding_telemetry) = breed_next_generation(
                 &pool,
                 &evaluated,
-                verified_best.as_ref(),
                 config,
                 &next_settings,
                 &mut rng,
@@ -1095,7 +1106,7 @@ fn verify_top_candidates_with_rapier(
     pool: &rayon::ThreadPool,
     gpu_ranked: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
-) -> Result<EvaluatedCreature, String> {
+) -> Result<Vec<EvaluatedCreature>, String> {
     if gpu_ranked.is_empty() {
         return Err("cannot verify an empty CUDA candidate set".into());
     }
@@ -1117,10 +1128,7 @@ fn verify_top_candidates_with_rapier(
 
     let mut verified = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     verified.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-    verified
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Rapier verification produced no candidate".to_string())
+    Ok(verified)
 }
 
 fn trial_seed(base: u64, trial_index: usize) -> u64 {
@@ -1238,7 +1246,6 @@ fn validate_effective_settings(settings: &EffectiveEvolutionSettings) -> Result<
 fn breed_next_generation(
     pool: &rayon::ThreadPool,
     evaluated: &[EvaluatedCreature],
-    verified_champion: Option<&EvaluatedCreature>,
     config: &EvolutionConfig,
     next_settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
@@ -1252,24 +1259,7 @@ fn breed_next_generation(
         .max(1);
     let tournament_size = config.tournament_size.min(evaluated.len()).max(1);
 
-    if let Some(champion) = verified_champion {
-        let individual_id = *next_individual_id;
-        *next_individual_id += 1;
-        next.push(Candidate {
-            individual_id,
-            parent_ids: vec![champion.individual_id],
-            genome: champion.genome.clone(),
-            mutations: Vec::new(),
-        });
-    }
-
-    for elite in evaluated.iter() {
-        if next.len() >= elite_count {
-            break;
-        }
-        if verified_champion.is_some_and(|champion| champion.individual_id == elite.individual_id) {
-            continue;
-        }
+    for elite in evaluated.iter().take(elite_count) {
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
         next.push(Candidate {
