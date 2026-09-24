@@ -1123,7 +1123,6 @@ fn verify_top_candidates_with_rapier(
         .ok_or_else(|| "Rapier verification produced no candidate".to_string())
 }
 
-
 fn trial_seed(base: u64, trial_index: usize) -> u64 {
     let mut value = base ^ (trial_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     value ^= value >> 30;
@@ -1268,9 +1267,7 @@ fn breed_next_generation(
         if next.len() >= elite_count {
             break;
         }
-        if verified_champion
-            .is_some_and(|champion| champion.individual_id == elite.individual_id)
-        {
+        if verified_champion.is_some_and(|champion| champion.individual_id == elite.individual_id) {
             continue;
         }
         let individual_id = *next_individual_id;
