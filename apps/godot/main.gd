@@ -98,6 +98,9 @@ var _progress_bar: ProgressBar
 var _metrics: RichTextLabel
 var _capabilities_label: Label
 var _hud_panel: PanelContainer
+var _performance_panel: PanelContainer
+var _performance_label: Label
+var _performance_update_accumulator := 0.0
 var _title_label: Label
 var _version_label: Label
 var _section_headings: Array[Label] = []
@@ -302,6 +305,11 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
     _update_camera_movement(delta)
+
+    _performance_update_accumulator += delta
+    if _performance_update_accumulator >= 0.1:
+        _performance_update_accumulator = fmod(_performance_update_accumulator, 0.1)
+        _update_performance_hud()
 
     if _udp == null:
         return
@@ -583,6 +591,36 @@ func _build_ui() -> void:
     _hud_resize_handle.tooltip_text = "Drag to resize the left HUD."
     _hud_resize_handle.gui_input.connect(_on_hud_resize_input)
     layer.add_child(_hud_resize_handle)
+
+    _performance_panel = PanelContainer.new()
+    _performance_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _performance_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+    _performance_panel.offset_left = -224.0
+    _performance_panel.offset_top = 10.0
+    _performance_panel.offset_right = -10.0
+    _performance_panel.offset_bottom = 160.0
+
+    var performance_style := StyleBoxFlat.new()
+    performance_style.bg_color = Color(0.018, 0.022, 0.030, 0.86)
+    performance_style.border_color = Color(0.32, 0.36, 0.44, 0.70)
+    performance_style.set_border_width_all(1)
+    performance_style.set_corner_radius_all(5)
+    performance_style.content_margin_left = 9.0
+    performance_style.content_margin_right = 9.0
+    performance_style.content_margin_top = 7.0
+    performance_style.content_margin_bottom = 7.0
+    _performance_panel.add_theme_stylebox_override("panel", performance_style)
+    layer.add_child(_performance_panel)
+
+    _performance_label = Label.new()
+    _performance_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _performance_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+    _performance_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+    _performance_label.add_theme_font_size_override("font_size", 11)
+    _performance_label.modulate = Color(0.84, 0.88, 0.94)
+    _performance_label.text = "PERFORMANCE\ninitializing..."
+    _performance_panel.add_child(_performance_label)
+    _update_performance_hud()
 
     var margin := MarginContainer.new()
     margin.add_theme_constant_override("margin_left", 18)
@@ -3430,6 +3468,66 @@ func _save_settings() -> void:
         _mouse_sensitivity_degrees
     )
     config.save(_settings_path())
+
+
+func _performance_monitor_value(monitor: int) -> float:
+    return float(Performance.get_monitor(monitor))
+
+
+func _performance_mb(bytes_value: float) -> float:
+    return bytes_value / (1024.0 * 1024.0)
+
+
+func _visible_segment_count() -> int:
+    return (
+        _world_meshes.size()
+        + _creature_meshes.size()
+        + _population_preview_meshes.size()
+        + (1 if is_instance_valid(_probe_mesh) and _probe_mesh.visible else 0)
+    )
+
+
+func _update_performance_hud() -> void:
+    if not is_instance_valid(_performance_label):
+        return
+
+    var fps := float(Engine.get_frames_per_second())
+    var frame_ms := 1000.0 / fps if fps > 0.0 else 0.0
+    var process_ms := (
+        _performance_monitor_value(Performance.TIME_PROCESS) * 1000.0
+    )
+    var physics_ms := (
+        _performance_monitor_value(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+    )
+    var draw_calls := int(
+        _performance_monitor_value(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
+    )
+    var objects := int(
+        _performance_monitor_value(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)
+    )
+    var primitives := int(
+        _performance_monitor_value(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+    )
+    var primitives_per_second := float(primitives) * fps
+    var nodes := int(_performance_monitor_value(Performance.OBJECT_NODE_COUNT))
+    var video_memory_mb := _performance_mb(
+        _performance_monitor_value(Performance.RENDER_VIDEO_MEM_USED)
+    )
+
+    _performance_label.text = (
+        "PERFORMANCE\n"
+        + "FPS             %7.1f\n" % fps
+        + "Frame           %7.2f ms\n" % frame_ms
+        + "Process         %7.2f ms\n" % process_ms
+        + "Physics         %7.2f ms\n" % physics_ms
+        + "Draw calls      %7d\n" % draw_calls
+        + "Objects         %7d\n" % objects
+        + "Polygons/frame  %7d\n" % primitives
+        + "Polygons/sec    %7.2f M\n" % (primitives_per_second / 1000000.0)
+        + "Visible meshes  %7d\n" % _visible_segment_count()
+        + "Nodes           %7d\n" % nodes
+        + "Video memory    %7.1f MB" % video_memory_mb
+    )
 
 
 func _update_layout() -> void:
