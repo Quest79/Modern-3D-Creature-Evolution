@@ -20,6 +20,8 @@ pub const BIOLOGICAL_MAX_CONTACT_FRICTION: f32 = 2.1;
 pub const BIOLOGICAL_MAX_MUSCLE_STRESS_PA: f32 = 1_400_000.0;
 pub const BIOLOGICAL_MAX_CYCLIC_POWER_W_PER_KG: f32 = 400.0;
 pub const MUSCLE_DENSITY_KG_M3: f32 = 1_060.0;
+/// Hard validity ceiling for any creature body segment's linear speed.
+pub const MAX_VALID_LINEAR_SPEED_M_S: f32 = 100.0;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -721,6 +723,19 @@ impl CreatureSimulator {
                 &(),
                 &(),
             );
+
+            for handle in handles.values() {
+                let body = rigid_bodies
+                    .get(*handle)
+                    .ok_or_else(|| "creature body disappeared while checking speed".to_string())?;
+                let speed = body.linvel().norm();
+                if !speed.is_finite() || speed > MAX_VALID_LINEAR_SPEED_M_S {
+                    return Err(format!(
+                        "unstable physics: body linear speed {:.3} m/s exceeds {:.1} m/s limit",
+                        speed, MAX_VALID_LINEAR_SPEED_M_S
+                    ));
+                }
+            }
 
             let mechanical_energy =
                 Self::mechanical_energy(&handles, &rigid_bodies, gravity, config.dt)?;
