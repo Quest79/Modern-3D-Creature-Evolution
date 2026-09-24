@@ -598,7 +598,7 @@ func _build_ui() -> void:
     _performance_panel.offset_left = -224.0
     _performance_panel.offset_top = 10.0
     _performance_panel.offset_right = -10.0
-    _performance_panel.offset_bottom = 160.0
+    _performance_panel.offset_bottom = 196.0
 
     var performance_style := StyleBoxFlat.new()
     performance_style.bg_color = Color(0.018, 0.022, 0.030, 0.86)
