@@ -716,8 +716,10 @@ func _build_ui() -> void:
     quick_evolution_row_2.add_child(_watch_champion_button)
 
     _population_preview_check = CheckBox.new()
-    _population_preview_check.text = "Preview starting population before evolution"
     _population_preview_check.button_pressed = _preview_population_before_evolution
+    _population_preview_check.text = _population_preview_checkbox_text(
+        _preview_population_before_evolution
+    )
     _population_preview_check.tooltip_text = (
         "When enabled, Start New Evolution and Continue Champion pause before generation 1 "
         + "and display the exact starting population in a frozen grid."
@@ -5282,43 +5284,6 @@ func _benchmark_handle_event(event: Dictionary) -> void:
     _benchmark_log("EVENT %s\n" % JSON.stringify(event))
 
     match kind:
-        "population_preview_ready":
-            var preview_file := str(event.get("preview_file", ""))
-            var preview_population := _load_population_preview_file(preview_file)
-            if preview_population.is_empty():
-                _population_preview_active = false
-                _pending_evolution_args = PackedStringArray()
-                _pending_evolution_label = ""
-                _job_pid = 0
-                _job_kind = ""
-                _set_status("Population preview could not be loaded.")
-                _finish_job_controls()
-                return
-
-            _job_pid = 0
-            _job_kind = ""
-            _dead_process_since_ms = -1
-            _job_started_ms = -1
-            _build_world_from_geometry(event.get("world_geometry", []))
-            _show_population_preview(
-                preview_population,
-                int(event.get("champion_index", -1))
-            )
-            _population_preview_active = true
-            _progress_bar.value = 0
-            _set_status(
-                "Starting population preview • %s creatures • frozen until Continue Evolution"
-                % str(preview_population.size())
-            )
-            _metrics.text = (
-                "[b]Starting population preview[/b]\n"
-                + "%s creatures shown in a frozen grid. "
-                % str(preview_population.size())
-                + "No evaluation or evolution has started yet.\n"
-                + "Press [b]Continue Evolution[/b] when you are ready."
-            )
-            _finish_job_controls()
-
         "evolution_started":
             _clear_population_preview()
             _build_world_from_geometry(event.get("world_geometry", []))
@@ -5805,6 +5770,9 @@ func _finish_job_controls() -> void:
     _set_timeline_controls_enabled(true)
     if _population_preview_check != null:
         _population_preview_check.disabled = false
+        _population_preview_check.text = _population_preview_checkbox_text(
+            _preview_population_before_evolution
+        )
     if _population_preview_continue_button != null:
         _population_preview_continue_button.visible = false
     _stop_button.disabled = true
@@ -5901,6 +5869,45 @@ func _handle_event(event: Dictionary) -> void:
         return
 
     match kind:
+        "population_preview_ready":
+            var preview_file := str(event.get("preview_file", ""))
+            var preview_population := _load_population_preview_file(preview_file)
+            if preview_population.is_empty():
+                _population_preview_active = false
+                _pending_evolution_args = PackedStringArray()
+                _pending_evolution_label = ""
+                _job_pid = 0
+                _job_kind = ""
+                _dead_process_since_ms = -1
+                _job_started_ms = -1
+                _set_status("Population preview could not be loaded.")
+                _finish_job_controls()
+                return
+
+            _job_pid = 0
+            _job_kind = ""
+            _dead_process_since_ms = -1
+            _job_started_ms = -1
+            _build_world_from_geometry(event.get("world_geometry", []))
+            _show_population_preview(
+                preview_population,
+                int(event.get("champion_index", -1))
+            )
+            _population_preview_active = true
+            _progress_bar.value = 0
+            _set_status(
+                "Starting population preview • %s creatures • frozen until Continue Evolution"
+                % str(preview_population.size())
+            )
+            _metrics.text = (
+                "[b]Starting population preview[/b]\n"
+                + "%s creatures shown in a frozen grid. "
+                % str(preview_population.size())
+                + "No evaluation or evolution has started yet.\n"
+                + "Press [b]Continue Evolution[/b] when you are ready."
+            )
+            _finish_job_controls()
+
         "evolution_started":
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
@@ -6416,8 +6423,18 @@ func _quaternion_from_array(value) -> Quaternion:
     return Quaternion.IDENTITY
 
 
+func _population_preview_checkbox_text(enabled: bool) -> String:
+    return (
+        "[X] Preview starting population before evolution"
+        if enabled
+        else "[ ] Preview starting population before evolution"
+    )
+
+
 func _on_population_preview_toggled(enabled: bool) -> void:
     _preview_population_before_evolution = enabled
+    if _population_preview_check != null:
+        _population_preview_check.text = _population_preview_checkbox_text(enabled)
     _save_settings()
 
 
