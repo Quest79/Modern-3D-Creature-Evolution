@@ -345,6 +345,11 @@ enum Command {
         #[arg(long, default_value = "deterministic")]
         throughput_mode: String,
 
+        /// Use the experimental simplified CUDA creature solver for evolution
+        /// scoring. Intended only for CUDA-vs-CPU development benchmarks.
+        #[arg(long, default_value_t = false)]
+        allow_approximate_cuda_evolution: bool,
+
         /// Write a resumable checkpoint after every completed generation.
         #[arg(long)]
         checkpoint_output: Option<PathBuf>,
@@ -562,6 +567,7 @@ fn run() -> Result<(), String> {
             gpu_max_joints,
             no_cpu_fallback,
             throughput_mode,
+            allow_approximate_cuda_evolution,
             checkpoint_output,
             resume_checkpoint,
             event_port,
@@ -607,6 +613,7 @@ fn run() -> Result<(), String> {
             gpu_max_joints,
             cpu_fallback: !no_cpu_fallback,
             throughput_mode: &throughput_mode,
+            allow_approximate_cuda_evolution,
             checkpoint_output: checkpoint_output.as_ref(),
             resume_checkpoint: resume_checkpoint.as_ref(),
             event_port,
@@ -1206,6 +1213,7 @@ struct EvolveRequest<'a> {
     gpu_max_joints: usize,
     cpu_fallback: bool,
     throughput_mode: &'a str,
+    allow_approximate_cuda_evolution: bool,
     checkpoint_output: Option<&'a PathBuf>,
     resume_checkpoint: Option<&'a PathBuf>,
     event_port: Option<u16>,
@@ -1293,6 +1301,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         mutations_per_child: request.mutations,
         mutation_probability: request.mutation_probability,
         seed_population_from_ancestor: request.genome_path.is_some(),
+        allow_approximate_cuda_evolution: request.allow_approximate_cuda_evolution,
         seed: request.seed,
         worker_threads: request.workers,
         simulation,
@@ -1361,6 +1370,11 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "trial_aggregation": config.trial_aggregation,
                 "timeline": config.timeline,
                 "accelerator": config.accelerator,
+                "authoritative_physics": if config.allow_approximate_cuda_evolution {
+                    "experimental-cuda"
+                } else {
+                    "rapier-cpu"
+                },
                 "resuming_from_generation": resume_checkpoint
                     .as_ref()
                     .map(|checkpoint| checkpoint.next_generation),
