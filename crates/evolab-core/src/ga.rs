@@ -296,6 +296,48 @@ where
     )
 }
 
+pub fn prepare_evolution_checkpoint(
+    ancestor: &CreatureGenome,
+    config: &EvolutionConfig,
+) -> Result<EvolutionCheckpoint, String> {
+    config.validate()?;
+    ancestor.validate()?;
+
+    let active_condition_ids = HashSet::new();
+    let mut first_settings = EffectiveEvolutionSettings::from(config);
+    config
+        .timeline
+        .apply_to(1, &active_condition_ids, &mut first_settings);
+    validate_effective_settings(&first_settings)?;
+
+    let mut rng = GenomeRng::new(config.seed);
+    let mut next_individual_id = 1_u64;
+    let population = initial_population(
+        ancestor,
+        &first_settings,
+        &mut rng,
+        &mut next_individual_id,
+        config.seed_population_from_ancestor,
+    )?;
+
+    let checkpoint = EvolutionCheckpoint {
+        format_version: CHECKPOINT_FORMAT_VERSION,
+        config: config.clone(),
+        next_generation: 1,
+        rng_state: rng.state(),
+        next_individual_id,
+        active_condition_ids: Vec::new(),
+        population: population.into_iter().map(CheckpointCandidate::from).collect(),
+        evaluations_completed: 0,
+        final_settings: first_settings,
+        last_champion: None,
+        champion_archive: Vec::new(),
+        history: Vec::new(),
+    };
+    checkpoint.validate()?;
+    Ok(checkpoint)
+}
+
 pub fn evolve_population_checkpointed<F, C>(
     ancestor: &CreatureGenome,
     config: &EvolutionConfig,
@@ -1688,6 +1730,25 @@ mod tests {
                 device.cuda = Default::default();
             }
         }
+    }
+
+    #[test]
+    fn prepared_checkpoint_contains_the_exact_generation_one_population() {
+        let config = EvolutionConfig {
+            population_size: 12,
+            generations: 3,
+            seed: 9876,
+            ..EvolutionConfig::default()
+        };
+        let ancestor = CreatureGenome::three_segment_walker();
+        let checkpoint = super::prepare_evolution_checkpoint(&ancestor, &config).unwrap();
+
+        assert_eq!(checkpoint.next_generation, 1);
+        assert_eq!(checkpoint.population.len(), 12);
+        assert!(checkpoint.history.is_empty());
+        assert!(checkpoint.champion_archive.is_empty());
+        assert_eq!(checkpoint.evaluations_completed, 0);
+        assert!(checkpoint.next_individual_id > checkpoint.population.len() as u64);
     }
 
     #[test]
