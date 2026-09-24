@@ -941,7 +941,11 @@ fn evaluate_population(
     accelerator: &AcceleratorConfig,
     allow_approximate_cuda: bool,
 ) -> Result<(Vec<EvaluatedCreature>, ExecutionPerformance), String> {
-    let requested_mode = accelerator.mode;
+    let requested_mode = if allow_approximate_cuda {
+        accelerator.mode
+    } else {
+        AcceleratorMode::Cpu
+    };
 
     // The custom CUDA creature solver is not physically equivalent to Rapier:
     // it uses a simplified articulated model and can rank genomes differently
@@ -1588,7 +1592,9 @@ fn tournament_select(
 #[cfg(test)]
 mod tests {
     use super::{EvolutionConfig, GenerationSummary, evolve_population};
-    use crate::{CreatureGenome, SimulationConfig};
+    use crate::{
+        AcceleratorConfig, AcceleratorMode, CreatureGenome, SimulationConfig, ThroughputMode,
+    };
 
     fn clear_runtime_timing(history: &mut [GenerationSummary]) {
         for summary in history {
@@ -1634,6 +1640,43 @@ mod tests {
         assert_eq!(result.history[0].lineage.len(), 6);
         assert!(!result.history[0].lineage[0].trial_seeds.is_empty());
         assert!(result.champion.validate().is_ok());
+    }
+
+    #[test]
+    fn normal_evolution_uses_authoritative_rapier_even_when_cuda_is_requested() {
+        let config = EvolutionConfig {
+            population_size: 3,
+            generations: 1,
+            tournament_size: 2,
+            elite_count: 1,
+            mutations_per_child: 1,
+            worker_threads: 1,
+            simulation: SimulationConfig {
+                duration_seconds: 0.02,
+                ..SimulationConfig::default()
+            },
+            accelerator: AcceleratorConfig {
+                mode: AcceleratorMode::Cuda,
+                cpu_fallback: false,
+                throughput_mode: ThroughputMode::Deterministic,
+                ..AcceleratorConfig::default()
+            },
+            allow_approximate_cuda_evolution: false,
+            ..EvolutionConfig::default()
+        };
+
+        let result =
+            evolve_population(&CreatureGenome::three_segment_walker(), &config, |_| Ok(()))
+                .unwrap();
+
+        assert_eq!(
+            result.history[0].execution.actual_mode,
+            AcceleratorMode::Cpu
+        );
+        assert_eq!(
+            result.history[0].execution.requested_mode,
+            AcceleratorMode::Cpu
+        );
     }
 
     #[test]
