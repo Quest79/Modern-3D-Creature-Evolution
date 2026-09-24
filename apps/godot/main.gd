@@ -145,6 +145,8 @@ var _has_evolution_champion := false
 var _preview_population_before_evolution := false
 var _population_preview_active := false
 var _population_preview_meshes: Array[MeshInstance3D] = []
+var _population_preview_camera_transform := Transform3D.IDENTITY
+var _population_preview_camera_saved := false
 var _pending_evolution_args := PackedStringArray()
 var _pending_evolution_label := ""
 var _champion_world: Dictionary = {}
@@ -5845,6 +5847,8 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
         disabled or not FileAccess.file_exists(_evolution_checkpoint_path())
     )
     _watch_champion_button.disabled = disabled or not _has_evolution_champion
+    if _population_preview_check != null:
+        _population_preview_check.disabled = disabled
     _save_button.disabled = disabled or _current_genome.is_empty()
     _save_experiment_button.disabled = disabled
     _load_experiment_button.disabled = disabled
@@ -6480,22 +6484,41 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
             if half.size() >= 3 and initial.size() >= 3:
                 maximum_span = maxf(
                     maximum_span,
-                    absf(float(initial[0])) + float(half[0]),
-                    absf(float(initial[2])) + float(half[2])
+                    maxf(
+                        absf(float(initial[0])) + float(half[0]),
+                        absf(float(initial[2])) + float(half[2])
+                    )
                 )
     var spacing := maxf(3.0, maximum_span * 2.2 + 1.0)
+    var rows := int(ceil(float(genomes.size()) / float(columns)))
+    var grid_width := float(maxi(columns - 1, 0)) * spacing
+    var grid_depth := float(maxi(rows - 1, 0)) * spacing
+    var grid_center := Vector3(2.2, 0.0, 0.0)
+
+    if is_instance_valid(_camera):
+        _population_preview_camera_transform = _camera.global_transform
+        _population_preview_camera_saved = true
+        var frame_size := maxf(maxf(grid_width, grid_depth), 6.0)
+        _camera.position = grid_center + Vector3(
+            frame_size * 0.90,
+            maxf(7.0, frame_size * 0.70),
+            frame_size * 0.90
+        )
+        _camera.look_at(grid_center + Vector3(0.0, 1.0, 0.0), Vector3.UP)
+        _camera_yaw = _camera.rotation.y
+        _camera_pitch = _camera.rotation.x
 
     for index in range(genomes.size()):
         var genome_value = genomes[index]
         if typeof(genome_value) != TYPE_DICTIONARY:
             continue
         var genome: Dictionary = genome_value
-        var row := index / columns
+        var row := int(index / columns)
         var column := index % columns
         var offset := Vector3(
             2.2 + (float(column) - float(columns - 1) * 0.5) * spacing,
             0.0,
-            (float(row) - float(ceil(float(genomes.size()) / columns) - 1) * 0.5) * spacing
+            (float(row) - float(rows - 1) * 0.5) * spacing
         )
 
         for segment_value in genome.get("segments", []):
@@ -6541,6 +6564,12 @@ func _clear_population_preview() -> void:
         if is_instance_valid(mesh):
             mesh.queue_free()
     _population_preview_meshes.clear()
+
+    if _population_preview_camera_saved and is_instance_valid(_camera):
+        _camera.global_transform = _population_preview_camera_transform
+        _camera_yaw = _camera.rotation.y
+        _camera_pitch = _camera.rotation.x
+    _population_preview_camera_saved = false
 
 
 func _build_creature_from_genome(genome_value) -> void:
