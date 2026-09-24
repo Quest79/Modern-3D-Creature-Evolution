@@ -5284,45 +5284,6 @@ func _benchmark_handle_event(event: Dictionary) -> void:
     _benchmark_log("EVENT %s\n" % JSON.stringify(event))
 
     match kind:
-        "population_preview_ready":
-            var preview_file := str(event.get("preview_file", ""))
-            var preview_population := _load_population_preview_file(preview_file)
-            if preview_population.is_empty():
-                _population_preview_active = false
-                _pending_evolution_args = PackedStringArray()
-                _pending_evolution_label = ""
-                _job_pid = 0
-                _job_kind = ""
-                _dead_process_since_ms = -1
-                _job_started_ms = -1
-                _set_status("Population preview could not be loaded.")
-                _finish_job_controls()
-                return
-
-            _job_pid = 0
-            _job_kind = ""
-            _dead_process_since_ms = -1
-            _job_started_ms = -1
-            _build_world_from_geometry(event.get("world_geometry", []))
-            _show_population_preview(
-                preview_population,
-                int(event.get("champion_index", -1))
-            )
-            _population_preview_active = true
-            _progress_bar.value = 0
-            _set_status(
-                "Starting population preview • %s creatures • frozen until Continue Evolution"
-                % str(preview_population.size())
-            )
-            _metrics.text = (
-                "[b]Starting population preview[/b]\n"
-                + "%s creatures shown in a frozen grid. "
-                % str(preview_population.size())
-                + "No evaluation or evolution has started yet.\n"
-                + "Press [b]Continue Evolution[/b] when you are ready."
-            )
-            _finish_job_controls()
-
         "evolution_started":
             _clear_population_preview()
             _build_world_from_geometry(event.get("world_geometry", []))
@@ -5908,6 +5869,45 @@ func _handle_event(event: Dictionary) -> void:
         return
 
     match kind:
+        "population_preview_ready":
+            var preview_file := str(event.get("preview_file", ""))
+            var preview_population := _load_population_preview_file(preview_file)
+            if preview_population.is_empty():
+                _population_preview_active = false
+                _pending_evolution_args = PackedStringArray()
+                _pending_evolution_label = ""
+                _job_pid = 0
+                _job_kind = ""
+                _dead_process_since_ms = -1
+                _job_started_ms = -1
+                _set_status("Population preview could not be loaded.")
+                _finish_job_controls()
+                return
+
+            _job_pid = 0
+            _job_kind = ""
+            _dead_process_since_ms = -1
+            _job_started_ms = -1
+            _build_world_from_geometry(event.get("world_geometry", []))
+            _show_population_preview(
+                preview_population,
+                int(event.get("champion_index", -1))
+            )
+            _population_preview_active = true
+            _progress_bar.value = 0
+            _set_status(
+                "Starting population preview • %s creatures • frozen until Continue Evolution"
+                % str(preview_population.size())
+            )
+            _metrics.text = (
+                "[b]Starting population preview[/b]\n"
+                + "%s creatures shown in a frozen grid. "
+                % str(preview_population.size())
+                + "No evaluation or evolution has started yet.\n"
+                + "Press [b]Continue Evolution[/b] when you are ready."
+            )
+            _finish_job_controls()
+
         "evolution_started":
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
