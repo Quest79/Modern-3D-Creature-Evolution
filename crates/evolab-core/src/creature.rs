@@ -728,7 +728,7 @@ impl CreatureSimulator {
                 let body = rigid_bodies
                     .get(*handle)
                     .ok_or_else(|| "creature body disappeared while checking speed".to_string())?;
-                let speed = body.linvel().norm();
+                let speed = body.linvel().length();
                 if !speed.is_finite() || speed > MAX_VALID_LINEAR_SPEED_M_S {
                     return Err(format!(
                         "unstable physics: body linear speed {:.3} m/s exceeds {:.1} m/s limit",

@@ -4824,6 +4824,9 @@ func _benchmark_evolution_args(backend: String, evaluation_pool: int) -> PackedS
         "--no-cpu-fallback",
     ])
 
+    if backend == "cuda":
+        args.append("--allow-approximate-cuda-evolution")
+
     if not _benchmark_parent_path.is_empty():
         args.append_array(PackedStringArray(["--genome", _benchmark_parent_path]))
     return args
@@ -5786,8 +5789,9 @@ func _handle_event(event: Dictionary) -> void:
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
             _set_status(
-                "Evolution started • %s founder • %s segments • %s survivors • %s generations"
+                "Evolution started • %s physics • %s founder • %s segments • %s survivors • %s generations"
                 % [
+                    str(event.get("authoritative_physics", "rapier-cpu")),
                     str(event.get("ancestor_source", "unknown")),
                     str(event.get("ancestor_segments", 0)),
                     str(event.get("population", 0)),

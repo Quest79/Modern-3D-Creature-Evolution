@@ -39,6 +39,11 @@ pub struct EvolutionConfig {
     /// When false, generation 1 is composed of independently randomized creatures.
     #[serde(default)]
     pub seed_population_from_ancestor: bool,
+    /// Experimental escape hatch for benchmarking the custom CUDA creature
+    /// solver. Normal evolution keeps Rapier as the authoritative physics so
+    /// fitness and Watch Champion are measured by the same simulator.
+    #[serde(default)]
+    pub allow_approximate_cuda_evolution: bool,
     pub seed: u64,
     pub worker_threads: usize,
     pub simulation: SimulationConfig,
@@ -68,6 +73,7 @@ impl Default for EvolutionConfig {
             mutations_per_child: 8,
             mutation_probability: default_mutation_probability(),
             seed_population_from_ancestor: false,
+            allow_approximate_cuda_evolution: false,
             seed: 1,
             worker_threads: 0,
             simulation: SimulationConfig {
@@ -440,8 +446,13 @@ where
         offspring_telemetry.accumulate(&expansion_telemetry);
 
         let evaluation_started = Instant::now();
-        let (mut evaluated, execution) =
-            evaluate_population(&pool, &evaluation_pool, &settings, &config.accelerator)?;
+        let (mut evaluated, execution) = evaluate_population(
+            &pool,
+            &evaluation_pool,
+            &settings,
+            &config.accelerator,
+            config.allow_approximate_cuda_evolution,
+        )?;
         timing.evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
         evaluations_completed += evaluated.len() * settings.trials_per_creature;
         let population_telemetry = summarize_population_telemetry(&evaluated);
@@ -928,10 +939,20 @@ fn evaluate_population(
     population: &[Candidate],
     settings: &EffectiveEvolutionSettings,
     accelerator: &AcceleratorConfig,
+    allow_approximate_cuda: bool,
 ) -> Result<(Vec<EvaluatedCreature>, ExecutionPerformance), String> {
-    let requested_mode = accelerator.mode;
+    let requested_mode = if allow_approximate_cuda {
+        accelerator.mode
+    } else {
+        AcceleratorMode::Cpu
+    };
 
-    if requested_mode != AcceleratorMode::Cpu {
+    // The custom CUDA creature solver is not physically equivalent to Rapier:
+    // it uses a simplified articulated model and can rank genomes differently
+    // from the exact simulator used by Watch Champion. Keep Rapier authoritative
+    // for real evolution. The CUDA path remains available only for explicit
+    // performance/physics-development benchmarks.
+    if allow_approximate_cuda && requested_mode != AcceleratorMode::Cpu {
         let preparation_started = Instant::now();
         let mut gpu_genomes = Vec::with_capacity(population.len() * settings.trials_per_creature);
         for candidate in population {
@@ -1571,7 +1592,9 @@ fn tournament_select(
 #[cfg(test)]
 mod tests {
     use super::{EvolutionConfig, GenerationSummary, evolve_population};
-    use crate::{CreatureGenome, SimulationConfig};
+    use crate::{
+        AcceleratorConfig, AcceleratorMode, CreatureGenome, SimulationConfig, ThroughputMode,
+    };
 
     fn clear_runtime_timing(history: &mut [GenerationSummary]) {
         for summary in history {
@@ -1617,6 +1640,43 @@ mod tests {
         assert_eq!(result.history[0].lineage.len(), 6);
         assert!(!result.history[0].lineage[0].trial_seeds.is_empty());
         assert!(result.champion.validate().is_ok());
+    }
+
+    #[test]
+    fn normal_evolution_uses_authoritative_rapier_even_when_cuda_is_requested() {
+        let config = EvolutionConfig {
+            population_size: 3,
+            generations: 1,
+            tournament_size: 2,
+            elite_count: 1,
+            mutations_per_child: 1,
+            worker_threads: 1,
+            simulation: SimulationConfig {
+                duration_seconds: 0.02,
+                ..SimulationConfig::default()
+            },
+            accelerator: AcceleratorConfig {
+                mode: AcceleratorMode::Cuda,
+                cpu_fallback: false,
+                throughput_mode: ThroughputMode::Deterministic,
+                ..AcceleratorConfig::default()
+            },
+            allow_approximate_cuda_evolution: false,
+            ..EvolutionConfig::default()
+        };
+
+        let result =
+            evolve_population(&CreatureGenome::three_segment_walker(), &config, |_| Ok(()))
+                .unwrap();
+
+        assert_eq!(
+            result.history[0].execution.actual_mode,
+            AcceleratorMode::Cpu
+        );
+        assert_eq!(
+            result.history[0].execution.requested_mode,
+            AcceleratorMode::Cpu
+        );
     }
 
     #[test]
