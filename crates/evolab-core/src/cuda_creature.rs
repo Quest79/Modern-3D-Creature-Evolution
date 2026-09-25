@@ -1327,6 +1327,36 @@ mod platform {
         })
     }
 
+    pub fn run_visual_stream(
+        genomes: &[CreatureGenome],
+        simulation: &SimulationConfig,
+        accelerator: &AcceleratorConfig,
+        device_info: &CudaDeviceInfo,
+        frame_hz: f32,
+        observer: &mut dyn FnMut(&CudaCreatureVisualFrame) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (runtime, _) = get_or_create_runtime(device_info, accelerator.throughput_mode)?;
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
+        check_cuda(
+            unsafe { (runtime.api.ctx_set_current)(runtime.context) },
+            "cuCtxSetCurrent",
+        )?;
+
+        let fitness = FitnessConfig::default();
+        run_chunk(
+            &mut runtime,
+            genomes,
+            simulation,
+            &fitness,
+            accelerator,
+            Some(frame_hz),
+            Some(observer),
+        )?;
+        Ok(())
+    }
+
     struct DeviceAssignmentResult {
         results: Vec<(usize, FitnessResult)>,
         performance: DevicePerformance,
@@ -1360,7 +1390,15 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_result = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            let chunk_result = run_chunk(
+                &mut runtime,
+                chunk,
+                simulation,
+                fitness,
+                accelerator,
+                None,
+                None,
+            )?;
             cuda_telemetry.accumulate(&chunk_result.telemetry);
             all_results.extend(
                 chunk_result
@@ -1398,6 +1436,10 @@ mod platform {
         simulation: &SimulationConfig,
         fitness: &FitnessConfig,
         accelerator: &AcceleratorConfig,
+        visual_frame_hz: Option<f32>,
+        mut visual_observer: Option<
+            &mut dyn FnMut(&CudaCreatureVisualFrame) -> Result<(), String>,
+        >,
     ) -> Result<ChunkResult, String> {
         let mut telemetry = CudaExecutionTelemetry::default();
         telemetry.batch_count = 1;
@@ -1493,7 +1535,10 @@ mod platform {
             workspace.ensure(api, "out_unstable", world_count * size_of::<u32>())?;
 
         let mut dt = simulation.dt;
-        let mut steps = simulation.step_count() as u32;
+        let total_steps = simulation.step_count() as u32;
+        let visual_steps_per_frame = visual_frame_hz.map(|hz| {
+            ((1.0 / (simulation.dt * hz)).round() as u32).max(1)
+        });
         let mut gravity_y = simulation.world.gravity[1];
         let mut ground_y = simulation.world.surface_height_at(0.0, 0.0).unwrap_or(0.0);
         let mut activation = simulation.motor_strength_multiplier;
@@ -1527,108 +1572,155 @@ mod platform {
         }
 
         let kernel_window_started = Instant::now();
-        let launch_started = Instant::now();
-        for (lane, stream) in streams.iter().enumerate() {
-            let start = world_count * lane / lane_count;
-            let end = world_count * (lane + 1) / lane_count;
-            let launch_count = end - start;
-            if launch_count == 0 {
-                continue;
+        let visual_wall_started = Instant::now();
+        let mut step_start = 0_u32;
+        let mut visual_positions = vec![0.0_f32; part_slots * 3];
+        let mut visual_rotations = vec![0.0_f32; part_slots * 4];
+
+        while step_start < total_steps {
+            let mut steps = visual_steps_per_frame
+                .map(|frame_steps| frame_steps.min(total_steps - step_start))
+                .unwrap_or(total_steps);
+            let mut step_start_arg = step_start;
+            let mut initialize_state_arg = u32::from(step_start == 0);
+            let launch_started = Instant::now();
+
+            for (lane, stream) in streams.iter().enumerate() {
+                let start = world_count * lane / lane_count;
+                let end = world_count * (lane + 1) / lane_count;
+                let launch_count = end - start;
+                if launch_count == 0 {
+                    continue;
+                }
+
+                let mut world_start_arg = start as u32;
+                let mut launch_count_arg = launch_count as u32;
+                let mut params = [
+                    (&mut p_part_count as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_joint_count as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_part_base as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_joint_base as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_inv_mass as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_inv_inertia as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_friction as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_parent as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_child as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_axis as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_parent_anchor as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_child_anchor as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_rest_relative as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_limit_min as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_limit_max as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_inertia as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_biological_torque as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_biological_power as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_requested_torque as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_brain_start as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_brain_count as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_op_code as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_op_index as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_op_a as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_op_b as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_position as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_velocity as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_rotation as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_angular_velocity as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_contact as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_angle as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_angvel as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_state_target as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_joint_force as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_joint_torque as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_score as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_distance as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_speed as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_upright as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
+                    (&mut world_start_arg as *mut u32).cast::<c_void>(),
+                    (&mut launch_count_arg as *mut u32).cast::<c_void>(),
+                    (&mut dt as *mut f32).cast::<c_void>(),
+                    (&mut steps as *mut u32).cast::<c_void>(),
+                    (&mut step_start_arg as *mut u32).cast::<c_void>(),
+                    (&mut initialize_state_arg as *mut u32).cast::<c_void>(),
+                    (&mut gravity_y as *mut f32).cast::<c_void>(),
+                    (&mut ground_y as *mut f32).cast::<c_void>(),
+                    (&mut activation as *mut f32).cast::<c_void>(),
+                    (&mut weight_distance as *mut f32).cast::<c_void>(),
+                    (&mut weight_speed as *mut f32).cast::<c_void>(),
+                    (&mut weight_upright as *mut f32).cast::<c_void>(),
+                    (&mut weight_stability as *mut f32).cast::<c_void>(),
+                    (&mut weight_energy as *mut f32).cast::<c_void>(),
+                ];
+
+                let grid_size = (launch_count as u32).div_ceil(CUDA_CREATURES_PER_BLOCK);
+                telemetry.kernel_launch_count += 1;
+                telemetry.grid_blocks_total += grid_size as u64;
+                check_cuda(
+                    unsafe {
+                        (api.launch_kernel)(
+                            function,
+                            grid_size,
+                            1,
+                            1,
+                            CUDA_BLOCK_SIZE,
+                            1,
+                            1,
+                            0,
+                            stream.stream,
+                            params.as_mut_ptr(),
+                            null_mut(),
+                        )
+                    },
+                    "cuLaunchKernel(simulate_creatures)",
+                )?;
             }
+            telemetry.kernel_launch_seconds += launch_started.elapsed().as_secs_f64();
 
-            let mut world_start_arg = start as u32;
-            let mut launch_count_arg = launch_count as u32;
-            let mut params = [
-                (&mut p_part_count as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_joint_count as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_part_base as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_joint_base as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_initial_position as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_half_extents as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_inv_mass as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_inv_inertia as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_friction as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_parent as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_child as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_axis as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_parent_anchor as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_child_anchor as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_rest_relative as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_limit_min as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_limit_max as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_inertia as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_biological_torque as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_biological_power as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_requested_torque as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_brain_start as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_brain_count as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_op_code as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_op_index as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_op_a as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_op_b as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_position as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_velocity as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_rotation as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_angular_velocity as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_contact as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_angle as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_angvel as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_state_target as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_joint_force as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_joint_torque as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_score as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_distance as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_speed as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_upright as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
-                (&mut world_start_arg as *mut u32).cast::<c_void>(),
-                (&mut launch_count_arg as *mut u32).cast::<c_void>(),
-                (&mut dt as *mut f32).cast::<c_void>(),
-                (&mut steps as *mut u32).cast::<c_void>(),
-                (&mut gravity_y as *mut f32).cast::<c_void>(),
-                (&mut ground_y as *mut f32).cast::<c_void>(),
-                (&mut activation as *mut f32).cast::<c_void>(),
-                (&mut weight_distance as *mut f32).cast::<c_void>(),
-                (&mut weight_speed as *mut f32).cast::<c_void>(),
-                (&mut weight_upright as *mut f32).cast::<c_void>(),
-                (&mut weight_stability as *mut f32).cast::<c_void>(),
-                (&mut weight_energy as *mut f32).cast::<c_void>(),
-            ];
+            let synchronization_started = Instant::now();
+            for stream in &streams {
+                check_cuda(
+                    unsafe { (api.stream_synchronize)(stream.stream) },
+                    "cuStreamSynchronize",
+                )?;
+            }
+            telemetry.synchronization_seconds +=
+                synchronization_started.elapsed().as_secs_f64();
 
-            let grid_size = (launch_count as u32).div_ceil(CUDA_CREATURES_PER_BLOCK);
-            telemetry.kernel_launch_count += 1;
-            telemetry.grid_blocks_total += grid_size as u64;
-            check_cuda(
-                unsafe {
-                    (api.launch_kernel)(
-                        function,
-                        grid_size,
-                        1,
-                        1,
-                        CUDA_BLOCK_SIZE,
-                        1,
-                        1,
-                        0,
-                        stream.stream,
-                        params.as_mut_ptr(),
-                        null_mut(),
-                    )
-                },
-                "cuLaunchKernel(simulate_creatures)",
-            )?;
+            step_start += steps;
+
+            if let Some(observer) = visual_observer.as_deref_mut() {
+                let download_started = Instant::now();
+                workspace.download(api, "state_position", &mut visual_positions)?;
+                workspace.download(api, "state_rotation", &mut visual_rotations)?;
+                telemetry.d_to_h_seconds += download_started.elapsed().as_secs_f64();
+
+                let positions = visual_positions
+                    .chunks_exact(3)
+                    .map(|values| [values[0], values[1], values[2]])
+                    .collect::<Vec<_>>();
+                let rotations_xyzw = visual_rotations
+                    .chunks_exact(4)
+                    .map(|values| [values[0], values[1], values[2], values[3]])
+                    .collect::<Vec<_>>();
+                let simulated_seconds = step_start as f32 * simulation.dt;
+                observer(&CudaCreatureVisualFrame {
+                    simulated_seconds,
+                    positions,
+                    rotations_xyzw,
+                })?;
+
+                let target_elapsed = Duration::from_secs_f64(simulated_seconds as f64);
+                let elapsed = visual_wall_started.elapsed();
+                if target_elapsed > elapsed {
+                    thread::sleep(target_elapsed - elapsed);
+                }
+            }
         }
-        telemetry.kernel_launch_seconds = launch_started.elapsed().as_secs_f64();
 
-        let synchronization_started = Instant::now();
-        for stream in &streams {
-            check_cuda(
-                unsafe { (api.stream_synchronize)(stream.stream) },
-                "cuStreamSynchronize",
-            )?;
-        }
-        telemetry.synchronization_seconds = synchronization_started.elapsed().as_secs_f64();
         telemetry.kernel_execution_seconds = kernel_window_started.elapsed().as_secs_f64();
 
         let mut score = vec![0.0; world_count];
@@ -1872,6 +1964,8 @@ extern "C" __global__ void simulate_creatures(
     unsigned launch_world_count,
     float dt,
     unsigned steps,
+    unsigned step_start,
+    unsigned initialize_state,
     float gravity_y,
     float ground_y,
     float activation,
@@ -1895,9 +1989,10 @@ extern "C" __global__ void simulate_creatures(
     unsigned joint_base = joint_base_by_world[world];
     unsigned root_slot = part_base;
 
-    for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
-        unsigned slot = part_base + p;
-        state_position[slot * 3 + 0] = initial_position[slot * 3 + 0];
+    if (initialize_state) {
+        for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+            unsigned slot = part_base + p;
+            state_position[slot * 3 + 0] = initial_position[slot * 3 + 0];
         state_position[slot * 3 + 1] = initial_position[slot * 3 + 1];
         state_position[slot * 3 + 2] = initial_position[slot * 3 + 2];
         state_velocity[slot * 3 + 0] = 0.0f;
@@ -1926,9 +2021,10 @@ extern "C" __global__ void simulate_creatures(
         joint_force[js * 3 + 0] = 0.0f;
         joint_force[js * 3 + 1] = 0.0f;
         joint_force[js * 3 + 2] = 0.0f;
-        joint_torque[js * 3 + 0] = 0.0f;
-        joint_torque[js * 3 + 1] = 0.0f;
-        joint_torque[js * 3 + 2] = 0.0f;
+            joint_torque[js * 3 + 0] = 0.0f;
+            joint_torque[js * 3 + 1] = 0.0f;
+            joint_torque[js * 3 + 2] = 0.0f;
+        }
     }
     __syncwarp(subgroup_mask);
 
@@ -1941,7 +2037,7 @@ extern "C" __global__ void simulate_creatures(
     unsigned group_unstable = 0;
 
     for (unsigned step = 0; step < steps; ++step) {
-        float time_seconds = (float)step * dt;
+        float time_seconds = (float)(step_start + step) * dt;
 
         for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
             unsigned slot = part_base + p;
