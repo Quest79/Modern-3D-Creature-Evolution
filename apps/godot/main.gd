@@ -4047,12 +4047,6 @@ func _start_evolution_run(continue_current: bool) -> void:
         "--experiment-name", _experiment_name,
     ])
     args.append_array(_accelerator_cli_args())
-    if _slow_visual_mode:
-        args.append("--slow-visual")
-        args.append_array(PackedStringArray([
-            "--visual-output", _runtime_path("population_visual.json"),
-            "--visual-sample-hz", "10.0",
-        ]))
 
     if continue_current:
         var parent_path := _runtime_path("evolution_parent.json")
@@ -4082,6 +4076,7 @@ func _start_evolution_run(continue_current: bool) -> void:
             )
         return
 
+    _append_slow_visual_args(args)
     _set_status("Starting %s..." % run_label)
     if _start_job("evolution", args):
         _set_status("%s started • waiting for generation 1" % run_label.capitalize())
@@ -5933,6 +5928,9 @@ func _finish_job_controls() -> void:
         _population_preview_continue_button.visible = true
         _population_preview_continue_button.disabled = false
         _population_preview_check.disabled = true
+        if _slow_visual_check != null:
+            _slow_visual_check.disabled = false
+            _slow_visual_check.text = _slow_visual_checkbox_text(_slow_visual_mode)
         _stop_button.disabled = false
         return
 
@@ -6672,11 +6670,22 @@ func _on_slow_visual_toggled(enabled: bool) -> void:
     _save_settings()
 
 
+func _append_slow_visual_args(args: PackedStringArray) -> void:
+    if not _slow_visual_mode:
+        return
+    args.append("--slow-visual")
+    args.append_array(PackedStringArray([
+        "--visual-output", _runtime_path("population_visual.json"),
+        "--visual-sample-hz", "10.0",
+    ]))
+
+
 func _on_population_preview_continue_pressed() -> void:
     if not _population_preview_active or _pending_evolution_args.is_empty():
         return
 
     var args := PackedStringArray(_pending_evolution_args)
+    _append_slow_visual_args(args)
     var run_label := _pending_evolution_label
     _population_preview_active = false
     _pending_evolution_args = PackedStringArray()
