@@ -1460,13 +1460,14 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 let visual_path = request
                     .visual_output
                     .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
-                let (frame_count, body_count) = write_population_visualization(
-                    visual_path,
-                    summary.generation,
-                    visual_population,
-                    &summary.effective_settings,
-                    request.visual_sample_hz,
-                )?;
+                let (frame_count, body_count, frozen_creatures) =
+                    write_population_visualization(
+                        visual_path,
+                        summary.generation,
+                        visual_population,
+                        &summary.effective_settings,
+                        request.visual_sample_hz,
+                    )?;
                 if let Some(socket) = socket {
                     send_event(
                         socket,
@@ -1479,6 +1480,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                             "population": visual_population.len(),
                             "frames": frame_count,
                             "bodies": body_count,
+                            "frozen_creatures": frozen_creatures,
                             "duration_seconds":
                                 summary.effective_settings.simulation.duration_seconds,
                             "sample_hz": request.visual_sample_hz,
@@ -1658,7 +1660,7 @@ fn write_population_visualization(
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
     sample_hz: f32,
-) -> Result<(usize, usize), String> {
+) -> Result<(usize, usize, usize), String> {
     if population.is_empty() {
         return Err("cannot visualize an empty population".into());
     }
@@ -1672,7 +1674,7 @@ fn write_population_visualization(
         .par_iter()
         .map(|creature| {
             let mut frames = Vec::new();
-            CreatureSimulator.run_streaming(
+            let result = CreatureSimulator.run_streaming(
                 &settings.simulation,
                 &creature.genome,
                 sample_every_steps,
@@ -1680,19 +1682,19 @@ fn write_population_visualization(
                     frames.push(snapshot.clone());
                     Ok(())
                 },
-            )?;
-            Ok::<Vec<CreatureSnapshot>, String>(frames)
+            );
+            (frames, result.is_err())
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
 
-    let frame_count = trajectories
+    let frozen_creatures = trajectories
         .iter()
-        .map(Vec::len)
-        .min()
-        .ok_or_else(|| "population visualization produced no trajectories".to_string())?;
-    if frame_count == 0 {
-        return Err("population visualization produced no frames".into());
-    }
+        .filter(|(_, failed)| *failed)
+        .count();
+    let total_steps = settings.simulation.step_count();
+    let frame_count = 1
+        + total_steps / sample_every_steps
+        + usize::from(total_steps % sample_every_steps != 0);
 
     let body_count = population
         .iter()
@@ -1731,14 +1733,40 @@ fn write_population_visualization(
                 .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
         }
 
-        let simulated_seconds = trajectories[0][frame_index].simulated_seconds;
+        let step = if frame_index + 1 == frame_count {
+            total_steps
+        } else {
+            frame_index * sample_every_steps
+        };
+        let simulated_seconds = step as f32 * settings.simulation.dt;
         write!(writer, "{{\"t\":{},\"creatures\":", simulated_seconds)
             .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
         let compact = trajectories
             .iter()
-            .map(|trajectory| {
-                trajectory[frame_index]
+            .zip(population.iter())
+            .map(|((trajectory, _failed), creature)| {
+                if trajectory.is_empty() {
+                    return creature
+                        .genome
+                        .segments
+                        .iter()
+                        .map(|segment| {
+                            [
+                                segment.initial_position[0],
+                                segment.initial_position[1],
+                                segment.initial_position[2],
+                                0.0,
+                                0.0,
+                                0.0,
+                                1.0,
+                            ]
+                        })
+                        .collect::<Vec<_>>();
+                }
+
+                let source_index = frame_index.min(trajectory.len() - 1);
+                trajectory[source_index]
                     .bodies
                     .iter()
                     .map(|body| {
@@ -1768,7 +1796,7 @@ fn write_population_visualization(
         .and_then(|_| writer.flush())
         .map_err(|err| format!("failed to finalize visual file {}: {err}", path.display()))?;
 
-    Ok((frame_count, body_count))
+    Ok((frame_count, body_count, frozen_creatures))
 }
 
 fn run_experiment(
