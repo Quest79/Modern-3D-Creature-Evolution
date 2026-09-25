@@ -12,6 +12,7 @@ const DEFAULT_HUD_WIDTH := 400.0
 const MIN_HUD_WIDTH := 160.0
 const MAX_HUD_WIDTH := 400.0
 const HUD_RESIZE_HANDLE_WIDTH := 8.0
+const PERFORMANCE_HUD_UPDATE_SECONDS := 0.1
 
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
@@ -104,6 +105,8 @@ var _performance_label: Label
 var _performance_update_accumulator := 0.0
 var _title_label: Label
 var _version_label: Label
+var _performance_hud_panel: PanelContainer
+var _performance_hud_label: Label
 var _section_headings: Array[Label] = []
 var _ui_theme: Theme
 var _settings_window: Window
@@ -168,6 +171,7 @@ var _champion_motor_strength := 1.0
 var _results_data: Dictionary = {}
 var _latest_results_path := ""
 var _cuda_devices: Array = []
+var _performance_hud_elapsed := 0.0
 
 var _font_size := 16
 var _hud_scale_percent := 100
@@ -291,6 +295,7 @@ func _ready() -> void:
 
     _build_3d_preview()
     _build_ui()
+    _build_performance_hud()
     _build_settings_window()
     _build_results_window()
     _build_file_dialogs()
@@ -321,6 +326,14 @@ func _process(delta: float) -> void:
     _performance_update_accumulator += delta
     if _performance_update_accumulator >= 0.1:
         _performance_update_accumulator = fmod(_performance_update_accumulator, 0.1)
+        _update_performance_hud()
+
+    _performance_hud_elapsed += delta
+    if _performance_hud_elapsed >= PERFORMANCE_HUD_UPDATE_SECONDS:
+        _performance_hud_elapsed = fmod(
+            _performance_hud_elapsed,
+            PERFORMANCE_HUD_UPDATE_SECONDS
+        )
         _update_performance_hud()
 
     if _udp == null:
@@ -584,6 +597,109 @@ func _build_3d_preview() -> void:
     _camera.look_at(Vector3(2.2, 1.2, 0.0), Vector3.UP)
     _camera_yaw = _camera.rotation.y
     _camera_pitch = _camera.rotation.x
+
+
+func _build_performance_hud() -> void:
+    var layer := CanvasLayer.new()
+    layer.layer = 50
+    add_child(layer)
+
+    _performance_hud_panel = PanelContainer.new()
+    _performance_hud_panel.anchor_left = 1.0
+    _performance_hud_panel.anchor_right = 1.0
+    _performance_hud_panel.anchor_top = 0.0
+    _performance_hud_panel.anchor_bottom = 0.0
+    _performance_hud_panel.offset_left = -230.0
+    _performance_hud_panel.offset_right = -10.0
+    _performance_hud_panel.offset_top = 10.0
+    _performance_hud_panel.offset_bottom = 160.0
+    _performance_hud_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+    var panel_style := StyleBoxFlat.new()
+    panel_style.bg_color = Color(0.02, 0.025, 0.035, 0.82)
+    panel_style.border_color = Color(0.34, 0.39, 0.48, 0.70)
+    panel_style.set_border_width_all(1)
+    panel_style.corner_radius_top_left = 4
+    panel_style.corner_radius_top_right = 4
+    panel_style.corner_radius_bottom_left = 4
+    panel_style.corner_radius_bottom_right = 4
+    _performance_hud_panel.add_theme_stylebox_override("panel", panel_style)
+    layer.add_child(_performance_hud_panel)
+
+    var margin := MarginContainer.new()
+    margin.add_theme_constant_override("margin_left", 8)
+    margin.add_theme_constant_override("margin_right", 8)
+    margin.add_theme_constant_override("margin_top", 6)
+    margin.add_theme_constant_override("margin_bottom", 6)
+    _performance_hud_panel.add_child(margin)
+
+    _performance_hud_label = Label.new()
+    _performance_hud_label.add_theme_font_size_override("font_size", 11)
+    _performance_hud_label.modulate = Color(0.84, 0.88, 0.94)
+    _performance_hud_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _performance_hud_label.text = "Performance"
+    margin.add_child(_performance_hud_label)
+
+    _update_performance_hud()
+
+
+func _update_performance_hud() -> void:
+    if not is_instance_valid(_performance_hud_label):
+        return
+
+    var fps := float(Performance.get_monitor(Performance.TIME_FPS))
+    var frame_ms := 1000.0 / fps if fps > 0.0 else 0.0
+    var process_ms := (
+        float(Performance.get_monitor(Performance.TIME_PROCESS)) * 1000.0
+    )
+    var physics_ms := (
+        float(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)) * 1000.0
+    )
+    var draw_calls := int(
+        Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
+    )
+    var primitives_per_frame := float(
+        Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+    )
+    var primitives_per_second := primitives_per_frame * fps
+    var rendered_objects := int(
+        Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)
+    )
+    var video_memory_mb := (
+        float(Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED))
+        / 1048576.0
+    )
+
+    var visible_meshes := _world_meshes.size()
+    visible_meshes += _population_preview_meshes.size()
+    visible_meshes += _creature_meshes.size()
+    if is_instance_valid(_probe_mesh) and _probe_mesh.visible:
+        visible_meshes += 1
+
+    _performance_hud_label.text = (
+        "PERFORMANCE\n"
+        + "FPS          %7.1f\n" % fps
+        + "Frame        %7.2f ms\n" % frame_ms
+        + "Process      %7.2f ms\n" % process_ms
+        + "Physics      %7.2f ms\n" % physics_ms
+        + "Draw calls   %7d /f\n" % draw_calls
+        + "Primitives   %7s /f\n" % _format_performance_rate(primitives_per_frame)
+        + "Primitives/s %7s\n" % _format_performance_rate(primitives_per_second)
+        + "Objects      %7d\n" % rendered_objects
+        + "Meshes       %7d\n" % visible_meshes
+        + "VRAM         %7.1f MB" % video_memory_mb
+    )
+
+
+func _format_performance_rate(value: float) -> String:
+    var magnitude := absf(value)
+    if magnitude >= 1000000000.0:
+        return "%.2fB" % (value / 1000000000.0)
+    if magnitude >= 1000000.0:
+        return "%.2fM" % (value / 1000000.0)
+    if magnitude >= 1000.0:
+        return "%.1fK" % (value / 1000.0)
+    return "%.0f" % value
 
 
 func _build_ui() -> void:
