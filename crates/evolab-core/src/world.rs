@@ -57,7 +57,7 @@ impl Default for WorldConfig {
     fn default() -> Self {
         Self {
             gravity: [0.0, -9.81, 0.0],
-            ground_half_extents: [50.0, 0.1, 12.0],
+            ground_half_extents: [50.0, 0.1, 50.0],
             ground_friction: 1.0,
             terrain: TerrainKind::Flat,
             seed: 1,

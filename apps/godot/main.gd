@@ -139,6 +139,7 @@ var _walkthrough_run_button: Button
 var _probe_mesh: MeshInstance3D
 var _camera: Camera3D
 var _world_meshes: Array[MeshInstance3D] = []
+var _ground_checker_material: ShaderMaterial
 var _rendered_world_json := ""
 var _creature_meshes: Dictionary = {}
 var _current_genome: Dictionary = {}
@@ -2961,7 +2962,9 @@ func _sync_world_state_from_controls() -> void:
 func _world_config_dictionary() -> Dictionary:
     return {
         "gravity": [_gravity_x, _gravity_y, _gravity_z],
-        "ground_half_extents": [50.0, 0.1, 12.0],
+        # 100 m x 100 m square platform. This is a little over 4x the area
+        # of the old 100 m x 24 m runway and gives creatures room to move.
+        "ground_half_extents": [50.0, 0.1, 50.0],
         "ground_friction": _ground_friction,
         "terrain": _terrain_kind,
         "seed": _world_seed,
@@ -3060,8 +3063,8 @@ func _render_world_config(world_config: Dictionary) -> void:
 
 
 func _build_world_fallback(world_config: Dictionary) -> void:
-    var half_value = world_config.get("ground_half_extents", [50.0, 0.1, 12.0])
-    var half := [50.0, 0.1, 12.0]
+    var half_value = world_config.get("ground_half_extents", [50.0, 0.1, 50.0])
+    var half := [50.0, 0.1, 50.0]
     if typeof(half_value) == TYPE_ARRAY and half_value.size() >= 3:
         half = [
             float(half_value[0]),
@@ -3081,6 +3084,39 @@ func _build_world_fallback(world_config: Dictionary) -> void:
             "rotation_radians": [0.0, 0.0, angle],
         }
     ])
+
+
+func _checkerboard_ground_material() -> ShaderMaterial:
+    if _ground_checker_material != null:
+        return _ground_checker_material
+
+    var shader := Shader.new()
+    shader.code = """
+shader_type spatial;
+render_mode diffuse_burley, specular_schlick_ggx;
+
+uniform vec3 checker_dark : source_color = vec3(0.24, 0.29, 0.37);
+uniform vec3 checker_light : source_color = vec3(0.46, 0.54, 0.66);
+uniform float checker_size = 2.0;
+
+varying vec3 checker_world_position;
+
+void vertex() {
+    checker_world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+    vec2 cell = floor(checker_world_position.xz / checker_size);
+    float parity = mod(cell.x + cell.y, 2.0);
+    ALBEDO = mix(checker_dark, checker_light, parity);
+    ROUGHNESS = 0.92;
+    METALLIC = 0.0;
+}
+"""
+
+    _ground_checker_material = ShaderMaterial.new()
+    _ground_checker_material.shader = shader
+    return _ground_checker_material
 
 
 func _build_world_from_geometry(geometry_value) -> void:
@@ -3122,20 +3158,22 @@ func _build_world_from_geometry(geometry_value) -> void:
             float(rotation[2])
         )
 
-        var material := StandardMaterial3D.new()
         var kind := str(shape.get("kind", "ground"))
-        match kind:
-            "wall":
-                material.albedo_color = Color(0.58, 0.30, 0.20)
-            "block":
-                material.albedo_color = Color(0.42, 0.46, 0.54)
-            "pit_floor":
-                material.albedo_color = Color(0.10, 0.12, 0.15)
-            _:
-                # Ground needs clear contrast from the near-black sky/background.
-                material.albedo_color = Color(0.24, 0.28, 0.34)
-        material.roughness = 0.8
-        instance.material_override = material
+        if kind == "ground":
+            instance.material_override = _checkerboard_ground_material()
+        else:
+            var material := StandardMaterial3D.new()
+            match kind:
+                "wall":
+                    material.albedo_color = Color(0.58, 0.30, 0.20)
+                "block":
+                    material.albedo_color = Color(0.42, 0.46, 0.54)
+                "pit_floor":
+                    material.albedo_color = Color(0.10, 0.12, 0.15)
+                _:
+                    material.albedo_color = Color(0.24, 0.28, 0.34)
+            material.roughness = 0.8
+            instance.material_override = material
         add_child(instance)
         _world_meshes.append(instance)
 
