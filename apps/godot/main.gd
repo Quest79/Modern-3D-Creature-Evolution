@@ -166,6 +166,11 @@ var _population_visual_clock := 0.0
 var _population_visual_duration := 0.0
 var _population_visual_generation := 0
 var _population_visual_frame_index := 0
+var _population_best_marker: Label
+var _population_best_index := -1
+var _population_best_id := -1
+var _population_best_fitness := 0.0
+var _population_best_distance := 0.0
 var _pending_evolution_args := PackedStringArray()
 var _pending_evolution_label := ""
 var _champion_world: Dictionary = {}
@@ -6117,8 +6122,20 @@ func _handle_event(event: Dictionary) -> void:
                 _set_status("Slow visual mode received an invalid trajectory.")
                 return
 
+            var generation_best_index := int(
+                event.get("generation_best_index", -1)
+            )
             _build_world_from_geometry(event.get("world_geometry", []))
-            _show_population_preview(visual_genomes, -1)
+            _show_population_preview(visual_genomes, generation_best_index)
+            _population_best_index = generation_best_index
+            _population_best_id = int(event.get("generation_best_id", -1))
+            _population_best_fitness = float(
+                event.get("generation_best_fitness", 0.0)
+            )
+            _population_best_distance = float(
+                event.get("generation_best_distance", 0.0)
+            )
+            _ensure_population_best_marker()
             _population_visual_frames = visual_frames
             _population_visual_clock = 0.0
             _population_visual_duration = float(
@@ -6128,6 +6145,7 @@ func _handle_event(event: Dictionary) -> void:
                 )
             )
             _population_visual_generation = int(event.get("generation", 0))
+            _update_population_best_marker_text()
             _population_visual_frame_index = 0
             _population_visual_active = not _population_visual_frames.is_empty()
             if _population_visual_active:
@@ -6942,6 +6960,12 @@ func _reset_population_visual() -> void:
     _population_visual_duration = 0.0
     _population_visual_generation = 0
     _population_visual_frame_index = 0
+    _population_best_index = -1
+    _population_best_id = -1
+    _population_best_fitness = 0.0
+    _population_best_distance = 0.0
+    if is_instance_valid(_population_best_marker):
+        _population_best_marker.visible = false
 
 
 func _update_population_visual(delta: float) -> void:
@@ -7076,6 +7100,143 @@ func _apply_population_visual_frame_pair(
                 instance_index,
                 Transform3D(Basis(rotation).scaled(size), position)
             )
+
+    _update_population_best_marker(first_creatures, second_creatures, weight)
+
+
+func _ensure_population_best_marker() -> void:
+    if is_instance_valid(_population_best_marker):
+        return
+
+    _population_best_marker = Label.new()
+    _population_best_marker.name = "PopulationBestMarker"
+    _population_best_marker.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _population_best_marker.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    _population_best_marker.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+    _population_best_marker.size = Vector2(280.0, 92.0)
+    _population_best_marker.z_index = 1000
+    _population_best_marker.add_theme_font_size_override("font_size", 18)
+    _population_best_marker.add_theme_color_override(
+        "font_color",
+        Color(1.0, 0.84, 0.18)
+    )
+    _population_best_marker.add_theme_color_override(
+        "font_outline_color",
+        Color(0.02, 0.025, 0.035, 0.98)
+    )
+    _population_best_marker.add_theme_constant_override("outline_size", 8)
+    _population_best_marker.visible = false
+    add_child(_population_best_marker)
+
+
+func _update_population_best_marker_text() -> void:
+    if not is_instance_valid(_population_best_marker):
+        return
+
+    _population_best_marker.text = (
+        "GEN %d BEST  •  #%s\nFitness %.4f  •  Distance %.2f m\n▼"
+        % [
+            _population_visual_generation,
+            str(_population_best_id),
+            _population_best_fitness,
+            _population_best_distance,
+        ]
+    )
+
+
+func _update_population_best_marker(
+    first_creatures: Array,
+    second_creatures: Array,
+    weight: float
+) -> void:
+    if not is_instance_valid(_population_best_marker):
+        return
+    if (
+        _population_best_index < 0
+        or _population_best_index >= first_creatures.size()
+        or _population_best_index >= second_creatures.size()
+        or _population_best_index >= _population_preview_offsets.size()
+    ):
+        _population_best_marker.visible = false
+        return
+
+    var first_bodies = first_creatures[_population_best_index]
+    var second_bodies = second_creatures[_population_best_index]
+    if (
+        typeof(first_bodies) != TYPE_ARRAY
+        or typeof(second_bodies) != TYPE_ARRAY
+        or first_bodies.is_empty()
+        or second_bodies.is_empty()
+    ):
+        _population_best_marker.visible = false
+        return
+
+    var body_count := mini(first_bodies.size(), second_bodies.size())
+    var root_position := Vector3.ZERO
+    var highest_y := -1.0e30
+    var valid_bodies := 0
+
+    for body_index in range(body_count):
+        var first_body = first_bodies[body_index]
+        var second_body = second_bodies[body_index]
+        if (
+            typeof(first_body) != TYPE_ARRAY
+            or typeof(second_body) != TYPE_ARRAY
+            or first_body.size() < 3
+            or second_body.size() < 3
+        ):
+            continue
+
+        var first_position := Vector3(
+            float(first_body[0]),
+            float(first_body[1]),
+            float(first_body[2])
+        )
+        var second_position := Vector3(
+            float(second_body[0]),
+            float(second_body[1]),
+            float(second_body[2])
+        )
+        var position := first_position.lerp(second_position, weight)
+        if valid_bodies == 0:
+            root_position = position
+        highest_y = maxf(highest_y, position.y)
+        valid_bodies += 1
+
+    if valid_bodies == 0:
+        _population_best_marker.visible = false
+        return
+
+    var offset: Vector3 = _population_preview_offsets[_population_best_index]
+    var world_anchor := offset + Vector3(
+        root_position.x,
+        highest_y + 0.75,
+        root_position.z
+    )
+
+    if not is_instance_valid(_camera) or _camera.is_position_behind(world_anchor):
+        _population_best_marker.visible = false
+        return
+
+    var screen_position := _camera.unproject_position(world_anchor)
+    var marker_size := _population_best_marker.size
+    var viewport_size := get_viewport().get_visible_rect().size
+    var marker_position := Vector2(
+        screen_position.x - marker_size.x * 0.5,
+        screen_position.y - marker_size.y
+    )
+    marker_position.x = clampf(
+        marker_position.x,
+        4.0,
+        maxf(4.0, viewport_size.x - marker_size.x - 4.0)
+    )
+    marker_position.y = clampf(
+        marker_position.y,
+        4.0,
+        maxf(4.0, viewport_size.y - marker_size.y - 4.0)
+    )
+    _population_best_marker.position = marker_position
+    _population_best_marker.visible = true
 
 
 func _build_creature_from_genome(genome_value) -> void:
