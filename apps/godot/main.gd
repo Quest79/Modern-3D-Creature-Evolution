@@ -85,6 +85,7 @@ var _continue_champion_button: Button
 var _resume_evolution_button: Button
 var _watch_champion_button: Button
 var _population_preview_check: CheckBox
+var _slow_visual_check: CheckBox
 var _population_preview_continue_button: Button
 var _stop_button: Button
 var _settings_button: Button
@@ -147,9 +148,19 @@ var _current_genome_source := ""
 var _current_mutation_count := 0
 var _has_evolution_champion := false
 var _preview_population_before_evolution := false
+var _slow_visual_mode := false
 var _population_preview_active := false
 var _population_preview_multimesh: MultiMeshInstance3D
 var _population_preview_instance_count := 0
+var _population_preview_offsets: Array = []
+var _population_preview_sizes: Array = []
+var _population_preview_creature_ranges: Array = []
+var _population_visual_frames: Array = []
+var _population_visual_active := false
+var _population_visual_clock := 0.0
+var _population_visual_duration := 0.0
+var _population_visual_generation := 0
+var _population_visual_frame_index := 0
 var _pending_evolution_args := PackedStringArray()
 var _pending_evolution_label := ""
 var _champion_world: Dictionary = {}
@@ -305,6 +316,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
     _update_camera_movement(delta)
+    _update_population_visual(delta)
 
     _performance_update_accumulator += delta
     if _performance_update_accumulator >= 0.1:
@@ -764,6 +776,16 @@ func _build_ui() -> void:
     )
     _population_preview_check.toggled.connect(_on_population_preview_toggled)
     quick_section.add_child(_population_preview_check)
+
+    _slow_visual_check = CheckBox.new()
+    _slow_visual_check.button_pressed = _slow_visual_mode
+    _slow_visual_check.text = _slow_visual_checkbox_text(_slow_visual_mode)
+    _slow_visual_check.tooltip_text = (
+        "Show every evaluated generation running together on the population grid "
+        + "for the full simulation duration before evolution continues."
+    )
+    _slow_visual_check.toggled.connect(_on_slow_visual_toggled)
+    quick_section.add_child(_slow_visual_check)
 
     _population_preview_continue_button = Button.new()
     _population_preview_continue_button.text = "▶ Continue Evolution"
@@ -3355,6 +3377,13 @@ func _load_settings() -> void:
             _preview_population_before_evolution
         )
     )
+    _slow_visual_mode = bool(
+        config.get_value(
+            "evolution",
+            "slow_visual_mode",
+            _slow_visual_mode
+        )
+    )
     _trial_aggregation = str(
         config.get_value("evolution", "trial_aggregation", _trial_aggregation)
     )
@@ -3479,6 +3508,7 @@ func _save_settings() -> void:
         "preview_starting_population",
         _preview_population_before_evolution
     )
+    config.set_value("evolution", "slow_visual_mode", _slow_visual_mode)
     config.set_value("evolution", "trial_aggregation", _trial_aggregation)
     config.set_value(
         "evolution",
@@ -4017,6 +4047,12 @@ func _start_evolution_run(continue_current: bool) -> void:
         "--experiment-name", _experiment_name,
     ])
     args.append_array(_accelerator_cli_args())
+    if _slow_visual_mode:
+        args.append("--slow-visual")
+        args.append_array(PackedStringArray([
+            "--visual-output", _runtime_path("population_visual.json"),
+            "--visual-sample-hz", "10.0",
+        ]))
 
     if continue_current:
         var parent_path := _runtime_path("evolution_parent.json")
@@ -5908,6 +5944,9 @@ func _finish_job_controls() -> void:
         _population_preview_check.text = _population_preview_checkbox_text(
             _preview_population_before_evolution
         )
+    if _slow_visual_check != null:
+        _slow_visual_check.disabled = false
+        _slow_visual_check.text = _slow_visual_checkbox_text(_slow_visual_mode)
     if _population_preview_continue_button != null:
         _population_preview_continue_button.visible = false
     _stop_button.disabled = true
@@ -5952,6 +5991,8 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
     _watch_champion_button.disabled = disabled or not _has_evolution_champion
     if _population_preview_check != null:
         _population_preview_check.disabled = disabled
+    if _slow_visual_check != null:
+        _slow_visual_check.disabled = disabled
     _save_button.disabled = disabled or _current_genome.is_empty()
     _save_experiment_button.disabled = disabled
     _load_experiment_button.disabled = disabled
@@ -6043,6 +6084,48 @@ func _handle_event(event: Dictionary) -> void:
             )
             _finish_job_controls()
 
+        "population_visual_ready":
+            var visual_file := str(event.get("visual_file", ""))
+            var visual_data := _load_population_visual_file(visual_file)
+            if visual_data.is_empty():
+                _set_status("Slow visual mode could not load the population trajectory.")
+                return
+
+            var visual_genomes = visual_data.get("genomes", [])
+            var visual_frames = visual_data.get("frames", [])
+            if typeof(visual_genomes) != TYPE_ARRAY or typeof(visual_frames) != TYPE_ARRAY:
+                _set_status("Slow visual mode received an invalid trajectory.")
+                return
+
+            _build_world_from_geometry(event.get("world_geometry", []))
+            _show_population_preview(visual_genomes, -1)
+            _population_visual_frames = visual_frames
+            _population_visual_clock = 0.0
+            _population_visual_duration = float(
+                visual_data.get(
+                    "duration_seconds",
+                    event.get("duration_seconds", _seconds_spin.value)
+                )
+            )
+            _population_visual_generation = int(event.get("generation", 0))
+            _population_visual_frame_index = 0
+            _population_visual_active = not _population_visual_frames.is_empty()
+            if _population_visual_active:
+                _apply_population_visual_frame_pair(
+                    _population_visual_frames[0],
+                    _population_visual_frames[0],
+                    0.0
+                )
+            _set_status(
+                "Slow visual • Generation %d / %d • %s creatures • %.1f s real-time test"
+                % [
+                    _population_visual_generation,
+                    int(event.get("generations", 0)),
+                    str(event.get("population", 0)),
+                    _population_visual_duration,
+                ]
+            )
+
         "evolution_started":
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
@@ -6066,7 +6149,8 @@ func _handle_event(event: Dictionary) -> void:
             if champion_file != "" and _load_genome_file(champion_file):
                 _current_genome_source = "generation %d champion" % generation
                 _probe_mesh.visible = false
-                _build_creature_from_genome(_current_genome)
+                if not _slow_visual_mode:
+                    _build_creature_from_genome(_current_genome)
 
             var best_metrics: Dictionary = event.get("best_metrics", {})
             var effective_world_value = event.get("effective_world", {})
@@ -6132,6 +6216,8 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "evolution_complete":
+            _reset_population_visual()
+            _clear_population_preview()
             var completed_checkpoint := _evolution_checkpoint_path()
             if FileAccess.file_exists(completed_checkpoint):
                 DirAccess.remove_absolute(completed_checkpoint)
@@ -6213,6 +6299,8 @@ func _handle_event(event: Dictionary) -> void:
             _finish_job_controls()
 
         "evolution_error":
+            _reset_population_visual()
+            _clear_population_preview()
             _progress_bar.value = 0
             _set_status("Evolution error: %s" % str(event.get("message", "unknown error")))
             _metrics.text = (
@@ -6573,6 +6661,17 @@ func _on_population_preview_toggled(enabled: bool) -> void:
     _save_settings()
 
 
+func _slow_visual_checkbox_text(enabled: bool) -> String:
+    return "[X] Slow visual evolution" if enabled else "[ ] Slow visual evolution"
+
+
+func _on_slow_visual_toggled(enabled: bool) -> void:
+    _slow_visual_mode = enabled
+    if _slow_visual_check != null:
+        _slow_visual_check.text = _slow_visual_checkbox_text(enabled)
+    _save_settings()
+
+
 func _on_population_preview_continue_pressed() -> void:
     if not _population_preview_active or _pending_evolution_args.is_empty():
         return
@@ -6652,6 +6751,9 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
 
     var spacing := maxf(3.0, maximum_span * 2.2 + 1.0)
     var rows := int(ceil(float(genomes.size()) / float(columns)))
+    _population_preview_offsets.clear()
+    _population_preview_sizes.clear()
+    _population_preview_creature_ranges.clear()
 
     var preview_mesh := BoxMesh.new()
     preview_mesh.size = Vector3.ONE
@@ -6686,6 +6788,8 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
             0.0,
             (float(row) - float(rows - 1) * 0.5) * spacing
         )
+        _population_preview_offsets.append(offset)
+        var creature_start_index := instance_index
 
         for segment_value in genome.get("segments", []):
             if typeof(segment_value) != TYPE_DICTIONARY:
@@ -6707,6 +6811,7 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
                 float(initial[1]),
                 float(initial[2])
             )
+            _population_preview_sizes.append(size)
 
             multimesh.set_instance_transform(
                 instance_index,
@@ -6721,6 +6826,10 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
             multimesh.set_instance_color(instance_index, color)
             instance_index += 1
 
+        _population_preview_creature_ranges.append(
+            [creature_start_index, instance_index]
+        )
+
     if instance_index < total_segments:
         multimesh.visible_instance_count = instance_index
 
@@ -6732,6 +6841,164 @@ func _clear_population_preview() -> void:
         _population_preview_multimesh.queue_free()
     _population_preview_multimesh = null
     _population_preview_instance_count = 0
+    _population_preview_offsets.clear()
+    _population_preview_sizes.clear()
+    _population_preview_creature_ranges.clear()
+
+
+
+func _load_population_visual_file(path: String) -> Dictionary:
+    if path.is_empty() or not FileAccess.file_exists(path):
+        return {}
+    var file := FileAccess.open(path, FileAccess.READ)
+    if file == null:
+        return {}
+    var parsed = JSON.parse_string(file.get_as_text())
+    file.close()
+    return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+
+
+func _reset_population_visual() -> void:
+    _population_visual_frames.clear()
+    _population_visual_active = false
+    _population_visual_clock = 0.0
+    _population_visual_duration = 0.0
+    _population_visual_generation = 0
+    _population_visual_frame_index = 0
+
+
+func _update_population_visual(delta: float) -> void:
+    if not _population_visual_active or _population_visual_frames.is_empty():
+        return
+    if not is_instance_valid(_population_preview_multimesh):
+        _reset_population_visual()
+        return
+
+    _population_visual_clock = minf(
+        _population_visual_clock + delta,
+        _population_visual_duration
+    )
+
+    while _population_visual_frame_index + 1 < _population_visual_frames.size():
+        var next_value = _population_visual_frames[_population_visual_frame_index + 1]
+        if typeof(next_value) != TYPE_DICTIONARY:
+            _population_visual_frame_index += 1
+            continue
+        if float(next_value.get("t", 0.0)) > _population_visual_clock:
+            break
+        _population_visual_frame_index += 1
+
+    var first_index := mini(
+        _population_visual_frame_index,
+        _population_visual_frames.size() - 1
+    )
+    var second_index := mini(first_index + 1, _population_visual_frames.size() - 1)
+    var first_value = _population_visual_frames[first_index]
+    var second_value = _population_visual_frames[second_index]
+    if typeof(first_value) != TYPE_DICTIONARY or typeof(second_value) != TYPE_DICTIONARY:
+        return
+
+    var first: Dictionary = first_value
+    var second: Dictionary = second_value
+    var first_time := float(first.get("t", 0.0))
+    var second_time := float(second.get("t", first_time))
+    var weight := 0.0
+    if second_time > first_time:
+        weight = clampf(
+            (_population_visual_clock - first_time) / (second_time - first_time),
+            0.0,
+            1.0
+        )
+
+    _apply_population_visual_frame_pair(first, second, weight)
+
+    if _population_visual_clock >= _population_visual_duration:
+        _population_visual_active = false
+
+
+func _apply_population_visual_frame_pair(
+    first: Dictionary,
+    second: Dictionary,
+    weight: float
+) -> void:
+    if not is_instance_valid(_population_preview_multimesh):
+        return
+
+    var first_creatures = first.get("creatures", [])
+    var second_creatures = second.get("creatures", [])
+    if typeof(first_creatures) != TYPE_ARRAY or typeof(second_creatures) != TYPE_ARRAY:
+        return
+
+    var multimesh := _population_preview_multimesh.multimesh
+    var creature_count := mini(
+        mini(first_creatures.size(), second_creatures.size()),
+        _population_preview_offsets.size()
+    )
+
+    for creature_index in range(creature_count):
+        var first_bodies = first_creatures[creature_index]
+        var second_bodies = second_creatures[creature_index]
+        if typeof(first_bodies) != TYPE_ARRAY or typeof(second_bodies) != TYPE_ARRAY:
+            continue
+        if creature_index >= _population_preview_creature_ranges.size():
+            continue
+
+        var creature_range: Array = _population_preview_creature_ranges[creature_index]
+        if creature_range.size() < 2:
+            continue
+        var start_index := int(creature_range[0])
+        var end_index := int(creature_range[1])
+        var body_count := mini(
+            mini(first_bodies.size(), second_bodies.size()),
+            end_index - start_index
+        )
+        var offset: Vector3 = _population_preview_offsets[creature_index]
+
+        for body_index in range(body_count):
+            var first_body = first_bodies[body_index]
+            var second_body = second_bodies[body_index]
+            if (
+                typeof(first_body) != TYPE_ARRAY
+                or typeof(second_body) != TYPE_ARRAY
+                or first_body.size() < 7
+                or second_body.size() < 7
+            ):
+                continue
+
+            var first_position := Vector3(
+                float(first_body[0]),
+                float(first_body[1]),
+                float(first_body[2])
+            )
+            var second_position := Vector3(
+                float(second_body[0]),
+                float(second_body[1]),
+                float(second_body[2])
+            )
+            var position := offset + first_position.lerp(second_position, weight)
+
+            var first_rotation := Quaternion(
+                float(first_body[3]),
+                float(first_body[4]),
+                float(first_body[5]),
+                float(first_body[6])
+            ).normalized()
+            var second_rotation := Quaternion(
+                float(second_body[3]),
+                float(second_body[4]),
+                float(second_body[5]),
+                float(second_body[6])
+            ).normalized()
+            var rotation := first_rotation.slerp(second_rotation, weight).normalized()
+
+            var instance_index := start_index + body_index
+            if instance_index >= _population_preview_sizes.size():
+                continue
+            var size: Vector3 = _population_preview_sizes[instance_index]
+            multimesh.set_instance_transform(
+                instance_index,
+                Transform3D(Basis(rotation).scaled(size), position)
+            )
 
 
 func _build_creature_from_genome(genome_value) -> void:

@@ -281,7 +281,7 @@ struct Candidate {
 pub fn evolve_population<F>(
     ancestor: &CreatureGenome,
     config: &EvolutionConfig,
-    on_generation: F,
+    mut on_generation: F,
 ) -> Result<EvolutionResult, String>
 where
     F: FnMut(&GenerationSummary) -> Result<(), String>,
@@ -291,7 +291,7 @@ where
         config,
         None,
         false,
-        on_generation,
+        |summary, _population| on_generation(summary),
         |_checkpoint| Ok(()),
     )
 }
@@ -305,7 +305,7 @@ pub fn evolve_population_checkpointed<F, C>(
     mut on_checkpoint: C,
 ) -> Result<EvolutionResult, String>
 where
-    F: FnMut(&GenerationSummary) -> Result<(), String>,
+    F: FnMut(&GenerationSummary, &[EvaluatedCreature]) -> Result<(), String>,
     C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
 {
     config.validate()?;
@@ -672,6 +672,7 @@ where
             history
                 .last()
                 .expect("generation summary was just appended"),
+            &evaluated,
         )?;
         timing.generation_callback_seconds = callback_started.elapsed().as_secs_f64();
         timing.total_wall_seconds = generation_started.elapsed().as_secs_f64();
