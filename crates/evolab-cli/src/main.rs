@@ -1460,14 +1460,13 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 let visual_path = request
                     .visual_output
                     .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
-                let (frame_count, body_count, frozen_creatures) =
-                    write_population_visualization(
-                        visual_path,
-                        summary.generation,
-                        visual_population,
-                        &summary.effective_settings,
-                        request.visual_sample_hz,
-                    )?;
+                let (frame_count, body_count, frozen_creatures) = write_population_visualization(
+                    visual_path,
+                    summary.generation,
+                    visual_population,
+                    &summary.effective_settings,
+                    request.visual_sample_hz,
+                )?;
                 if let Some(socket) = socket {
                     send_event(
                         socket,
@@ -1687,14 +1686,10 @@ fn write_population_visualization(
         })
         .collect::<Vec<_>>();
 
-    let frozen_creatures = trajectories
-        .iter()
-        .filter(|(_, failed)| *failed)
-        .count();
+    let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
     let total_steps = settings.simulation.step_count();
-    let frame_count = 1
-        + total_steps / sample_every_steps
-        + usize::from(total_steps % sample_every_steps != 0);
+    let frame_count =
+        1 + total_steps / sample_every_steps + usize::from(total_steps % sample_every_steps != 0);
 
     let body_count = population
         .iter()
