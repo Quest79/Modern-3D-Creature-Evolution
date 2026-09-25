@@ -1467,6 +1467,10 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     &summary.effective_settings,
                     request.visual_sample_hz,
                 )?;
+                let generation_best_index = visual_population
+                    .iter()
+                    .position(|candidate| candidate.individual_id == summary.champion_id)
+                    .unwrap_or(0);
                 if let Some(socket) = socket {
                     send_event(
                         socket,
@@ -1480,6 +1484,10 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                             "frames": frame_count,
                             "bodies": body_count,
                             "frozen_creatures": frozen_creatures,
+                            "generation_best_index": generation_best_index,
+                            "generation_best_id": summary.champion_id,
+                            "generation_best_fitness": summary.best_fitness,
+                            "generation_best_distance": summary.best_metrics.distance,
                             "duration_seconds":
                                 summary.effective_settings.simulation.duration_seconds,
                             "sample_hz": request.visual_sample_hz,
