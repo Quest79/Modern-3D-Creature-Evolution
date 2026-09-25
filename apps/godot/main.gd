@@ -3126,7 +3126,7 @@ uniform vec3 checker_dark : source_color = vec3(0.04, 0.045, 0.055);
 uniform vec3 checker_light : source_color = vec3(0.08, 0.09, 0.11);
 uniform vec3 center_color : source_color = vec3(0.62, 0.045, 0.045);
 uniform float checker_size = 2.0;
-uniform vec2 population_center_xz = vec2(2.2, 0.0);
+uniform vec2 population_center_xz = vec2(0.0, 0.0);
 
 varying vec3 checker_world_position;
 
@@ -3135,10 +3135,13 @@ void vertex() {
 }
 
 void fragment() {
-    vec2 cell = floor(checker_world_position.xz / checker_size);
+    vec2 centered = checker_world_position.xz - population_center_xz;
+    vec2 cell = floor((centered + vec2(checker_size * 0.5)) / checker_size);
     float parity = mod(cell.x + cell.y, 2.0);
-    vec2 from_center = abs(checker_world_position.xz - population_center_xz);
-    bool in_center_marker = from_center.x <= 1.0 && from_center.y <= 1.0;
+    vec2 from_center = abs(centered);
+    bool in_center_marker =
+        from_center.x <= checker_size * 0.5
+        && from_center.y <= checker_size * 0.5;
     if (in_center_marker) {
         ALBEDO = center_color;
     } else {
@@ -3151,6 +3154,10 @@ void fragment() {
 
     _ground_checker_material = ShaderMaterial.new()
     _ground_checker_material.shader = shader
+    _ground_checker_material.set_shader_parameter(
+        "population_center_xz",
+        Vector2(POPULATION_GRID_CENTER_X, 0.0)
+    )
     return _ground_checker_material
 
 
