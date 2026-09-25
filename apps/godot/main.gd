@@ -130,6 +130,7 @@ var _hud_button_height_spin: SpinBox
 var _hud_section_header_height_spin: SpinBox
 var _camera_speed_spin: SpinBox
 var _mouse_sensitivity_spin: SpinBox
+var _camera_zoom_spin: SpinBox
 var _playback_speed_spin: SpinBox
 var _hud_resize_handle: ColorRect
 var _walkthrough_window: Window
@@ -193,6 +194,13 @@ var _cpu_fallback := true
 var _throughput_mode := "deterministic"
 var _camera_move_speed := 6.0
 var _mouse_sensitivity_degrees := 0.15
+var _camera_zoom_factor := 20.0
+var _camera_base_fov := 75.0
+var _camera_zoom_active := false
+var _camera_zoom_transition_active := false
+var _camera_zoom_transition_elapsed := 0.0
+var _camera_zoom_transition_start_factor := 1.0
+var _camera_zoom_transition_target_factor := 1.0
 var _playback_speed := 1.0
 var _fitness_distance_weight := 1.0
 var _fitness_speed_weight := 0.0
@@ -326,6 +334,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
     _update_camera_movement(delta)
+    _update_camera_zoom(delta)
     _update_population_visual(delta)
 
     _performance_update_accumulator += delta
@@ -589,6 +598,7 @@ func _build_3d_preview() -> void:
     _build_world_fallback(_world_config_dictionary())
 
     _camera = Camera3D.new()
+    _camera_base_fov = _camera.fov
     _camera.position = Vector3(9.2, 5.8, 9.2)
     add_child(_camera)
     _camera.look_at(Vector3(2.2, 1.2, 0.0), Vector3.UP)
@@ -2672,8 +2682,18 @@ func _build_settings_window() -> void:
     )
     _mouse_sensitivity_spin.value_changed.connect(_on_mouse_sensitivity_changed)
 
+    _camera_zoom_spin = _add_number_row(
+        column,
+        "Z zoom factor",
+        1.0,
+        200.0,
+        _camera_zoom_factor,
+        1.0
+    )
+    _camera_zoom_spin.value_changed.connect(_on_camera_zoom_changed)
+
     var help := Label.new()
-    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. HUD scale, field/button/header heights, and width are saved automatically."
+    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. Press Z to smoothly toggle camera zoom. HUD and camera settings are saved automatically."
     help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     help.modulate = Color(0.70, 0.76, 0.86)
     column.add_child(help)
@@ -2721,6 +2741,13 @@ func _on_camera_speed_changed(value: float) -> void:
 
 func _on_mouse_sensitivity_changed(value: float) -> void:
     _mouse_sensitivity_degrees = float(value)
+    _save_settings()
+
+
+func _on_camera_zoom_changed(value: float) -> void:
+    _camera_zoom_factor = clampf(float(value), 1.0, 200.0)
+    if _camera_zoom_active:
+        _start_camera_zoom_transition(_camera_zoom_factor)
     _save_settings()
 
 
@@ -3484,6 +3511,10 @@ func _load_settings() -> void:
         )
     )
     _mouse_sensitivity_degrees = clampf(_mouse_sensitivity_degrees, 0.03, 1.0)
+    _camera_zoom_factor = float(
+        config.get_value("camera", "zoom_factor", _camera_zoom_factor)
+    )
+    _camera_zoom_factor = clampf(_camera_zoom_factor, 1.0, 200.0)
 
 
 func _save_settings() -> void:
@@ -3559,6 +3590,7 @@ func _save_settings() -> void:
         "mouse_sensitivity_degrees",
         _mouse_sensitivity_degrees
     )
+    config.set_value("camera", "zoom_factor", _camera_zoom_factor)
     config.save(_settings_path())
 
 
@@ -3689,6 +3721,24 @@ func _unhandled_input(event: InputEvent) -> void:
             get_viewport().set_input_as_handled()
         return
 
+    if (
+        event is InputEventKey
+        and event.keycode == KEY_Z
+        and event.pressed
+        and not event.echo
+    ):
+        if _settings_window != null and _settings_window.visible:
+            return
+        var focus_owner := get_viewport().gui_get_focus_owner()
+        if focus_owner is LineEdit:
+            return
+        _camera_zoom_active = not _camera_zoom_active
+        _start_camera_zoom_transition(
+            _camera_zoom_factor if _camera_zoom_active else 1.0
+        )
+        get_viewport().set_input_as_handled()
+        return
+
     if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
         if event.pressed:
             if _settings_window != null and _settings_window.visible:
@@ -3718,6 +3768,54 @@ func _set_mouse_look(enabled: bool) -> void:
     Input.mouse_mode = (
         Input.MOUSE_MODE_CAPTURED if enabled else Input.MOUSE_MODE_VISIBLE
     )
+
+
+func _camera_fov_for_zoom_factor(zoom_factor: float) -> float:
+    var safe_factor := maxf(1.0, zoom_factor)
+    var base_half_angle := deg_to_rad(_camera_base_fov) * 0.5
+    return rad_to_deg(
+        2.0 * atan(tan(base_half_angle) / safe_factor)
+    )
+
+
+func _camera_current_zoom_factor() -> float:
+    if not is_instance_valid(_camera):
+        return 1.0
+    var base_half_tan := tan(deg_to_rad(_camera_base_fov) * 0.5)
+    var current_half_tan := tan(deg_to_rad(_camera.fov) * 0.5)
+    if absf(current_half_tan) <= 1.0e-8:
+        return _camera_zoom_factor
+    return maxf(1.0, base_half_tan / current_half_tan)
+
+
+func _start_camera_zoom_transition(target_factor: float) -> void:
+    if not is_instance_valid(_camera):
+        return
+    _camera_zoom_transition_start_factor = _camera_current_zoom_factor()
+    _camera_zoom_transition_target_factor = clampf(target_factor, 1.0, 200.0)
+    _camera_zoom_transition_elapsed = 0.0
+    _camera_zoom_transition_active = true
+
+
+func _update_camera_zoom(delta: float) -> void:
+    if not _camera_zoom_transition_active or not is_instance_valid(_camera):
+        return
+
+    _camera_zoom_transition_elapsed += delta
+    var progress := clampf(_camera_zoom_transition_elapsed / 1.0, 0.0, 1.0)
+    var ease_out := 1.0 - pow(1.0 - progress, 3.0)
+    var zoom_factor := lerpf(
+        _camera_zoom_transition_start_factor,
+        _camera_zoom_transition_target_factor,
+        ease_out
+    )
+    _camera.fov = _camera_fov_for_zoom_factor(zoom_factor)
+
+    if progress >= 1.0:
+        _camera.fov = _camera_fov_for_zoom_factor(
+            _camera_zoom_transition_target_factor
+        )
+        _camera_zoom_transition_active = false
 
 
 func _update_camera_movement(delta: float) -> void:
