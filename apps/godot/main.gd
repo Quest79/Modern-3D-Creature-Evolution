@@ -12,6 +12,7 @@ const DEFAULT_HUD_WIDTH := 400.0
 const MIN_HUD_WIDTH := 160.0
 const MAX_HUD_WIDTH := 400.0
 const HUD_RESIZE_HANDLE_WIDTH := 8.0
+const POPULATION_GRID_CENTER_X := 2.2
 
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
@@ -153,6 +154,10 @@ var _population_preview_active := false
 var _population_preview_multimesh: MultiMeshInstance3D
 var _population_preview_instance_count := 0
 var _population_preview_offsets: Array = []
+var _population_layout_offsets: Array = []
+var _population_layout_columns := 0
+var _population_layout_rows := 0
+var _population_layout_spacing := 0.0
 var _population_preview_sizes: Array = []
 var _population_preview_creature_ranges: Array = []
 var _population_visual_frames: Array = []
@@ -3119,7 +3124,9 @@ render_mode diffuse_burley, specular_schlick_ggx;
 
 uniform vec3 checker_dark : source_color = vec3(0.04, 0.045, 0.055);
 uniform vec3 checker_light : source_color = vec3(0.08, 0.09, 0.11);
+uniform vec3 center_color : source_color = vec3(0.62, 0.045, 0.045);
 uniform float checker_size = 2.0;
+uniform vec2 population_center_xz = vec2(0.0, 0.0);
 
 varying vec3 checker_world_position;
 
@@ -3128,9 +3135,18 @@ void vertex() {
 }
 
 void fragment() {
-    vec2 cell = floor(checker_world_position.xz / checker_size);
+    vec2 centered = checker_world_position.xz - population_center_xz;
+    vec2 cell = floor((centered + vec2(checker_size * 0.5)) / checker_size);
     float parity = mod(cell.x + cell.y, 2.0);
-    ALBEDO = mix(checker_dark, checker_light, parity);
+    vec2 from_center = abs(centered);
+    bool in_center_marker =
+        from_center.x <= checker_size * 0.5
+        && from_center.y <= checker_size * 0.5;
+    if (in_center_marker) {
+        ALBEDO = center_color;
+    } else {
+        ALBEDO = mix(checker_dark, checker_light, parity);
+    }
     ROUGHNESS = 0.92;
     METALLIC = 0.0;
 }
@@ -3138,6 +3154,10 @@ void fragment() {
 
     _ground_checker_material = ShaderMaterial.new()
     _ground_checker_material.shader = shader
+    _ground_checker_material.set_shader_parameter(
+        "population_center_xz",
+        Vector2(POPULATION_GRID_CENTER_X, 0.0)
+    )
     return _ground_checker_material
 
 
@@ -3980,6 +4000,7 @@ func _start_evolution_run(continue_current: bool) -> void:
         _set_status("Elite kept must be smaller than population.")
         return
 
+    _reset_population_layout()
     _probe_mesh.visible = false
     _progress_bar.value = 0
     _has_evolution_champion = false
@@ -4099,6 +4120,7 @@ func _on_resume_evolution_pressed() -> void:
         _set_status("Elite kept must be smaller than population.")
         return
 
+    _reset_population_layout()
     _probe_mesh.visible = false
     _progress_bar.value = 0
     _metrics.text = "[color=#9aa7bd]Resuming evolution from checkpoint...[/color]"
@@ -6722,25 +6744,27 @@ func _load_population_preview_file(path: String) -> Array:
     return parsed if typeof(parsed) == TYPE_ARRAY else []
 
 
-func _show_population_preview(genomes: Array, champion_index: int) -> void:
-    _clear_population_preview()
-    _clear_creature_meshes()
-    _probe_mesh.visible = false
-    if genomes.is_empty():
+func _reset_population_layout() -> void:
+    _population_layout_offsets.clear()
+    _population_layout_columns = 0
+    _population_layout_rows = 0
+    _population_layout_spacing = 0.0
+
+
+func _ensure_population_layout(genomes: Array) -> void:
+    if _population_layout_columns > 0:
+        _ensure_population_layout_capacity(genomes.size())
         return
 
-    var columns := int(ceil(sqrt(float(genomes.size()))))
-    var maximum_span := 0.0
-    var total_segments := 0
+    var target_count := maxi(genomes.size(), int(_population_spin.value))
+    target_count = maxi(target_count, 1)
 
+    var maximum_span := 0.0
     for genome_value in genomes:
         if typeof(genome_value) != TYPE_DICTIONARY:
             continue
         var genome: Dictionary = genome_value
-        var segments: Array = genome.get("segments", [])
-        total_segments += segments.size()
-
-        for segment_value in segments:
+        for segment_value in genome.get("segments", []):
             if typeof(segment_value) != TYPE_DICTIONARY:
                 continue
             var segment: Dictionary = segment_value
@@ -6755,11 +6779,60 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
                     )
                 )
 
+    _population_layout_spacing = maxf(3.0, maximum_span * 2.2 + 1.0)
+    _population_layout_columns = maxi(
+        1,
+        int(ceil(sqrt(float(target_count))))
+    )
+    _population_layout_rows = maxi(
+        1,
+        int(ceil(float(target_count) / float(_population_layout_columns)))
+    )
+    _ensure_population_layout_capacity(target_count)
+
+
+func _ensure_population_layout_capacity(required_count: int) -> void:
+    if required_count <= _population_layout_offsets.size():
+        return
+    if _population_layout_columns <= 0:
+        return
+
+    var column_center := float(_population_layout_columns - 1) * 0.5
+    var row_center := float(_population_layout_rows - 1) * 0.5
+
+    for index in range(_population_layout_offsets.size(), required_count):
+        var row := int(index / _population_layout_columns)
+        var column := index % _population_layout_columns
+        _population_layout_offsets.append(
+            Vector3(
+                POPULATION_GRID_CENTER_X
+                    + (float(column) - column_center) * _population_layout_spacing,
+                0.0,
+                (float(row) - row_center) * _population_layout_spacing
+            )
+        )
+
+
+func _show_population_preview(genomes: Array, champion_index: int) -> void:
+    _clear_population_preview()
+    _clear_creature_meshes()
+    _probe_mesh.visible = false
+    if genomes.is_empty():
+        return
+
+    var total_segments := 0
+    for genome_value in genomes:
+        if typeof(genome_value) != TYPE_DICTIONARY:
+            continue
+        var genome: Dictionary = genome_value
+        var segments = genome.get("segments", [])
+        if typeof(segments) == TYPE_ARRAY:
+            total_segments += segments.size()
+
     if total_segments <= 0:
         return
 
-    var spacing := maxf(3.0, maximum_span * 2.2 + 1.0)
-    var rows := int(ceil(float(genomes.size()) / float(columns)))
+    _ensure_population_layout(genomes)
     _population_preview_offsets.clear()
     _population_preview_sizes.clear()
     _population_preview_creature_ranges.clear()
@@ -6790,13 +6863,8 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
             continue
 
         var genome: Dictionary = genome_value
-        var row := int(index / columns)
-        var column := index % columns
-        var offset := Vector3(
-            2.2 + (float(column) - float(columns - 1) * 0.5) * spacing,
-            0.0,
-            (float(row) - float(rows - 1) * 0.5) * spacing
-        )
+        _ensure_population_layout_capacity(index + 1)
+        var offset: Vector3 = _population_layout_offsets[index]
         _population_preview_offsets.append(offset)
         var creature_start_index := instance_index
 
