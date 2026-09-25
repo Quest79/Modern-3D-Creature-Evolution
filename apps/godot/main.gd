@@ -2964,7 +2964,7 @@ func _world_config_dictionary() -> Dictionary:
         "gravity": [_gravity_x, _gravity_y, _gravity_z],
         # 100 m x 100 m square platform. This is a little over 4x the area
         # of the old 100 m x 24 m runway and gives creatures room to move.
-        "ground_half_extents": [50.0, 0.1, 50.0],
+        "ground_half_extents": [250.0, 0.1, 250.0],
         "ground_friction": _ground_friction,
         "terrain": _terrain_kind,
         "seed": _world_seed,
@@ -3063,7 +3063,7 @@ func _render_world_config(world_config: Dictionary) -> void:
 
 
 func _build_world_fallback(world_config: Dictionary) -> void:
-    var half_value = world_config.get("ground_half_extents", [50.0, 0.1, 50.0])
+    var half_value = world_config.get("ground_half_extents", [250.0, 0.1, 250.0])
     var half := [50.0, 0.1, 50.0]
     if typeof(half_value) == TYPE_ARRAY and half_value.size() >= 3:
         half = [
@@ -3095,8 +3095,8 @@ func _checkerboard_ground_material() -> ShaderMaterial:
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
 
-uniform vec3 checker_dark : source_color = vec3(0.24, 0.29, 0.37);
-uniform vec3 checker_light : source_color = vec3(0.46, 0.54, 0.66);
+uniform vec3 checker_dark : source_color = vec3(0.04, 0.045, 0.055);
+uniform vec3 checker_light : source_color = vec3(0.08, 0.09, 0.11);
 uniform float checker_size = 2.0;
 
 varying vec3 checker_world_position;
