@@ -3,18 +3,20 @@
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::net::UdpSocket;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use rayon::prelude::*;
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
-    CreatureSnapshot, EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile,
-    FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec,
-    RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation,
-    WorldConfig, WorldSnapshot, discover_cuda_devices, evolve_population_checkpointed,
+    CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
+    EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng,
+    MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, ThroughputMode,
+    TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices,
+    evolve_population_checkpointed,
     generate_initial_population_preview, mutate_genome, random_creature, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
@@ -380,6 +382,18 @@ enum Command {
         #[arg(long)]
         preview_output: Option<PathBuf>,
 
+        /// Play every evaluated generation as a synchronized population test before continuing.
+        #[arg(long, default_value_t = false)]
+        slow_visual: bool,
+
+        /// JSON trajectory file used by --slow-visual. Rewritten once per generation.
+        #[arg(long)]
+        visual_output: Option<PathBuf>,
+
+        /// Sample rate for slow visual trajectories. The GUI interpolates between samples.
+        #[arg(long, default_value_t = 10.0)]
+        visual_sample_hz: f32,
+
         /// Emit final evolution result as JSON.
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -579,6 +593,9 @@ fn run() -> Result<(), String> {
             experiment_name,
             preview_only,
             preview_output,
+            slow_visual,
+            visual_output,
+            visual_sample_hz,
             json,
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
@@ -626,6 +643,9 @@ fn run() -> Result<(), String> {
             experiment_name: &experiment_name,
             preview_only,
             preview_output: preview_output.as_ref(),
+            slow_visual,
+            visual_output: visual_output.as_ref(),
+            visual_sample_hz,
             json_output: json,
         }),
         Command::Run {
@@ -1227,6 +1247,9 @@ struct EvolveRequest<'a> {
     experiment_name: &'a str,
     preview_only: bool,
     preview_output: Option<&'a PathBuf>,
+    slow_visual: bool,
+    visual_output: Option<&'a PathBuf>,
+    visual_sample_hz: f32,
     json_output: bool,
 }
 
@@ -1432,7 +1455,47 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         &config,
         resume_checkpoint.as_ref(),
         request.checkpoint_output.is_some(),
-        |summary| {
+        |summary, visual_population| {
+            if request.slow_visual {
+                let visual_path = request
+                    .visual_output
+                    .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
+                let (frame_count, body_count) = write_population_visualization(
+                    visual_path,
+                    summary.generation,
+                    visual_population,
+                    &summary.effective_settings,
+                    request.visual_sample_hz,
+                )?;
+                if let Some(socket) = socket {
+                    send_event(
+                        socket,
+                        &json!({
+                            "protocol_version": 1,
+                            "kind": "population_visual_ready",
+                            "generation": summary.generation,
+                            "generations": config.generations,
+                            "visual_file": visual_path.display().to_string(),
+                            "population": visual_population.len(),
+                            "frames": frame_count,
+                            "bodies": body_count,
+                            "duration_seconds":
+                                summary.effective_settings.simulation.duration_seconds,
+                            "sample_hz": request.visual_sample_hz,
+                            "world_geometry":
+                                summary.effective_settings.simulation.world.geometry(),
+                        }),
+                    );
+                }
+                thread::sleep(Duration::from_secs_f32(
+                    summary
+                        .effective_settings
+                        .simulation
+                        .duration_seconds
+                        .max(0.0),
+                ));
+            }
+
             if let Some(socket) = socket {
                 send_event(
                     socket,
@@ -1589,6 +1652,134 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     Ok(())
 }
 
+
+fn write_population_visualization(
+    path: &Path,
+    generation: usize,
+    population: &[EvaluatedCreature],
+    settings: &EffectiveEvolutionSettings,
+    sample_hz: f32,
+) -> Result<(usize, usize), String> {
+    if population.is_empty() {
+        return Err("cannot visualize an empty population".into());
+    }
+    if !sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0 {
+        return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
+    }
+
+    let sample_every_steps =
+        ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+
+    let trajectories = population
+        .par_iter()
+        .map(|creature| {
+            let mut frames = Vec::new();
+            CreatureSimulator.run_streaming(
+                &settings.simulation,
+                &creature.genome,
+                sample_every_steps,
+                &mut |snapshot| {
+                    frames.push(snapshot.clone());
+                    Ok(())
+                },
+            )?;
+            Ok::<Vec<CreatureSnapshot>, String>(frames)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let frame_count = trajectories
+        .iter()
+        .map(Vec::len)
+        .min()
+        .ok_or_else(|| "population visualization produced no trajectories".to_string())?;
+    if frame_count == 0 {
+        return Err("population visualization produced no frames".into());
+    }
+
+    let body_count = population
+        .iter()
+        .map(|creature| creature.genome.segments.len())
+        .sum::<usize>();
+
+    let file = fs::File::create(path)
+        .map_err(|err| format!("failed to create visual file {}: {err}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+
+    write!(
+        writer,
+        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"genomes\":[",
+        generation,
+        sample_hz,
+        settings.simulation.duration_seconds
+    )
+    .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+
+    for (index, creature) in population.iter().enumerate() {
+        if index > 0 {
+            writer
+                .write_all(b",")
+                .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+        }
+        serde_json::to_writer(&mut writer, &creature.genome)
+            .map_err(|err| format!("failed to serialize visual genome: {err}"))?;
+    }
+
+    writer
+        .write_all(b"],\"frames\":[")
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+
+    for frame_index in 0..frame_count {
+        if frame_index > 0 {
+            writer
+                .write_all(b",")
+                .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+        }
+
+        let simulated_seconds = trajectories[0][frame_index].simulated_seconds;
+        write!(
+            writer,
+            "{{\"t\":{},\"creatures\":",
+            simulated_seconds
+        )
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+
+        let compact = trajectories
+            .iter()
+            .map(|trajectory| {
+                trajectory[frame_index]
+                    .bodies
+                    .iter()
+                    .map(|body| {
+                        [
+                            body.position[0],
+                            body.position[1],
+                            body.position[2],
+                            body.rotation_xyzw[0],
+                            body.rotation_xyzw[1],
+                            body.rotation_xyzw[2],
+                            body.rotation_xyzw[3],
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::to_writer(&mut writer, &compact)
+            .map_err(|err| format!("failed to serialize population visual frame: {err}"))?;
+        writer
+            .write_all(b"}")
+            .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+    }
+
+    writer
+        .write_all(b"]}")
+        .and_then(|_| writer.flush())
+        .map_err(|err| format!("failed to finalize visual file {}: {err}", path.display()))?;
+
+    Ok((frame_count, body_count))
+}
+
+
 fn run_experiment(
     path: &PathBuf,
     workers: Option<usize>,
@@ -1625,7 +1816,7 @@ fn run_experiment(
         &experiment.evolution,
         checkpoint.as_ref(),
         checkpoint_output.is_some(),
-        |summary| {
+        |summary, _visual_population| {
             if !json_output {
                 println!(
                     "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  trials {}",
