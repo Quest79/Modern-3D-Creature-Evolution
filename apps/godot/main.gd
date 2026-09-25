@@ -13,6 +13,7 @@ const MIN_HUD_WIDTH := 160.0
 const MAX_HUD_WIDTH := 400.0
 const HUD_RESIZE_HANDLE_WIDTH := 8.0
 const POPULATION_GRID_CENTER_X := 2.2
+const CAMERA_ZOOM_TRANSITION_SECONDS := 1.0
 
 var _batch_spin: SpinBox
 var _workers_spin: SpinBox
@@ -3802,7 +3803,11 @@ func _update_camera_zoom(delta: float) -> void:
         return
 
     _camera_zoom_transition_elapsed += delta
-    var progress := clampf(_camera_zoom_transition_elapsed / 1.0, 0.0, 1.0)
+    var progress := clampf(
+        _camera_zoom_transition_elapsed / CAMERA_ZOOM_TRANSITION_SECONDS,
+        0.0,
+        1.0
+    )
     var ease_out := 1.0 - pow(1.0 - progress, 3.0)
     var zoom_factor := lerpf(
         _camera_zoom_transition_start_factor,
