@@ -9,16 +9,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use rayon::prelude::*;
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
-    EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng,
-    MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, ThroughputMode,
-    TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices,
-    evolve_population_checkpointed,
-    generate_initial_population_preview, mutate_genome, random_creature, run_cuda_probe_batch,
+    EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights,
+    GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
+    ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
+    mutate_genome, random_creature, run_cuda_probe_batch,
 };
+use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Stream simulation snapshots ahead of the viewer so slow-motion playback can
@@ -1652,7 +1652,6 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     Ok(())
 }
 
-
 fn write_population_visualization(
     path: &Path,
     generation: usize,
@@ -1667,8 +1666,7 @@ fn write_population_visualization(
         return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
     }
 
-    let sample_every_steps =
-        ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
 
     let trajectories = population
         .par_iter()
@@ -1708,9 +1706,7 @@ fn write_population_visualization(
     write!(
         writer,
         "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"genomes\":[",
-        generation,
-        sample_hz,
-        settings.simulation.duration_seconds
+        generation, sample_hz, settings.simulation.duration_seconds
     )
     .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
@@ -1736,12 +1732,8 @@ fn write_population_visualization(
         }
 
         let simulated_seconds = trajectories[0][frame_index].simulated_seconds;
-        write!(
-            writer,
-            "{{\"t\":{},\"creatures\":",
-            simulated_seconds
-        )
-        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+        write!(writer, "{{\"t\":{},\"creatures\":", simulated_seconds)
+            .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
         let compact = trajectories
             .iter()
@@ -1778,7 +1770,6 @@ fn write_population_visualization(
 
     Ok((frame_count, body_count))
 }
-
 
 fn run_experiment(
     path: &PathBuf,
