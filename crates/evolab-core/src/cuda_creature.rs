@@ -12,6 +12,13 @@ pub struct CudaCreatureBatchResult {
     pub execution: ExecutionPerformance,
 }
 
+#[derive(Clone, Debug)]
+pub struct CudaCreatureVisualFrame {
+    pub simulated_seconds: f32,
+    pub positions: Vec<[f32; 3]>,
+    pub rotations_xyzw: Vec<[f32; 4]>,
+}
+
 static CUDA_CREATURE_DEVICE_CACHE: std::sync::OnceLock<Result<Vec<crate::CudaDeviceInfo>, String>> =
     std::sync::OnceLock::new();
 
@@ -68,6 +75,57 @@ pub fn run_cuda_creature_batch(
         accelerator,
         devices,
         &assignments,
+    )
+}
+
+pub fn run_cuda_creature_visual_stream(
+    genomes: &[CreatureGenome],
+    simulation: &SimulationConfig,
+    accelerator: &AcceleratorConfig,
+    frame_hz: f32,
+    observer: &mut dyn FnMut(&CudaCreatureVisualFrame) -> Result<(), String>,
+) -> Result<(), String> {
+    if genomes.is_empty() {
+        return Err("CUDA creature visual stream must contain at least one genome".into());
+    }
+    simulation.validate()?;
+    accelerator.validate()?;
+    validate_cuda_creature_world(simulation)?;
+    if !frame_hz.is_finite() || !(1.0..=60.0).contains(&frame_hz) {
+        return Err("visual frame_hz must be between 1 and 60".into());
+    }
+
+    for genome in genomes {
+        genome.validate()?;
+        let compatibility = accelerator.creature_compatibility(genome);
+        if !compatibility.compatible {
+            return Err(format!(
+                "creature is not compatible with CUDA limits: {}",
+                compatibility.reasons.join("; ")
+            ));
+        }
+    }
+
+    let devices = cached_cuda_devices()?;
+    if devices.is_empty() {
+        return Err("no CUDA devices were found".into());
+    }
+    let selected = accelerator.selected_gpu_ids(devices)?;
+    let device_id = *selected
+        .first()
+        .ok_or_else(|| "no CUDA devices were selected".to_string())?;
+    let device = devices
+        .iter()
+        .find(|device| device.id == device_id)
+        .ok_or_else(|| format!("CUDA device {device_id} disappeared"))?;
+
+    platform::run_visual_stream(
+        genomes,
+        simulation,
+        accelerator,
+        device,
+        frame_hz,
+        observer,
     )
 }
 
@@ -454,7 +512,7 @@ mod platform {
         SimulationConfig,
     };
 
-    use super::CudaCreatureBatchResult;
+    use super::{CudaCreatureBatchResult, CudaCreatureVisualFrame};
 
     pub fn run_batch(
         _genomes: &[CreatureGenome],
@@ -465,6 +523,17 @@ mod platform {
         _assignments: &[DeviceWorkAssignment],
     ) -> Result<CudaCreatureBatchResult, String> {
         Err("CUDA articulated-creature physics currently supports Windows only".into())
+    }
+
+    pub fn run_visual_stream(
+        _genomes: &[CreatureGenome],
+        _simulation: &SimulationConfig,
+        _accelerator: &AcceleratorConfig,
+        _device: &CudaDeviceInfo,
+        _frame_hz: f32,
+        _observer: &mut dyn FnMut(&CudaCreatureVisualFrame) -> Result<(), String>,
+    ) -> Result<(), String> {
+        Err("CUDA articulated-creature visual streaming currently supports Windows only".into())
     }
 }
 
@@ -479,7 +548,7 @@ mod platform {
         ptr::{null, null_mut},
         sync::{Arc, Mutex, OnceLock},
         thread,
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     use crate::{
@@ -488,7 +557,7 @@ mod platform {
         FitnessMetrics, FitnessResult, SimulationConfig, ThroughputMode,
     };
 
-    use super::{CudaCreatureBatchResult, PackedCreatureBatch};
+    use super::{CudaCreatureBatchResult, CudaCreatureVisualFrame, PackedCreatureBatch};
 
     type CuResult = i32;
     type CuDevice = i32;
