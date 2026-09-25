@@ -1688,8 +1688,9 @@ fn write_population_visualization(
 
     let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
     let total_steps = settings.simulation.step_count();
-    let frame_count =
-        1 + total_steps / sample_every_steps + usize::from(!total_steps.is_multiple_of(sample_every_steps));
+    let frame_count = 1
+        + total_steps / sample_every_steps
+        + usize::from(!total_steps.is_multiple_of(sample_every_steps));
 
     let body_count = population
         .iter()
