@@ -3139,9 +3139,11 @@ void fragment() {
     float parity = mod(cell.x + cell.y, 2.0);
     vec2 from_center = abs(checker_world_position.xz - population_center_xz);
     bool in_center_marker = from_center.x <= 1.0 && from_center.y <= 1.0;
-    ALBEDO = in_center_marker
-        ? center_color
-        : mix(checker_dark, checker_light, parity);
+    if (in_center_marker) {
+        ALBEDO = center_color;
+    } else {
+        ALBEDO = mix(checker_dark, checker_light, parity);
+    }
     ROUGHNESS = 0.92;
     METALLIC = 0.0;
 }
@@ -6816,7 +6818,9 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
         if typeof(genome_value) != TYPE_DICTIONARY:
             continue
         var genome: Dictionary = genome_value
-        total_segments += Array(genome.get("segments", [])).size()
+        var segments = genome.get("segments", [])
+        if typeof(segments) == TYPE_ARRAY:
+            total_segments += segments.size()
 
     if total_segments <= 0:
         return
