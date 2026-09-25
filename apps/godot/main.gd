@@ -147,7 +147,8 @@ var _current_mutation_count := 0
 var _has_evolution_champion := false
 var _preview_population_before_evolution := false
 var _population_preview_active := false
-var _population_preview_meshes: Array[MeshInstance3D] = []
+var _population_preview_multimesh: MultiMeshInstance3D
+var _population_preview_instance_count := 0
 var _pending_evolution_args := PackedStringArray()
 var _pending_evolution_label := ""
 var _champion_world: Dictionary = {}
@@ -3480,7 +3481,7 @@ func _visible_segment_count() -> int:
     return (
         _world_meshes.size()
         + _creature_meshes.size()
-        + _population_preview_meshes.size()
+        + _population_preview_instance_count
         + (1 if is_instance_valid(_probe_mesh) and _probe_mesh.visible else 0)
     )
 
@@ -6584,11 +6585,16 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
 
     var columns := int(ceil(sqrt(float(genomes.size()))))
     var maximum_span := 0.0
+    var total_segments := 0
+
     for genome_value in genomes:
         if typeof(genome_value) != TYPE_DICTIONARY:
             continue
         var genome: Dictionary = genome_value
-        for segment_value in genome.get("segments", []):
+        var segments: Array = genome.get("segments", [])
+        total_segments += segments.size()
+
+        for segment_value in segments:
             if typeof(segment_value) != TYPE_DICTIONARY:
                 continue
             var segment: Dictionary = segment_value
@@ -6602,13 +6608,38 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
                         absf(float(initial[2])) + float(half[2])
                     )
                 )
+
+    if total_segments <= 0:
+        return
+
     var spacing := maxf(3.0, maximum_span * 2.2 + 1.0)
     var rows := int(ceil(float(genomes.size()) / float(columns)))
 
+    var preview_mesh := BoxMesh.new()
+    preview_mesh.size = Vector3.ONE
+
+    var preview_material := StandardMaterial3D.new()
+    preview_material.vertex_color_use_as_albedo = true
+    preview_material.metallic = 0.08
+    preview_material.roughness = 0.45
+    preview_mesh.material = preview_material
+
+    var multimesh := MultiMesh.new()
+    multimesh.transform_format = MultiMesh.TRANSFORM_3D
+    multimesh.use_colors = true
+    multimesh.mesh = preview_mesh
+    multimesh.instance_count = total_segments
+
+    _population_preview_multimesh = MultiMeshInstance3D.new()
+    _population_preview_multimesh.multimesh = multimesh
+    add_child(_population_preview_multimesh)
+
+    var instance_index := 0
     for index in range(genomes.size()):
         var genome_value = genomes[index]
         if typeof(genome_value) != TYPE_DICTIONARY:
             continue
+
         var genome: Dictionary = genome_value
         var row := int(index / columns)
         var column := index % columns
@@ -6621,46 +6652,48 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
         for segment_value in genome.get("segments", []):
             if typeof(segment_value) != TYPE_DICTIONARY:
                 continue
+
             var segment: Dictionary = segment_value
             var half: Array = segment.get("half_extents", [0.25, 0.25, 0.25])
             var initial: Array = segment.get("initial_position", [0.0, 0.0, 0.0])
+            if half.size() < 3 or initial.size() < 3:
+                continue
 
-            var instance := MeshInstance3D.new()
-            var box := BoxMesh.new()
-            if half.size() >= 3:
-                box.size = Vector3(
-                    float(half[0]) * 2.0,
-                    float(half[1]) * 2.0,
-                    float(half[2]) * 2.0
-                )
-            instance.mesh = box
+            var size := Vector3(
+                float(half[0]) * 2.0,
+                float(half[1]) * 2.0,
+                float(half[2]) * 2.0
+            )
+            var position := offset + Vector3(
+                float(initial[0]),
+                float(initial[1]),
+                float(initial[2])
+            )
 
-            var material := StandardMaterial3D.new()
-            if index == champion_index:
-                material.albedo_color = Color(1.0, 0.72, 0.18)
-                material.emission_enabled = true
-                material.emission = Color(0.35, 0.18, 0.02)
-            else:
-                material.albedo_color = _segment_color(int(segment.get("id", 0)))
-            material.metallic = 0.08
-            material.roughness = 0.45
-            instance.material_override = material
+            multimesh.set_instance_transform(
+                instance_index,
+                Transform3D(Basis().scaled(size), position)
+            )
 
-            if initial.size() >= 3:
-                instance.position = offset + Vector3(
-                    float(initial[0]),
-                    float(initial[1]),
-                    float(initial[2])
-                )
-            add_child(instance)
-            _population_preview_meshes.append(instance)
+            var color := (
+                Color(1.0, 0.72, 0.18)
+                if index == champion_index
+                else _segment_color(int(segment.get("id", 0)))
+            )
+            multimesh.set_instance_color(instance_index, color)
+            instance_index += 1
+
+    if instance_index < total_segments:
+        multimesh.visible_instance_count = instance_index
+
+    _population_preview_instance_count = instance_index
 
 
 func _clear_population_preview() -> void:
-    for mesh in _population_preview_meshes:
-        if is_instance_valid(mesh):
-            mesh.queue_free()
-    _population_preview_meshes.clear()
+    if is_instance_valid(_population_preview_multimesh):
+        _population_preview_multimesh.queue_free()
+    _population_preview_multimesh = null
+    _population_preview_instance_count = 0
 
 
 func _build_creature_from_genome(genome_value) -> void:
