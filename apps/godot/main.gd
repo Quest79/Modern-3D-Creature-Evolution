@@ -6136,7 +6136,6 @@ func _handle_event(event: Dictionary) -> void:
                 event.get("generation_best_distance", 0.0)
             )
             _ensure_population_best_marker()
-            _update_population_best_marker_text()
             _population_visual_frames = visual_frames
             _population_visual_clock = 0.0
             _population_visual_duration = float(
@@ -7174,7 +7173,7 @@ func _update_population_best_marker(
 
     var body_count := mini(first_bodies.size(), second_bodies.size())
     var root_position := Vector3.ZERO
-    var highest_y := -INF
+    var highest_y := -1.0e30
     var valid_bodies := 0
 
     for body_index in range(body_count):
