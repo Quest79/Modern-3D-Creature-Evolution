@@ -301,6 +301,57 @@ pub fn evolve_population_checkpointed<F, C>(
     config: &EvolutionConfig,
     resume: Option<&EvolutionCheckpoint>,
     checkpointing_enabled: bool,
+    on_generation: F,
+    on_checkpoint: C,
+) -> Result<EvolutionResult, String>
+where
+    F: FnMut(&GenerationSummary) -> Result<(), String>,
+    C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
+{
+    evolve_population_checkpointed_internal(
+        ancestor,
+        config,
+        resume,
+        checkpointing_enabled,
+        None,
+        on_generation,
+        on_checkpoint,
+    )
+}
+
+pub fn evolve_population_checkpointed_with_population<F, C, P>(
+    ancestor: &CreatureGenome,
+    config: &EvolutionConfig,
+    resume: Option<&EvolutionCheckpoint>,
+    checkpointing_enabled: bool,
+    mut on_population: P,
+    on_generation: F,
+    on_checkpoint: C,
+) -> Result<EvolutionResult, String>
+where
+    F: FnMut(&GenerationSummary) -> Result<(), String>,
+    C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
+    P: FnMut(usize, &[CreatureGenome], &EffectiveEvolutionSettings) -> Result<(), String>,
+{
+    evolve_population_checkpointed_internal(
+        ancestor,
+        config,
+        resume,
+        checkpointing_enabled,
+        Some(&mut on_population),
+        on_generation,
+        on_checkpoint,
+    )
+}
+
+fn evolve_population_checkpointed_internal<F, C>(
+    ancestor: &CreatureGenome,
+    config: &EvolutionConfig,
+    resume: Option<&EvolutionCheckpoint>,
+    checkpointing_enabled: bool,
+    mut on_population: Option<
+        &mut dyn FnMut(usize, &[CreatureGenome], &EffectiveEvolutionSettings) -> Result<(), String>,
+    >,
     mut on_generation: F,
     mut on_checkpoint: C,
 ) -> Result<EvolutionResult, String>
@@ -424,6 +475,14 @@ where
                 settings.population_size,
                 population.len()
             ));
+        }
+
+        if let Some(observer) = on_population.as_deref_mut() {
+            let visual_population = population
+                .iter()
+                .map(|candidate| candidate.genome.clone())
+                .collect::<Vec<_>>();
+            observer(generation, &visual_population, &settings)?;
         }
 
         let pool_generation_started = Instant::now();
