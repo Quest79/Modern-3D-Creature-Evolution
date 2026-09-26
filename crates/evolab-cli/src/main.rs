@@ -16,8 +16,9 @@ use evolab_core::{
     GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
     ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
-    mutate_genome, random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
+    mutate_genome, random_creature, run_cuda_probe_batch,
 };
+use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Stream simulation snapshots ahead of the viewer so slow-motion playback can
@@ -390,7 +391,7 @@ enum Command {
         population_stream_port: Option<u16>,
 
         /// Sample rate for slow visual trajectories. The GUI interpolates between samples.
-        #[arg(long, default_value_t = 60.0)]
+        #[arg(long, default_value_t = 10.0)]
         visual_sample_hz: f32,
 
         /// Emit final evolution result as JSON.
@@ -1518,7 +1519,6 @@ fn run_evolve_inner(
                     summary.generation,
                     visual_population,
                     &summary.effective_settings,
-                    &config.accelerator,
                     request.visual_sample_hz,
                 )?;
 
@@ -1713,43 +1713,107 @@ fn stream_population_visualization(
     generation: usize,
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
-    accelerator: &AcceleratorConfig,
     sample_hz: f32,
 ) -> Result<(usize, usize, usize), String> {
     if population.is_empty() {
         return Err("cannot visualize an empty population".into());
     }
+    if !sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0 {
+        return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
+    }
 
-    let genomes = population
-        .iter()
-        .map(|creature| creature.genome.clone())
+    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+
+    let trajectories = population
+        .par_iter()
+        .map(|creature| {
+            let mut frames = Vec::new();
+            let result = CreatureSimulator.run_streaming(
+                &settings.simulation,
+                &creature.genome,
+                sample_every_steps,
+                &mut |snapshot| {
+                    frames.push(snapshot.clone());
+                    Ok(())
+                },
+            );
+            (frames, result.is_err())
+        })
         .collect::<Vec<_>>();
-    let body_count = genomes
+
+    let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
+    let total_steps = settings.simulation.step_count();
+    let frame_count = 1
+        + total_steps / sample_every_steps
+        + usize::from(!total_steps.is_multiple_of(sample_every_steps));
+    let body_count = population
         .iter()
-        .map(|genome| genome.segments.len())
+        .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
 
-    let visual =
-        run_cuda_creature_visual_batch(&genomes, &settings.simulation, accelerator, sample_hz)?;
+    for frame_index in 0..frame_count {
+        let step = if frame_index + 1 == frame_count {
+            total_steps
+        } else {
+            frame_index * sample_every_steps
+        };
+        let simulated_seconds = step as f32 * settings.simulation.dt;
 
-    for frame in &visual.frames {
+        let compact = trajectories
+            .iter()
+            .zip(population.iter())
+            .map(|((trajectory, _failed), creature)| {
+                if trajectory.is_empty() {
+                    return creature
+                        .genome
+                        .segments
+                        .iter()
+                        .map(|segment| {
+                            [
+                                segment.initial_position[0],
+                                segment.initial_position[1],
+                                segment.initial_position[2],
+                                0.0,
+                                0.0,
+                                0.0,
+                                1.0,
+                            ]
+                        })
+                        .collect::<Vec<_>>();
+                }
+
+                let source_index = frame_index.min(trajectory.len() - 1);
+                trajectory[source_index]
+                    .bodies
+                    .iter()
+                    .map(|body| {
+                        [
+                            body.position[0],
+                            body.position[1],
+                            body.position[2],
+                            body.rotation_xyzw[0],
+                            body.rotation_xyzw[1],
+                            body.rotation_xyzw[2],
+                            body.rotation_xyzw[3],
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
         send_population_stream_message(
             stream,
             &json!({
                 "protocol_version": 1,
                 "kind": "population_visual_frame",
                 "generation": generation,
-                "t": frame.simulated_seconds,
-                "creatures": frame.creatures,
+                "t": simulated_seconds,
+                "creatures": compact,
             }),
         )?;
     }
 
-    Ok((
-        visual.frames.len(),
-        body_count,
-        visual.unstable.iter().filter(|value| **value).count(),
-    ))
+    Ok((frame_count, body_count, frozen_creatures))
 }
 
 fn run_experiment(
