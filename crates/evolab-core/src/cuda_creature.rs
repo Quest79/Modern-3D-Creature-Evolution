@@ -7,9 +7,28 @@ use crate::{
 use crate::{Expression, SensorKind, legacy_expression};
 
 #[derive(Clone, Debug)]
+pub struct CudaCreatureTrajectory {
+    pub sample_every_steps: usize,
+    pub frame_count: usize,
+    pub part_count: usize,
+    /// Packed [frame][part][position xyz, rotation xyzw].
+    pub transforms: Vec<f32>,
+    /// Number of valid frames per creature. Later frames should freeze at the last valid frame.
+    pub valid_frames: Vec<u32>,
+}
+
+#[derive(Clone, Debug)]
 pub struct CudaCreatureBatchResult {
     pub fitness: Vec<FitnessResult>,
     pub execution: ExecutionPerformance,
+    pub trajectory: Option<CudaCreatureTrajectory>,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct CudaVisualCaptureConfig {
+    sample_every_steps: usize,
+    frame_count: usize,
 }
 
 static CUDA_CREATURE_DEVICE_CACHE: std::sync::OnceLock<Result<Vec<crate::CudaDeviceInfo>, String>> =
@@ -28,6 +47,43 @@ pub fn run_cuda_creature_batch(
     simulation: &SimulationConfig,
     fitness: &FitnessConfig,
     accelerator: &AcceleratorConfig,
+) -> Result<CudaCreatureBatchResult, String> {
+    run_cuda_creature_batch_impl(genomes, simulation, fitness, accelerator, None)
+}
+
+pub fn run_cuda_creature_visual_batch(
+    genomes: &[CreatureGenome],
+    simulation: &SimulationConfig,
+    fitness: &FitnessConfig,
+    accelerator: &AcceleratorConfig,
+    sample_hz: f32,
+) -> Result<CudaCreatureBatchResult, String> {
+    if !sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0 {
+        return Err("CUDA visual sample rate must be greater than 0 and at most 60 Hz".into());
+    }
+    let sample_every_steps = ((1.0 / (simulation.dt * sample_hz)).round() as usize).max(1);
+    let total_steps = simulation.step_count();
+    let frame_count = 1
+        + total_steps / sample_every_steps
+        + usize::from(!total_steps.is_multiple_of(sample_every_steps));
+    run_cuda_creature_batch_impl(
+        genomes,
+        simulation,
+        fitness,
+        accelerator,
+        Some(CudaVisualCaptureConfig {
+            sample_every_steps,
+            frame_count,
+        }),
+    )
+}
+
+fn run_cuda_creature_batch_impl(
+    genomes: &[CreatureGenome],
+    simulation: &SimulationConfig,
+    fitness: &FitnessConfig,
+    accelerator: &AcceleratorConfig,
+    visual_capture: Option<CudaVisualCaptureConfig>,
 ) -> Result<CudaCreatureBatchResult, String> {
     if genomes.is_empty() {
         return Err("CUDA creature batch must contain at least one genome".into());
@@ -68,6 +124,7 @@ pub fn run_cuda_creature_batch(
         accelerator,
         devices,
         &assignments,
+        visual_capture,
     )
 }
 
@@ -454,7 +511,7 @@ mod platform {
         SimulationConfig,
     };
 
-    use super::CudaCreatureBatchResult;
+    use super::{CudaCreatureBatchResult, CudaVisualCaptureConfig};
 
     pub fn run_batch(
         _genomes: &[CreatureGenome],
@@ -463,6 +520,7 @@ mod platform {
         _accelerator: &AcceleratorConfig,
         _devices: &[CudaDeviceInfo],
         _assignments: &[DeviceWorkAssignment],
+        _visual_capture: Option<CudaVisualCaptureConfig>,
     ) -> Result<CudaCreatureBatchResult, String> {
         Err("CUDA articulated-creature physics currently supports Windows only".into())
     }
@@ -488,7 +546,10 @@ mod platform {
         FitnessMetrics, FitnessResult, SimulationConfig, ThroughputMode,
     };
 
-    use super::{CudaCreatureBatchResult, PackedCreatureBatch};
+    use super::{
+        CudaCreatureBatchResult, CudaCreatureTrajectory, CudaVisualCaptureConfig,
+        PackedCreatureBatch,
+    };
 
     type CuResult = i32;
     type CuDevice = i32;
@@ -1184,13 +1245,19 @@ mod platform {
         accelerator: &AcceleratorConfig,
         devices: &[CudaDeviceInfo],
         assignments: &[DeviceWorkAssignment],
+        visual_capture: Option<CudaVisualCaptureConfig>,
     ) -> Result<CudaCreatureBatchResult, String> {
         let started = Instant::now();
         let mut handles = Vec::with_capacity(assignments.len());
 
         for assignment in assignments {
             let assignment = assignment.clone();
-            let genomes =
+            let global_part_start = genomes
+                .iter()
+                .take(assignment.start_index)
+                .map(|genome| genome.segments.len())
+                .sum::<usize>();
+            let assignment_genomes =
                 genomes[assignment.start_index..assignment.start_index + assignment.count].to_vec();
             let simulation = simulation.clone();
             let fitness = *fitness;
@@ -1202,12 +1269,14 @@ mod platform {
                 .ok_or_else(|| format!("CUDA device {} disappeared", assignment.device_id))?;
             handles.push(thread::spawn(move || {
                 run_device_assignment(
-                    &genomes,
+                    &assignment_genomes,
                     &simulation,
                     &fitness,
                     &accelerator,
                     &device,
                     assignment.start_index,
+                    global_part_start,
+                    visual_capture,
                 )
             }));
         }
@@ -1220,6 +1289,7 @@ mod platform {
             genomes.len()
         ];
         let mut device_stats = Vec::new();
+        let mut device_visuals = Vec::new();
 
         for handle in handles {
             let result = handle
@@ -1228,13 +1298,47 @@ mod platform {
             for (index, fitness) in result.results {
                 results[index] = fitness;
             }
+            if let Some(visual) = result.visual {
+                device_visuals.push((result.global_world_start, result.global_part_start, visual));
+            }
             device_stats.push(result.performance);
         }
+
+        let trajectory = if let Some(capture) = visual_capture {
+            let total_parts = genomes
+                .iter()
+                .map(|genome| genome.segments.len())
+                .sum::<usize>();
+            let mut transforms = vec![0.0_f32; capture.frame_count * total_parts * 7];
+            let mut valid_frames = vec![0_u32; genomes.len()];
+            for (global_world_start, global_part_start, visual) in device_visuals {
+                for frame_index in 0..capture.frame_count {
+                    let src_start = frame_index * visual.part_count * 7;
+                    let src_end = src_start + visual.part_count * 7;
+                    let dst_start = (frame_index * total_parts + global_part_start) * 7;
+                    let dst_end = dst_start + visual.part_count * 7;
+                    transforms[dst_start..dst_end]
+                        .copy_from_slice(&visual.transforms[src_start..src_end]);
+                }
+                let world_end = global_world_start + visual.valid_frames.len();
+                valid_frames[global_world_start..world_end].copy_from_slice(&visual.valid_frames);
+            }
+            Some(CudaCreatureTrajectory {
+                sample_every_steps: capture.sample_every_steps,
+                frame_count: capture.frame_count,
+                part_count: total_parts,
+                transforms,
+                valid_frames,
+            })
+        } else {
+            None
+        };
 
         let wall_seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
         let physics_steps = genomes.len() as u64 * simulation.step_count() as u64;
         Ok(CudaCreatureBatchResult {
             fitness: results,
+            trajectory,
             execution: {
                 let mut cuda = CudaExecutionTelemetry::default();
                 for device in &device_stats {
@@ -1258,9 +1362,18 @@ mod platform {
         })
     }
 
+    struct DeviceVisualCapture {
+        part_count: usize,
+        transforms: Vec<f32>,
+        valid_frames: Vec<u32>,
+    }
+
     struct DeviceAssignmentResult {
         results: Vec<(usize, FitnessResult)>,
         performance: DevicePerformance,
+        global_world_start: usize,
+        global_part_start: usize,
+        visual: Option<DeviceVisualCapture>,
     }
 
     fn run_device_assignment(
@@ -1270,6 +1383,8 @@ mod platform {
         accelerator: &AcceleratorConfig,
         device_info: &CudaDeviceInfo,
         global_start: usize,
+        global_part_start: usize,
+        visual_capture: Option<CudaVisualCaptureConfig>,
     ) -> Result<DeviceAssignmentResult, String> {
         let (runtime, mut cuda_telemetry) =
             get_or_create_runtime(device_info, accelerator.throughput_mode)?;
@@ -1282,17 +1397,55 @@ mod platform {
         )?;
         let started = Instant::now();
         let mut all_results = Vec::with_capacity(genomes.len());
+        let assignment_part_count = genomes
+            .iter()
+            .map(|genome| genome.segments.len())
+            .sum::<usize>();
+        let mut assignment_visual = visual_capture.map(|capture| DeviceVisualCapture {
+            part_count: assignment_part_count,
+            transforms: vec![0.0; capture.frame_count * assignment_part_count * 7],
+            valid_frames: vec![0; genomes.len()],
+        });
 
         // A generation is one fixed evolutionary workload. Keep every candidate
         // assigned to this GPU in the same CUDA launch instead of serializing it
         // into smaller chunks based on a UI batch-size knob.
-        let batch_size = genomes.len().max(1);
+        let batch_size = if visual_capture.is_some() {
+            genomes.len().min(256).max(1)
+        } else {
+            genomes.len().max(1)
+        };
         let mut offset = 0usize;
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_result = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            let chunk_result = run_chunk(
+                &mut runtime,
+                chunk,
+                simulation,
+                fitness,
+                accelerator,
+                visual_capture,
+            )?;
             cuda_telemetry.accumulate(&chunk_result.telemetry);
+            if let (Some(target), Some(source)) = (assignment_visual.as_mut(), chunk_result.visual)
+            {
+                let chunk_part_start = genomes
+                    .iter()
+                    .take(offset)
+                    .map(|genome| genome.segments.len())
+                    .sum::<usize>();
+                for frame_index in 0..visual_capture.expect("capture exists").frame_count {
+                    let src_start = frame_index * source.part_count * 7;
+                    let src_end = src_start + source.part_count * 7;
+                    let dst_start = (frame_index * target.part_count + chunk_part_start) * 7;
+                    let dst_end = dst_start + source.part_count * 7;
+                    target.transforms[dst_start..dst_end]
+                        .copy_from_slice(&source.transforms[src_start..src_end]);
+                }
+                target.valid_frames[offset..offset + source.valid_frames.len()]
+                    .copy_from_slice(&source.valid_frames);
+            }
             all_results.extend(
                 chunk_result
                     .fitness
@@ -1307,6 +1460,9 @@ mod platform {
         let physics_steps = genomes.len() as u64 * simulation.step_count() as u64;
         Ok(DeviceAssignmentResult {
             results: all_results,
+            global_world_start: global_start,
+            global_part_start,
+            visual: assignment_visual,
             performance: DevicePerformance {
                 device_id: device_info.id,
                 items: genomes.len(),
@@ -1321,6 +1477,7 @@ mod platform {
     struct ChunkResult {
         fitness: Vec<FitnessResult>,
         telemetry: CudaExecutionTelemetry,
+        visual: Option<DeviceVisualCapture>,
     }
 
     fn run_chunk(
@@ -1329,6 +1486,7 @@ mod platform {
         simulation: &SimulationConfig,
         fitness: &FitnessConfig,
         accelerator: &AcceleratorConfig,
+        visual_capture: Option<CudaVisualCaptureConfig>,
     ) -> Result<ChunkResult, String> {
         let mut telemetry = CudaExecutionTelemetry::default();
         telemetry.batch_count = 1;
@@ -1423,6 +1581,32 @@ mod platform {
         let mut p_out_unstable =
             workspace.ensure(api, "out_unstable", world_count * size_of::<u32>())?;
 
+        let capture_transform_floats = visual_capture
+            .map(|capture| capture.frame_count * part_slots * 7)
+            .unwrap_or(1);
+        let capture_valid_count = if visual_capture.is_some() {
+            world_count
+        } else {
+            1
+        };
+        let mut p_capture_transform = workspace.ensure(
+            api,
+            "capture_transform",
+            capture_transform_floats * size_of::<f32>(),
+        )?;
+        let mut p_capture_valid_frames = workspace.ensure(
+            api,
+            "capture_valid_frames",
+            capture_valid_count * size_of::<u32>(),
+        )?;
+        let mut capture_part_slots = part_slots as u32;
+        let mut capture_sample_every = visual_capture
+            .map(|capture| capture.sample_every_steps as u32)
+            .unwrap_or(0);
+        let mut capture_frame_count = visual_capture
+            .map(|capture| capture.frame_count as u32)
+            .unwrap_or(0);
+
         let mut dt = simulation.dt;
         let mut steps = simulation.step_count() as u32;
         let mut gravity_y = simulation.world.gravity[1];
@@ -1514,6 +1698,11 @@ mod platform {
                 (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_capture_transform as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_capture_valid_frames as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut capture_part_slots as *mut u32).cast::<c_void>(),
+                (&mut capture_sample_every as *mut u32).cast::<c_void>(),
+                (&mut capture_frame_count as *mut u32).cast::<c_void>(),
                 (&mut world_start_arg as *mut u32).cast::<c_void>(),
                 (&mut launch_count_arg as *mut u32).cast::<c_void>(),
                 (&mut dt as *mut f32).cast::<c_void>(),
@@ -1577,6 +1766,19 @@ mod platform {
         workspace.download(api, "out_stability", &mut stability)?;
         workspace.download(api, "out_energy", &mut energy)?;
         workspace.download(api, "out_unstable", &mut unstable)?;
+        let visual = if let Some(capture) = visual_capture {
+            let mut transforms = vec![0.0_f32; capture.frame_count * part_slots * 7];
+            let mut valid_frames = vec![0_u32; world_count];
+            workspace.download(api, "capture_transform", &mut transforms)?;
+            workspace.download(api, "capture_valid_frames", &mut valid_frames)?;
+            Some(DeviceVisualCapture {
+                part_count: part_slots,
+                transforms,
+                valid_frames,
+            })
+        } else {
+            None
+        };
         telemetry.d_to_h_seconds = download_started.elapsed().as_secs_f64();
 
         let decode_started = Instant::now();
@@ -1614,6 +1816,7 @@ mod platform {
         Ok(ChunkResult {
             fitness: decoded,
             telemetry,
+            visual,
         })
     }
 
@@ -1799,6 +2002,11 @@ extern "C" __global__ void simulate_creatures(
     float* out_stability,
     float* out_energy,
     unsigned* out_unstable,
+    float* capture_transform,
+    unsigned* capture_valid_frames,
+    unsigned capture_part_slots,
+    unsigned capture_sample_every,
+    unsigned capture_frame_count,
     unsigned world_start,
     unsigned launch_world_count,
     float dt,
@@ -1860,6 +2068,22 @@ extern "C" __global__ void simulate_creatures(
         joint_torque[js * 3 + 0] = 0.0f;
         joint_torque[js * 3 + 1] = 0.0f;
         joint_torque[js * 3 + 2] = 0.0f;
+    }
+    __syncwarp(subgroup_mask);
+
+    if (capture_sample_every > 0 && capture_frame_count > 0) {
+        for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+            unsigned slot = part_base + p;
+            unsigned capture_base = slot * 7;
+            capture_transform[capture_base + 0] = state_position[slot * 3 + 0];
+            capture_transform[capture_base + 1] = state_position[slot * 3 + 1];
+            capture_transform[capture_base + 2] = state_position[slot * 3 + 2];
+            capture_transform[capture_base + 3] = state_rotation[slot * 4 + 0];
+            capture_transform[capture_base + 4] = state_rotation[slot * 4 + 1];
+            capture_transform[capture_base + 5] = state_rotation[slot * 4 + 2];
+            capture_transform[capture_base + 6] = state_rotation[slot * 4 + 3];
+        }
+        if (lane == 0) capture_valid_frames[world] = 1;
     }
     __syncwarp(subgroup_mask);
 
@@ -2166,6 +2390,41 @@ extern "C" __global__ void simulate_creatures(
         __syncwarp(subgroup_mask);
 
         if (group_unstable) break;
+
+        unsigned completed_step = step + 1;
+        if (
+            capture_sample_every > 0
+            && (
+                completed_step % capture_sample_every == 0
+                || completed_step == steps
+            )
+        ) {
+            unsigned frame_index =
+                1 + (completed_step - 1) / capture_sample_every;
+            if (frame_index < capture_frame_count) {
+                for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+                    unsigned slot = part_base + p;
+                    unsigned capture_base =
+                        (frame_index * capture_part_slots + slot) * 7;
+                    capture_transform[capture_base + 0] =
+                        state_position[slot * 3 + 0];
+                    capture_transform[capture_base + 1] =
+                        state_position[slot * 3 + 1];
+                    capture_transform[capture_base + 2] =
+                        state_position[slot * 3 + 2];
+                    capture_transform[capture_base + 3] =
+                        state_rotation[slot * 4 + 0];
+                    capture_transform[capture_base + 4] =
+                        state_rotation[slot * 4 + 1];
+                    capture_transform[capture_base + 5] =
+                        state_rotation[slot * 4 + 2];
+                    capture_transform[capture_base + 6] =
+                        state_rotation[slot * 4 + 3];
+                }
+                if (lane == 0) capture_valid_frames[world] = frame_index + 1;
+            }
+        }
+        __syncwarp(subgroup_mask);
 
         if (lane == 0) {
             float rvx = state_velocity[root_slot * 3 + 0];
