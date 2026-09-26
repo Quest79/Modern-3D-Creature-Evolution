@@ -814,7 +814,9 @@ func _build_ui() -> void:
     column.add_child(header_row)
 
     _title_label = Label.new()
-    _title_label.text = "Modern 3D Creature Evolution"
+    _title_label.text = "Modern 3D Creature Evolution • v%s" % str(
+        ProjectSettings.get_setting("application/config/version", "0.0.0")
+    )
     _title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     header_row.add_child(_title_label)
 
@@ -6368,7 +6370,9 @@ func _handle_event(event: Dictionary) -> void:
                 false,
                 _handoff_profile_last_file_read_ms,
                 _handoff_profile_last_json_parse_ms,
-                _handoff_profile_last_file_bytes
+                _handoff_profile_last_file_bytes,
+                {},
+                0.0
             )
 
         "population_visual_prefetch_ready":
@@ -7229,6 +7233,100 @@ func _clear_population_preview() -> void:
 
 
 
+func _show_prebuilt_population_preview(render_state: Dictionary) -> bool:
+    var profile_started := Time.get_ticks_usec()
+    var clear_started := Time.get_ticks_usec()
+    if is_instance_valid(_population_preview_multimesh):
+        _population_preview_multimesh.visible = false
+    _clear_population_preview()
+    _clear_creature_meshes()
+    _probe_mesh.visible = false
+    var clear_ms := float(Time.get_ticks_usec() - clear_started) / 1000.0
+
+    var buffer_value = render_state.get("buffer", PackedFloat32Array())
+    if typeof(buffer_value) != TYPE_PACKED_FLOAT32_ARRAY:
+        return false
+    var preview_buffer: PackedFloat32Array = buffer_value
+    var total_segments := int(render_state.get("total_segments", 0))
+    var instance_count := int(render_state.get("instance_count", 0))
+    if total_segments <= 0 or preview_buffer.size() != total_segments * 16:
+        return false
+
+    var multimesh_alloc_started := Time.get_ticks_usec()
+    var preview_mesh := BoxMesh.new()
+    preview_mesh.size = Vector3.ONE
+
+    var preview_material := StandardMaterial3D.new()
+    preview_material.vertex_color_use_as_albedo = true
+    preview_material.metallic = 0.08
+    preview_material.roughness = 0.45
+    preview_mesh.material = preview_material
+
+    var multimesh := MultiMesh.new()
+    multimesh.transform_format = MultiMesh.TRANSFORM_3D
+    multimesh.use_colors = true
+    multimesh.mesh = preview_mesh
+    multimesh.instance_count = total_segments
+    var multimesh_alloc_ms := (
+        float(Time.get_ticks_usec() - multimesh_alloc_started) / 1000.0
+    )
+
+    var multimesh_fill_started := Time.get_ticks_usec()
+    RenderingServer.multimesh_set_buffer(
+        multimesh.get_rid(),
+        preview_buffer
+    )
+    if instance_count < total_segments:
+        multimesh.visible_instance_count = instance_count
+    var multimesh_fill_ms := (
+        float(Time.get_ticks_usec() - multimesh_fill_started) / 1000.0
+    )
+
+    var preview_instance := MultiMeshInstance3D.new()
+    preview_instance.visible = false
+    preview_instance.multimesh = multimesh
+    add_child(preview_instance)
+
+    _population_preview_multimesh = preview_instance
+    _population_preview_instance_count = instance_count
+    _population_preview_buffer = preview_buffer
+    _population_preview_offsets = (
+        render_state.get("offsets", []).duplicate(true)
+    )
+    _population_preview_sizes = (
+        render_state.get("sizes", []).duplicate(true)
+    )
+    _population_preview_creature_ranges = (
+        render_state.get("creature_ranges", []).duplicate(true)
+    )
+    _population_layout_offsets = (
+        render_state.get("layout_offsets", []).duplicate(true)
+    )
+    _population_layout_columns = int(
+        render_state.get("layout_columns", _population_layout_columns)
+    )
+    _population_layout_rows = int(
+        render_state.get("layout_rows", _population_layout_rows)
+    )
+    _population_layout_spacing = float(
+        render_state.get("layout_spacing", _population_layout_spacing)
+    )
+    preview_instance.visible = true
+
+    _handoff_profile_last_preview_timing = {
+        "clear_ms": clear_ms,
+        "segment_scan_ms": 0.0,
+        "layout_ms": 0.0,
+        "multimesh_alloc_ms": multimesh_alloc_ms,
+        "multimesh_fill_ms": multimesh_fill_ms,
+        "total_ms": float(Time.get_ticks_usec() - profile_started) / 1000.0,
+        "segments": total_segments,
+        "prebuilt": true,
+        "prebuild_ms": float(render_state.get("prepare_ms", 0.0)),
+    }
+    return true
+
+
 func _load_population_visual_file(path: String) -> Dictionary:
     _handoff_profile_last_file_read_ms = 0.0
     _handoff_profile_last_json_parse_ms = 0.0
@@ -7255,7 +7353,309 @@ func _load_population_visual_file(path: String) -> Dictionary:
     return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
-func _load_population_visual_file_worker(path: String, generation: int) -> Dictionary:
+func _build_population_prefetch_render_state(
+    visual_data: Dictionary,
+    layout_state: Dictionary
+) -> Dictionary:
+    var prepare_started := Time.get_ticks_usec()
+    var genomes_value = visual_data.get("genomes", [])
+    var frames_value = visual_data.get("frames", [])
+    if typeof(genomes_value) != TYPE_ARRAY or typeof(frames_value) != TYPE_ARRAY:
+        return {}
+
+    var genomes: Array = genomes_value
+    var frames: Array = frames_value
+    if genomes.is_empty():
+        return {}
+
+    var layout_offsets_value = layout_state.get("offsets", [])
+    var layout_offsets: Array = (
+        layout_offsets_value.duplicate(true)
+        if typeof(layout_offsets_value) == TYPE_ARRAY
+        else []
+    )
+    var layout_columns := int(layout_state.get("columns", 0))
+    var layout_rows := int(layout_state.get("rows", 0))
+    var layout_spacing := float(layout_state.get("spacing", 0.0))
+    var target_count := maxi(
+        genomes.size(),
+        int(layout_state.get("target_count", genomes.size()))
+    )
+    target_count = maxi(target_count, 1)
+
+    if layout_columns <= 0:
+        var maximum_span := 0.0
+        for genome_value in genomes:
+            if typeof(genome_value) != TYPE_DICTIONARY:
+                continue
+            var genome: Dictionary = genome_value
+            for segment_value in genome.get("segments", []):
+                if typeof(segment_value) != TYPE_DICTIONARY:
+                    continue
+                var segment: Dictionary = segment_value
+                var half: Array = segment.get(
+                    "half_extents",
+                    [0.25, 0.25, 0.25]
+                )
+                var initial: Array = segment.get(
+                    "initial_position",
+                    [0.0, 0.0, 0.0]
+                )
+                if half.size() >= 3 and initial.size() >= 3:
+                    maximum_span = maxf(
+                        maximum_span,
+                        maxf(
+                            absf(float(initial[0])) + float(half[0]),
+                            absf(float(initial[2])) + float(half[2])
+                        )
+                    )
+
+        layout_spacing = maxf(3.0, maximum_span * 2.2 + 1.0)
+        layout_columns = maxi(
+            1,
+            int(ceil(sqrt(float(target_count))))
+        )
+        layout_rows = maxi(
+            1,
+            int(ceil(float(target_count) / float(layout_columns)))
+        )
+        layout_offsets.clear()
+
+    if layout_offsets.size() < target_count and layout_columns > 0:
+        var column_center := float(layout_columns - 1) * 0.5
+        var row_center := float(layout_rows - 1) * 0.5
+        for index in range(layout_offsets.size(), target_count):
+            var row := int(index / layout_columns)
+            var column := index % layout_columns
+            layout_offsets.append(
+                Vector3(
+                    POPULATION_GRID_CENTER_X
+                        + (float(column) - column_center) * layout_spacing,
+                    0.0,
+                    (float(row) - row_center) * layout_spacing
+                )
+            )
+
+    var total_segments := 0
+    for genome_value in genomes:
+        if typeof(genome_value) != TYPE_DICTIONARY:
+            continue
+        var genome: Dictionary = genome_value
+        var segments = genome.get("segments", [])
+        if typeof(segments) == TYPE_ARRAY:
+            total_segments += segments.size()
+    if total_segments <= 0:
+        return {}
+
+    var root_starts: Array = []
+    for genome_value in genomes:
+        var start := Vector3.ZERO
+        if typeof(genome_value) == TYPE_DICTIONARY:
+            var genome: Dictionary = genome_value
+            var segments = genome.get("segments", [])
+            if typeof(segments) == TYPE_ARRAY and not segments.is_empty():
+                var root_value = segments[0]
+                if typeof(root_value) == TYPE_DICTIONARY:
+                    var root: Dictionary = root_value
+                    var initial = root.get(
+                        "initial_position",
+                        [0.0, 0.0, 0.0]
+                    )
+                    if typeof(initial) == TYPE_ARRAY and initial.size() >= 3:
+                        start = Vector3(
+                            float(initial[0]),
+                            float(initial[1]),
+                            float(initial[2])
+                        )
+        root_starts.append(start)
+
+    var preview_offsets: Array = []
+    var preview_sizes: Array = []
+    var creature_ranges: Array = []
+    var preview_buffer := PackedFloat32Array()
+    preview_buffer.resize(total_segments * 16)
+
+    var instance_index := 0
+    for index in range(genomes.size()):
+        var genome_value = genomes[index]
+        if typeof(genome_value) != TYPE_DICTIONARY:
+            continue
+        if index >= layout_offsets.size():
+            continue
+
+        var genome: Dictionary = genome_value
+        var offset: Vector3 = layout_offsets[index]
+        preview_offsets.append(offset)
+        var creature_start_index := instance_index
+
+        for segment_value in genome.get("segments", []):
+            if typeof(segment_value) != TYPE_DICTIONARY:
+                continue
+
+            var segment: Dictionary = segment_value
+            var half: Array = segment.get(
+                "half_extents",
+                [0.25, 0.25, 0.25]
+            )
+            var initial: Array = segment.get(
+                "initial_position",
+                [0.0, 0.0, 0.0]
+            )
+            if half.size() < 3 or initial.size() < 3:
+                continue
+
+            var size := Vector3(
+                float(half[0]) * 2.0,
+                float(half[1]) * 2.0,
+                float(half[2]) * 2.0
+            )
+            var position := offset + Vector3(
+                float(initial[0]),
+                float(initial[1]),
+                float(initial[2])
+            )
+            preview_sizes.append(size)
+
+            var buffer_base := instance_index * 16
+            preview_buffer[buffer_base + 0] = size.x
+            preview_buffer[buffer_base + 1] = 0.0
+            preview_buffer[buffer_base + 2] = 0.0
+            preview_buffer[buffer_base + 3] = position.x
+            preview_buffer[buffer_base + 4] = 0.0
+            preview_buffer[buffer_base + 5] = size.y
+            preview_buffer[buffer_base + 6] = 0.0
+            preview_buffer[buffer_base + 7] = position.y
+            preview_buffer[buffer_base + 8] = 0.0
+            preview_buffer[buffer_base + 9] = 0.0
+            preview_buffer[buffer_base + 10] = size.z
+            preview_buffer[buffer_base + 11] = position.z
+
+            var hue := fmod(
+                float(int(segment.get("id", 0))) * 0.173 + 0.54,
+                1.0
+            )
+            var color := Color.from_hsv(hue, 0.62, 0.95)
+            preview_buffer[buffer_base + 12] = color.r
+            preview_buffer[buffer_base + 13] = color.g
+            preview_buffer[buffer_base + 14] = color.b
+            preview_buffer[buffer_base + 15] = color.a
+            instance_index += 1
+
+        creature_ranges.append(
+            [creature_start_index, instance_index]
+        )
+
+    var live_best_index := -1
+    var live_best_distance := -1.0
+    if not frames.is_empty() and typeof(frames[0]) == TYPE_DICTIONARY:
+        var first_frame: Dictionary = frames[0]
+        var first_creatures = first_frame.get("creatures", [])
+        if typeof(first_creatures) == TYPE_ARRAY:
+            var creature_count := mini(
+                first_creatures.size(),
+                preview_offsets.size()
+            )
+            for creature_index in range(creature_count):
+                if creature_index >= creature_ranges.size():
+                    continue
+
+                var first_bodies = first_creatures[creature_index]
+                if typeof(first_bodies) != TYPE_ARRAY:
+                    continue
+
+                var creature_range: Array = creature_ranges[creature_index]
+                if creature_range.size() < 2:
+                    continue
+                var start_index := int(creature_range[0])
+                var end_index := int(creature_range[1])
+                var body_count := mini(
+                    first_bodies.size(),
+                    end_index - start_index
+                )
+                var offset: Vector3 = preview_offsets[creature_index]
+
+                if (
+                    not first_bodies.is_empty()
+                    and creature_index < root_starts.size()
+                ):
+                    var root_body = first_bodies[0]
+                    if (
+                        typeof(root_body) == TYPE_ARRAY
+                        and root_body.size() >= 3
+                    ):
+                        var current_root := Vector3(
+                            float(root_body[0]),
+                            float(root_body[1]),
+                            float(root_body[2])
+                        )
+                        var start_root: Vector3 = root_starts[creature_index]
+                        var dx := current_root.x - start_root.x
+                        var dz := current_root.z - start_root.z
+                        var live_distance := sqrt(dx * dx + dz * dz)
+                        if live_distance > live_best_distance:
+                            live_best_distance = live_distance
+                            live_best_index = creature_index
+
+                for body_index in range(body_count):
+                    var body = first_bodies[body_index]
+                    if typeof(body) != TYPE_ARRAY or body.size() < 7:
+                        continue
+
+                    var instance := start_index + body_index
+                    if instance >= preview_sizes.size():
+                        continue
+                    var size: Vector3 = preview_sizes[instance]
+                    var position := offset + Vector3(
+                        float(body[0]),
+                        float(body[1]),
+                        float(body[2])
+                    )
+                    var rotation := Quaternion(
+                        float(body[3]),
+                        float(body[4]),
+                        float(body[5]),
+                        float(body[6])
+                    ).normalized()
+                    var basis := Basis(rotation).scaled(size)
+                    var buffer_base := instance * 16
+                    preview_buffer[buffer_base + 0] = basis.x.x
+                    preview_buffer[buffer_base + 1] = basis.y.x
+                    preview_buffer[buffer_base + 2] = basis.z.x
+                    preview_buffer[buffer_base + 3] = position.x
+                    preview_buffer[buffer_base + 4] = basis.x.y
+                    preview_buffer[buffer_base + 5] = basis.y.y
+                    preview_buffer[buffer_base + 6] = basis.z.y
+                    preview_buffer[buffer_base + 7] = position.y
+                    preview_buffer[buffer_base + 8] = basis.x.z
+                    preview_buffer[buffer_base + 9] = basis.y.z
+                    preview_buffer[buffer_base + 10] = basis.z.z
+                    preview_buffer[buffer_base + 11] = position.z
+
+    return {
+        "buffer": preview_buffer,
+        "offsets": preview_offsets,
+        "sizes": preview_sizes,
+        "creature_ranges": creature_ranges,
+        "root_starts": root_starts,
+        "instance_count": instance_index,
+        "total_segments": total_segments,
+        "layout_offsets": layout_offsets,
+        "layout_columns": layout_columns,
+        "layout_rows": layout_rows,
+        "layout_spacing": layout_spacing,
+        "first_best_index": live_best_index,
+        "first_best_distance": maxf(0.0, live_best_distance),
+        "prepare_ms": (
+            float(Time.get_ticks_usec() - prepare_started) / 1000.0
+        ),
+    }
+
+
+func _load_population_visual_file_worker(
+    path: String,
+    generation: int,
+    layout_state: Dictionary
+) -> Dictionary:
     if path.is_empty() or not FileAccess.file_exists(path):
         return {"generation": generation, "visual_data": {}}
 
@@ -7272,9 +7672,19 @@ func _load_population_visual_file_worker(path: String, generation: int) -> Dicti
     var parse_started := Time.get_ticks_usec()
     var parsed = JSON.parse_string(raw_text)
     var json_parse_ms := float(Time.get_ticks_usec() - parse_started) / 1000.0
+    var visual_data: Dictionary = (
+        parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+    )
+    var render_state := (
+        _build_population_prefetch_render_state(visual_data, layout_state)
+        if not visual_data.is_empty()
+        else {}
+    )
     return {
         "generation": generation,
-        "visual_data": parsed if typeof(parsed) == TYPE_DICTIONARY else {},
+        "visual_data": visual_data,
+        "render_state": render_state,
+        "render_prepare_ms": float(render_state.get("prepare_ms", 0.0)),
         "file_read_ms": file_read_ms,
         "json_parse_ms": json_parse_ms,
         "file_bytes": file_bytes,
@@ -7305,16 +7715,28 @@ func _start_population_visual_prefetch(event: Dictionary) -> void:
 
     var visual_file := str(event.get("visual_file", ""))
     var generation := int(event.get("generation", 0))
+    var layout_state := {
+        "offsets": _population_layout_offsets.duplicate(true),
+        "columns": _population_layout_columns,
+        "rows": _population_layout_rows,
+        "spacing": _population_layout_spacing,
+        "target_count": int(_population_spin.value),
+    }
     _population_prefetch_thread = Thread.new()
     var start_error := _population_prefetch_thread.start(
-        _load_population_visual_file_worker.bind(visual_file, generation),
+        _load_population_visual_file_worker.bind(
+            visual_file,
+            generation,
+            layout_state
+        ),
         Thread.PRIORITY_LOW
     )
     if start_error != OK:
         _population_prefetch_thread = null
         _population_prefetch_ready = _load_population_visual_file_worker(
             visual_file,
-            generation
+            generation,
+            layout_state
         )
 
 
@@ -7368,6 +7790,18 @@ func _activate_population_visual_prefetch_ready() -> bool:
     var file_bytes := int(
         _population_prefetch_ready.get("file_bytes", 0)
     )
+    var render_state_value = _population_prefetch_ready.get(
+        "render_state",
+        {}
+    )
+    var render_state: Dictionary = (
+        render_state_value
+        if typeof(render_state_value) == TYPE_DICTIONARY
+        else {}
+    )
+    var render_prepare_ms := float(
+        _population_prefetch_ready.get("render_prepare_ms", 0.0)
+    )
     _population_prefetch_ready = {}
     _population_prefetch_event = {}
 
@@ -7381,7 +7815,9 @@ func _activate_population_visual_prefetch_ready() -> bool:
         true,
         file_read_ms,
         json_parse_ms,
-        file_bytes
+        file_bytes,
+        render_state,
+        render_prepare_ms
     )
     return true
 
@@ -7410,7 +7846,9 @@ func _activate_population_visual_data(
     prefetched: bool,
     file_read_ms: float,
     json_parse_ms: float,
-    file_bytes: int
+    file_bytes: int,
+    prebuilt_render_state: Dictionary,
+    render_prepare_ms: float
 ) -> void:
     var handler_started := Time.get_ticks_usec()
     var visual_genomes = visual_data.get("genomes", [])
@@ -7423,12 +7861,30 @@ func _activate_population_visual_data(
     _build_world_from_geometry(event.get("world_geometry", []))
     var world_build_ms := float(Time.get_ticks_usec() - world_started) / 1000.0
 
-    _show_population_preview(visual_genomes, -1)
+    var used_prebuilt_render := false
+    if prefetched and not prebuilt_render_state.is_empty():
+        used_prebuilt_render = _show_prebuilt_population_preview(
+            prebuilt_render_state
+        )
+    if not used_prebuilt_render:
+        _show_population_preview(visual_genomes, -1)
 
     var visual_setup_started := Time.get_ticks_usec()
-    _capture_population_visual_root_starts(visual_genomes)
-    _population_best_index = -1
-    _population_best_distance = 0.0
+    if used_prebuilt_render:
+        _population_visual_root_starts = (
+            prebuilt_render_state.get("root_starts", []).duplicate(true)
+        )
+        _population_best_index = int(
+            prebuilt_render_state.get("first_best_index", -1)
+        )
+        _population_best_distance = float(
+            prebuilt_render_state.get("first_best_distance", 0.0)
+        )
+    else:
+        _capture_population_visual_root_starts(visual_genomes)
+        _population_best_index = -1
+        _population_best_distance = 0.0
+
     _ensure_population_best_marker()
     _population_visual_frames = visual_frames
     _population_visual_clock = 0.0
@@ -7442,11 +7898,24 @@ func _activate_population_visual_data(
     _population_visual_frame_index = 0
     _population_visual_active = not _population_visual_frames.is_empty()
     if _population_visual_active:
-        _apply_population_visual_frame_pair(
-            _population_visual_frames[0],
-            _population_visual_frames[0],
-            0.0
-        )
+        if used_prebuilt_render:
+            var first_value = _population_visual_frames[0]
+            if typeof(first_value) == TYPE_DICTIONARY:
+                var first: Dictionary = first_value
+                var first_creatures = first.get("creatures", [])
+                if typeof(first_creatures) == TYPE_ARRAY:
+                    _update_population_best_marker_text()
+                    _update_population_best_marker(
+                        first_creatures,
+                        first_creatures,
+                        0.0
+                    )
+        else:
+            _apply_population_visual_frame_pair(
+                _population_visual_frames[0],
+                _population_visual_frames[0],
+                0.0
+            )
     var visual_setup_ms := (
         float(Time.get_ticks_usec() - visual_setup_started) / 1000.0
     )
@@ -7474,7 +7943,10 @@ func _activate_population_visual_data(
         backend_profile.get("visual_prepare_total_ms", 0.0)
     )
     var background_prepare_ms := (
-        backend_visual_total_ms + file_read_ms + json_parse_ms
+        backend_visual_total_ms
+        + file_read_ms
+        + json_parse_ms
+        + render_prepare_ms
     )
     _handoff_profile_pending_record = {
         "type": "generation",
@@ -7534,6 +8006,8 @@ func _activate_population_visual_data(
         ),
         "godot_file_read_ms": file_read_ms,
         "godot_json_parse_ms": json_parse_ms,
+        "godot_prefetch_render_prepare_ms": render_prepare_ms,
+        "godot_prebuilt_preview": used_prebuilt_render,
         "godot_world_build_ms": world_build_ms,
         "godot_preview_clear_ms": float(
             preview_profile.get("clear_ms", 0.0)
