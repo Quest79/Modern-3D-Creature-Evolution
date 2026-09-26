@@ -1814,14 +1814,12 @@ fn write_population_visualization(
             &settings.fitness,
             accelerator,
             sample_hz,
-        ) {
-            if let Some(trajectory) = batch.trajectory
-                && trajectory.frame_count == frame_count
-                && trajectory.part_count == body_count
-            {
-                cuda_trajectory = Some(trajectory);
-                replay_source = "cuda_capture";
-            }
+        ) && let Some(trajectory) = batch.trajectory
+            && trajectory.frame_count == frame_count
+            && trajectory.part_count == body_count
+        {
+            cuda_trajectory = Some(trajectory);
+            replay_source = "cuda_capture";
         }
     }
 
@@ -1940,7 +1938,7 @@ fn write_population_visualization(
                                     + body_index)
                                     * 7;
                                 [
-                                    trajectory.transforms[base + 0],
+                                    trajectory.transforms[base],
                                     trajectory.transforms[base + 1],
                                     trajectory.transforms[base + 2],
                                     trajectory.transforms[base + 3],
