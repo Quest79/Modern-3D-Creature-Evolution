@@ -170,6 +170,10 @@ var _population_visual_clock := 0.0
 var _population_visual_duration := 0.0
 var _population_visual_generation := 0
 var _population_visual_frame_index := 0
+var _population_prefetch_thread: Thread
+var _population_prefetch_event: Dictionary = {}
+var _population_prefetch_ready: Dictionary = {}
+var _pending_evolution_complete_event: Dictionary = {}
 var _handoff_profile_records: Array[Dictionary] = []
 var _handoff_profile_pending_record: Dictionary = {}
 var _handoff_profile_last_file_read_ms := 0.0
@@ -349,6 +353,7 @@ func _process(delta: float) -> void:
 
     _update_camera_movement(delta)
     _update_camera_zoom(delta)
+    _poll_population_visual_prefetch()
     _update_population_visual(delta)
 
     _performance_update_accumulator += delta
@@ -468,6 +473,7 @@ func _process(delta: float) -> void:
 func _exit_tree() -> void:
     _set_mouse_look(false)
     _stop_current_job()
+    _reset_population_visual_prefetch()
     if _udp != null:
         _udp.close()
 
@@ -629,10 +635,13 @@ func _handoff_profile_finish() -> void:
         "handoff_total_ms",
         "visual_replay_ms",
         "visual_serialize_write_flush_ms",
+        "background_prepare_ms",
         "godot_file_read_ms",
         "godot_json_parse_ms",
         "godot_preview_total_ms",
+        "godot_multimesh_alloc_ms",
         "godot_multimesh_fill_ms",
+        "godot_visual_setup_ms",
         "godot_handler_total_ms",
         "frame_spike_ms",
     ]
@@ -4236,6 +4245,8 @@ func _start_evolution_run(continue_current: bool) -> void:
         return
 
     _handoff_profile_reset()
+    _reset_population_visual_prefetch()
+    _pending_evolution_complete_event = {}
     _reset_population_layout()
     _probe_mesh.visible = false
     _progress_bar.value = 0
@@ -4356,6 +4367,8 @@ func _on_resume_evolution_pressed() -> void:
         _set_status("Elite kept must be smaller than population.")
         return
 
+    _reset_population_visual_prefetch()
+    _pending_evolution_complete_event = {}
     _reset_population_layout()
     _probe_mesh.visible = false
     _progress_bar.value = 0
@@ -6116,6 +6129,8 @@ func _can_start_action(action_name: String) -> bool:
     _dead_process_since_ms = -1
     _job_started_ms = -1
     _job_received_event = false
+    _reset_population_visual_prefetch()
+    _pending_evolution_complete_event = {}
     _reset_replay()
     _finish_job_controls()
     return true
@@ -6341,151 +6356,22 @@ func _handle_event(event: Dictionary) -> void:
             _finish_job_controls()
 
         "population_visual_ready":
-            var handler_started := Time.get_ticks_usec()
             var visual_file := str(event.get("visual_file", ""))
             var visual_data := _load_population_visual_file(visual_file)
             if visual_data.is_empty():
                 _set_status("Slow visual mode could not load the population trajectory.")
                 return
-
-            var visual_genomes = visual_data.get("genomes", [])
-            var visual_frames = visual_data.get("frames", [])
-            if typeof(visual_genomes) != TYPE_ARRAY or typeof(visual_frames) != TYPE_ARRAY:
-                _set_status("Slow visual mode received an invalid trajectory.")
-                return
-
-            var world_started := Time.get_ticks_usec()
-            _build_world_from_geometry(event.get("world_geometry", []))
-            var world_build_ms := (
-                float(Time.get_ticks_usec() - world_started) / 1000.0
+            _activate_population_visual_data(
+                event,
+                visual_data,
+                false,
+                _handoff_profile_last_file_read_ms,
+                _handoff_profile_last_json_parse_ms,
+                _handoff_profile_last_file_bytes
             )
 
-            _show_population_preview(visual_genomes, -1)
-
-            var visual_setup_started := Time.get_ticks_usec()
-            _capture_population_visual_root_starts(visual_genomes)
-            _population_best_index = -1
-            _population_best_distance = 0.0
-            _ensure_population_best_marker()
-            _population_visual_frames = visual_frames
-            _population_visual_clock = 0.0
-            _population_visual_duration = float(
-                visual_data.get(
-                    "duration_seconds",
-                    event.get("duration_seconds", _seconds_spin.value)
-                )
-            )
-            _population_visual_generation = int(event.get("generation", 0))
-            _population_visual_frame_index = 0
-            _population_visual_active = not _population_visual_frames.is_empty()
-            if _population_visual_active:
-                _apply_population_visual_frame_pair(
-                    _population_visual_frames[0],
-                    _population_visual_frames[0],
-                    0.0
-                )
-            var visual_setup_ms := (
-                float(Time.get_ticks_usec() - visual_setup_started) / 1000.0
-            )
-
-            _set_status(
-                "Slow visual • Generation %d / %d • %s creatures • %.1f s real-time test"
-                % [
-                    _population_visual_generation,
-                    int(event.get("generations", 0)),
-                    str(event.get("population", 0)),
-                    _population_visual_duration,
-                ]
-            )
-
-            var handler_total_ms := (
-                float(Time.get_ticks_usec() - handler_started) / 1000.0
-            )
-            var backend_profile_value = event.get("handoff_profile", {})
-            var backend_profile: Dictionary = {}
-            if typeof(backend_profile_value) == TYPE_DICTIONARY:
-                backend_profile = backend_profile_value
-
-            var preview_profile := _handoff_profile_last_preview_timing
-            var backend_visual_total_ms := float(
-                backend_profile.get("visual_prepare_total_ms", 0.0)
-            )
-            _handoff_profile_pending_record = {
-                "type": "generation",
-                "generation": _population_visual_generation,
-                "population": int(event.get("population", 0)),
-                "segments": int(preview_profile.get("segments", event.get("bodies", 0))),
-                "frames": int(event.get("frames", 0)),
-                "sample_hz": float(event.get("sample_hz", 0.0)),
-                "duration_seconds": _population_visual_duration,
-                "generation_wall_ms": float(
-                    backend_profile.get("generation_wall_ms", 0.0)
-                ),
-                "evaluation_ms": float(
-                    backend_profile.get("evaluation_ms", 0.0)
-                ),
-                "cuda_eval_wall_ms": float(
-                    backend_profile.get("cuda_eval_wall_ms", 0.0)
-                ),
-                "cuda_kernel_ms": float(
-                    backend_profile.get("cuda_kernel_ms", 0.0)
-                ),
-                "cuda_host_packing_ms": float(
-                    backend_profile.get("cuda_host_packing_ms", 0.0)
-                ),
-                "cuda_h_to_d_ms": float(
-                    backend_profile.get("cuda_h_to_d_ms", 0.0)
-                ),
-                "cuda_d_to_h_ms": float(
-                    backend_profile.get("cuda_d_to_h_ms", 0.0)
-                ),
-                "cuda_result_decode_ms": float(
-                    backend_profile.get("cuda_result_decode_ms", 0.0)
-                ),
-                "visual_replay_ms": float(
-                    backend_profile.get("visual_replay_ms", 0.0)
-                ),
-                "visual_file_open_ms": float(
-                    backend_profile.get("visual_file_open_ms", 0.0)
-                ),
-                "visual_serialize_write_flush_ms": float(
-                    backend_profile.get(
-                        "visual_serialize_write_flush_ms",
-                        0.0
-                    )
-                ),
-                "visual_prepare_total_ms": backend_visual_total_ms,
-                "visual_file_bytes": int(
-                    backend_profile.get(
-                        "visual_file_bytes",
-                        _handoff_profile_last_file_bytes
-                    )
-                ),
-                "godot_file_read_ms": _handoff_profile_last_file_read_ms,
-                "godot_json_parse_ms": _handoff_profile_last_json_parse_ms,
-                "godot_world_build_ms": world_build_ms,
-                "godot_preview_clear_ms": float(
-                    preview_profile.get("clear_ms", 0.0)
-                ),
-                "godot_segment_scan_ms": float(
-                    preview_profile.get("segment_scan_ms", 0.0)
-                ),
-                "godot_layout_ms": float(
-                    preview_profile.get("layout_ms", 0.0)
-                ),
-                "godot_multimesh_alloc_ms": float(
-                    preview_profile.get("multimesh_alloc_ms", 0.0)
-                ),
-                "godot_multimesh_fill_ms": float(
-                    preview_profile.get("multimesh_fill_ms", 0.0)
-                ),
-                "godot_preview_total_ms": float(
-                    preview_profile.get("total_ms", 0.0)
-                ),
-                "godot_visual_setup_ms": visual_setup_ms,
-                "godot_handler_total_ms": handler_total_ms,
-                "handoff_total_ms": backend_visual_total_ms + handler_total_ms,
-            }
+        "population_visual_prefetch_ready":
+            _start_population_visual_prefetch(event)
 
         "evolution_started":
             _build_world_from_geometry(event.get("world_geometry", []))
@@ -6577,6 +6463,20 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "evolution_complete":
+            if (
+                _slow_visual_mode
+                and (
+                    _population_visual_active
+                    or not _population_prefetch_ready.is_empty()
+                    or (
+                        _population_prefetch_thread != null
+                        and _population_prefetch_thread.is_started()
+                    )
+                )
+            ):
+                _pending_evolution_complete_event = event.duplicate(true)
+                return
+
             _handoff_profile_finish()
             _reset_population_visual()
             _clear_population_preview()
@@ -7336,6 +7236,311 @@ func _load_population_visual_file(path: String) -> Dictionary:
     return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
+func _load_population_visual_file_worker(path: String, generation: int) -> Dictionary:
+    if path.is_empty() or not FileAccess.file_exists(path):
+        return {"generation": generation, "visual_data": {}}
+
+    var file := FileAccess.open(path, FileAccess.READ)
+    if file == null:
+        return {"generation": generation, "visual_data": {}}
+
+    var file_bytes := file.get_length()
+    var read_started := Time.get_ticks_usec()
+    var raw_text := file.get_as_text()
+    file.close()
+    var file_read_ms := float(Time.get_ticks_usec() - read_started) / 1000.0
+
+    var parse_started := Time.get_ticks_usec()
+    var parsed = JSON.parse_string(raw_text)
+    var json_parse_ms := float(Time.get_ticks_usec() - parse_started) / 1000.0
+    return {
+        "generation": generation,
+        "visual_data": parsed if typeof(parsed) == TYPE_DICTIONARY else {},
+        "file_read_ms": file_read_ms,
+        "json_parse_ms": json_parse_ms,
+        "file_bytes": file_bytes,
+    }
+
+
+func _reset_population_visual_prefetch() -> void:
+    if (
+        _population_prefetch_thread != null
+        and _population_prefetch_thread.is_started()
+    ):
+        _population_prefetch_thread.wait_to_finish()
+    _population_prefetch_thread = null
+    _population_prefetch_event = {}
+    _population_prefetch_ready = {}
+
+
+func _start_population_visual_prefetch(event: Dictionary) -> void:
+    if (
+        _population_prefetch_thread != null
+        and _population_prefetch_thread.is_started()
+    ):
+        _population_prefetch_thread.wait_to_finish()
+        _population_prefetch_thread = null
+
+    _population_prefetch_event = event.duplicate(true)
+    _population_prefetch_ready = {}
+
+    var visual_file := str(event.get("visual_file", ""))
+    var generation := int(event.get("generation", 0))
+    _population_prefetch_thread = Thread.new()
+    var start_error := _population_prefetch_thread.start(
+        _load_population_visual_file_worker.bind(visual_file, generation),
+        Thread.PRIORITY_LOW
+    )
+    if start_error != OK:
+        _population_prefetch_thread = null
+        _population_prefetch_ready = _load_population_visual_file_worker(
+            visual_file,
+            generation
+        )
+
+
+func _poll_population_visual_prefetch() -> void:
+    if (
+        _population_prefetch_thread != null
+        and _population_prefetch_thread.is_started()
+        and not _population_prefetch_thread.is_alive()
+    ):
+        var result = _population_prefetch_thread.wait_to_finish()
+        _population_prefetch_thread = null
+        if typeof(result) == TYPE_DICTIONARY:
+            _population_prefetch_ready = result
+
+    if (
+        not _population_visual_active
+        and not _population_prefetch_ready.is_empty()
+    ):
+        _activate_population_visual_prefetch_ready()
+    elif (
+        not _population_visual_active
+        and _population_prefetch_thread == null
+    ):
+        _finish_deferred_evolution_if_ready()
+
+
+func _activate_population_visual_prefetch_ready() -> bool:
+    if _population_prefetch_ready.is_empty():
+        return false
+
+    var generation := int(_population_prefetch_ready.get("generation", -1))
+    if generation != int(_population_prefetch_event.get("generation", -2)):
+        _population_prefetch_ready = {}
+        _population_prefetch_event = {}
+        return false
+
+    var visual_data_value = _population_prefetch_ready.get("visual_data", {})
+    if typeof(visual_data_value) != TYPE_DICTIONARY:
+        _population_prefetch_ready = {}
+        _population_prefetch_event = {}
+        return false
+
+    var visual_data: Dictionary = visual_data_value
+    var event := _population_prefetch_event.duplicate(true)
+    var file_read_ms := float(
+        _population_prefetch_ready.get("file_read_ms", 0.0)
+    )
+    var json_parse_ms := float(
+        _population_prefetch_ready.get("json_parse_ms", 0.0)
+    )
+    var file_bytes := int(
+        _population_prefetch_ready.get("file_bytes", 0)
+    )
+    _population_prefetch_ready = {}
+    _population_prefetch_event = {}
+
+    if visual_data.is_empty():
+        _set_status("Slow visual mode could not preload the next population trajectory.")
+        return false
+
+    _activate_population_visual_data(
+        event,
+        visual_data,
+        true,
+        file_read_ms,
+        json_parse_ms,
+        file_bytes
+    )
+    return true
+
+
+func _finish_deferred_evolution_if_ready() -> void:
+    if _pending_evolution_complete_event.is_empty():
+        return
+    if _population_visual_active:
+        return
+    if not _population_prefetch_ready.is_empty():
+        return
+    if (
+        _population_prefetch_thread != null
+        and _population_prefetch_thread.is_started()
+    ):
+        return
+
+    var completion := _pending_evolution_complete_event.duplicate(true)
+    _pending_evolution_complete_event = {}
+    call_deferred("_handle_event", completion)
+
+
+func _activate_population_visual_data(
+    event: Dictionary,
+    visual_data: Dictionary,
+    prefetched: bool,
+    file_read_ms: float,
+    json_parse_ms: float,
+    file_bytes: int
+) -> void:
+    var handler_started := Time.get_ticks_usec()
+    var visual_genomes = visual_data.get("genomes", [])
+    var visual_frames = visual_data.get("frames", [])
+    if typeof(visual_genomes) != TYPE_ARRAY or typeof(visual_frames) != TYPE_ARRAY:
+        _set_status("Slow visual mode received an invalid trajectory.")
+        return
+
+    var world_started := Time.get_ticks_usec()
+    _build_world_from_geometry(event.get("world_geometry", []))
+    var world_build_ms := float(Time.get_ticks_usec() - world_started) / 1000.0
+
+    _show_population_preview(visual_genomes, -1)
+
+    var visual_setup_started := Time.get_ticks_usec()
+    _capture_population_visual_root_starts(visual_genomes)
+    _population_best_index = -1
+    _population_best_distance = 0.0
+    _ensure_population_best_marker()
+    _population_visual_frames = visual_frames
+    _population_visual_clock = 0.0
+    _population_visual_duration = float(
+        visual_data.get(
+            "duration_seconds",
+            event.get("duration_seconds", _seconds_spin.value)
+        )
+    )
+    _population_visual_generation = int(event.get("generation", 0))
+    _population_visual_frame_index = 0
+    _population_visual_active = not _population_visual_frames.is_empty()
+    if _population_visual_active:
+        _apply_population_visual_frame_pair(
+            _population_visual_frames[0],
+            _population_visual_frames[0],
+            0.0
+        )
+    var visual_setup_ms := (
+        float(Time.get_ticks_usec() - visual_setup_started) / 1000.0
+    )
+
+    _set_status(
+        "Slow visual • Generation %d / %d • %s creatures • %.1f s real-time test"
+        % [
+            _population_visual_generation,
+            int(event.get("generations", 0)),
+            str(event.get("population", 0)),
+            _population_visual_duration,
+        ]
+    )
+
+    var handler_total_ms := (
+        float(Time.get_ticks_usec() - handler_started) / 1000.0
+    )
+    var backend_profile_value = event.get("handoff_profile", {})
+    var backend_profile: Dictionary = {}
+    if typeof(backend_profile_value) == TYPE_DICTIONARY:
+        backend_profile = backend_profile_value
+
+    var preview_profile := _handoff_profile_last_preview_timing
+    var backend_visual_total_ms := float(
+        backend_profile.get("visual_prepare_total_ms", 0.0)
+    )
+    var background_prepare_ms := (
+        backend_visual_total_ms + file_read_ms + json_parse_ms
+    )
+    _handoff_profile_pending_record = {
+        "type": "generation",
+        "generation": _population_visual_generation,
+        "prefetched": prefetched,
+        "population": int(event.get("population", 0)),
+        "segments": int(preview_profile.get("segments", event.get("bodies", 0))),
+        "frames": int(event.get("frames", 0)),
+        "sample_hz": float(event.get("sample_hz", 0.0)),
+        "duration_seconds": _population_visual_duration,
+        "generation_wall_ms": float(
+            backend_profile.get("generation_wall_ms", 0.0)
+        ),
+        "evaluation_ms": float(
+            backend_profile.get("evaluation_ms", 0.0)
+        ),
+        "cuda_eval_wall_ms": float(
+            backend_profile.get("cuda_eval_wall_ms", 0.0)
+        ),
+        "cuda_kernel_ms": float(
+            backend_profile.get("cuda_kernel_ms", 0.0)
+        ),
+        "cuda_host_packing_ms": float(
+            backend_profile.get("cuda_host_packing_ms", 0.0)
+        ),
+        "cuda_h_to_d_ms": float(
+            backend_profile.get("cuda_h_to_d_ms", 0.0)
+        ),
+        "cuda_d_to_h_ms": float(
+            backend_profile.get("cuda_d_to_h_ms", 0.0)
+        ),
+        "cuda_result_decode_ms": float(
+            backend_profile.get("cuda_result_decode_ms", 0.0)
+        ),
+        "visual_replay_ms": float(
+            backend_profile.get("visual_replay_ms", 0.0)
+        ),
+        "visual_replay_workers": int(
+            backend_profile.get("visual_replay_workers", 0)
+        ),
+        "visual_file_open_ms": float(
+            backend_profile.get("visual_file_open_ms", 0.0)
+        ),
+        "visual_serialize_write_flush_ms": float(
+            backend_profile.get(
+                "visual_serialize_write_flush_ms",
+                0.0
+            )
+        ),
+        "visual_prepare_total_ms": backend_visual_total_ms,
+        "background_prepare_ms": background_prepare_ms,
+        "visual_file_bytes": int(
+            backend_profile.get("visual_file_bytes", file_bytes)
+        ),
+        "godot_file_read_ms": file_read_ms,
+        "godot_json_parse_ms": json_parse_ms,
+        "godot_world_build_ms": world_build_ms,
+        "godot_preview_clear_ms": float(
+            preview_profile.get("clear_ms", 0.0)
+        ),
+        "godot_segment_scan_ms": float(
+            preview_profile.get("segment_scan_ms", 0.0)
+        ),
+        "godot_layout_ms": float(
+            preview_profile.get("layout_ms", 0.0)
+        ),
+        "godot_multimesh_alloc_ms": float(
+            preview_profile.get("multimesh_alloc_ms", 0.0)
+        ),
+        "godot_multimesh_fill_ms": float(
+            preview_profile.get("multimesh_fill_ms", 0.0)
+        ),
+        "godot_preview_total_ms": float(
+            preview_profile.get("total_ms", 0.0)
+        ),
+        "godot_visual_setup_ms": visual_setup_ms,
+        "godot_handler_total_ms": handler_total_ms,
+        "handoff_total_ms": (
+            handler_total_ms
+            if prefetched
+            else backend_visual_total_ms + handler_total_ms
+        ),
+    }
+
+
 func _capture_population_visual_root_starts(genomes: Array) -> void:
     _population_visual_root_starts.clear()
     for genome_value in genomes:
@@ -7358,6 +7563,8 @@ func _capture_population_visual_root_starts(genomes: Array) -> void:
 
 
 func _reset_population_visual() -> void:
+    _reset_population_visual_prefetch()
+    _pending_evolution_complete_event = {}
     _population_visual_frames.clear()
     _population_visual_root_starts.clear()
     _population_visual_active = false
@@ -7418,6 +7625,9 @@ func _update_population_visual(delta: float) -> void:
 
     if _population_visual_clock >= _population_visual_duration:
         _population_visual_active = false
+        if _activate_population_visual_prefetch_ready():
+            return
+        _finish_deferred_evolution_if_ready()
 
 
 func _apply_population_visual_frame_pair(

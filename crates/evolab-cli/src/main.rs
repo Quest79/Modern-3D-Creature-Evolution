@@ -1450,18 +1450,73 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     }
 
     let started = Instant::now();
+    let mut slow_visual_release_at: Option<Instant> = None;
+    let mut pending_generation_complete: Option<Value> = None;
     let result = evolve_population_checkpointed(
         &ancestor,
         &config,
         resume_checkpoint.as_ref(),
         request.checkpoint_output.is_some(),
         |summary, visual_population| {
+            let generation_complete_event = json!({
+                "protocol_version": 1,
+                "kind": "generation_complete",
+                "generation": summary.generation,
+                "generations": config.generations,
+                "fraction": summary.generation as f64 / config.generations as f64,
+                "best_fitness": summary.best_fitness,
+                "average_fitness": summary.average_fitness,
+                "median_fitness": summary.median_fitness,
+                "worst_fitness": summary.worst_fitness,
+                "best_distance": summary.best_distance,
+                "best_metrics": summary.best_metrics,
+                "best_segments": summary.best_segments,
+                "best_joints": summary.best_joints,
+                "best_brain_nodes": summary.best_brain_nodes,
+                "best_brain_sensor_nodes": summary.best_brain_sensor_nodes,
+                "best_brain_unique_sensors": summary.best_brain_unique_sensors,
+                "best_brain_outputs": summary.best_brain_outputs,
+                "champion_id": summary.champion_id,
+                "champion_parent_ids": summary.champion_parent_ids,
+                "champion_species_id": summary.champion_species_id,
+                "diversity": summary.diversity,
+                "analysis_species_count": summary.species.len(),
+                "pareto_front_size": summary.pareto_front.len(),
+                "map_elites_cells": summary.map_elites.len(),
+                "evaluations_completed": summary.evaluations_completed,
+                "evaluation_pool_size": summary.evaluation_pool_size,
+                "execution": summary.execution,
+                "timing": summary.timing,
+                "population_telemetry": summary.population_telemetry,
+                "offspring": summary.offspring,
+                "effective_population": summary.effective_settings.population_size,
+                "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
+                "effective_mutation_probability": summary.effective_settings.mutation_probability,
+                "effective_structural_mutation_chance":
+                    summary.effective_settings.mutation.structural_mutation_chance,
+                "effective_motor_strength_multiplier":
+                    summary.effective_settings.simulation.motor_strength_multiplier,
+                "effective_duration_seconds":
+                    summary.effective_settings.simulation.duration_seconds,
+                "effective_trials_per_creature":
+                    summary.effective_settings.trials_per_creature,
+                "effective_trial_aggregation":
+                    summary.effective_settings.trial_aggregation,
+                "effective_fitness_weights": summary.effective_settings.fitness.weights,
+                "effective_world": summary.effective_settings.simulation.world,
+                "active_timeline_events": summary.active_timeline_events,
+                "triggered_timeline_events": summary.triggered_timeline_events,
+                // Champion state remains in RAM during evolution.
+                // The final champion is persisted once after the timed run.
+            });
+
             if request.slow_visual {
-                let visual_path = request
+                let visual_base_path = request
                     .visual_output
                     .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
+                let visual_path = population_visual_slot_path(visual_base_path, summary.generation);
                 let visual_profile = write_population_visualization(
-                    visual_path,
+                    &visual_path,
                     summary.generation,
                     visual_population,
                     &summary.effective_settings,
@@ -1471,12 +1526,26 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     .iter()
                     .position(|candidate| candidate.individual_id == summary.champion_id)
                     .unwrap_or(0);
+                let duration = Duration::from_secs_f32(
+                    summary
+                        .effective_settings
+                        .simulation
+                        .duration_seconds
+                        .max(0.0),
+                );
+
                 if let Some(socket) = socket {
+                    let first_visual = slow_visual_release_at.is_none();
                     send_event(
                         socket,
                         &json!({
                             "protocol_version": 1,
-                            "kind": "population_visual_ready",
+                            "kind": if first_visual {
+                                "population_visual_ready"
+                            } else {
+                                "population_visual_prefetch_ready"
+                            },
+                            "prefetched": !first_visual,
                             "generation": summary.generation,
                             "generations": config.generations,
                             "visual_file": visual_path.display().to_string(),
@@ -1499,6 +1568,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                                 "cuda_result_decode_ms":
                                     summary.execution.cuda.result_decode_seconds * 1000.0,
                                 "visual_replay_ms": visual_profile.replay_ms,
+                                "visual_replay_workers": visual_profile.replay_workers,
                                 "visual_file_open_ms": visual_profile.file_open_ms,
                                 "visual_serialize_write_flush_ms":
                                     visual_profile.serialize_write_flush_ms,
@@ -1516,71 +1586,50 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                                 summary.effective_settings.simulation.world.geometry(),
                         }),
                     );
-                }
-                thread::sleep(Duration::from_secs_f32(
-                    summary
-                        .effective_settings
-                        .simulation
-                        .duration_seconds
-                        .max(0.0),
-                ));
-            }
 
-            if let Some(socket) = socket {
-                send_event(
-                    socket,
-                    &json!({
-                        "protocol_version": 1,
-                        "kind": "generation_complete",
-                        "generation": summary.generation,
-                        "generations": config.generations,
-                        "fraction": summary.generation as f64 / config.generations as f64,
-                        "best_fitness": summary.best_fitness,
-                        "average_fitness": summary.average_fitness,
-                        "median_fitness": summary.median_fitness,
-                        "worst_fitness": summary.worst_fitness,
-                        "best_distance": summary.best_distance,
-                        "best_metrics": summary.best_metrics,
-                        "best_segments": summary.best_segments,
-                        "best_joints": summary.best_joints,
-                        "best_brain_nodes": summary.best_brain_nodes,
-                        "best_brain_sensor_nodes": summary.best_brain_sensor_nodes,
-                        "best_brain_unique_sensors": summary.best_brain_unique_sensors,
-                        "best_brain_outputs": summary.best_brain_outputs,
-                        "champion_id": summary.champion_id,
-                        "champion_parent_ids": summary.champion_parent_ids,
-                        "champion_species_id": summary.champion_species_id,
-                        "diversity": summary.diversity,
-                        "analysis_species_count": summary.species.len(),
-                        "pareto_front_size": summary.pareto_front.len(),
-                        "map_elites_cells": summary.map_elites.len(),
-                        "evaluations_completed": summary.evaluations_completed,
-                        "evaluation_pool_size": summary.evaluation_pool_size,
-                        "execution": summary.execution,
-                        "timing": summary.timing,
-                        "population_telemetry": summary.population_telemetry,
-                        "offspring": summary.offspring,
-                        "effective_population": summary.effective_settings.population_size,
-                        "effective_mutations_per_child": summary.effective_settings.mutations_per_child,
-                        "effective_mutation_probability": summary.effective_settings.mutation_probability,
-                        "effective_structural_mutation_chance":
-                            summary.effective_settings.mutation.structural_mutation_chance,
-                        "effective_motor_strength_multiplier":
-                            summary.effective_settings.simulation.motor_strength_multiplier,
-                        "effective_duration_seconds":
-                            summary.effective_settings.simulation.duration_seconds,
-                        "effective_trials_per_creature":
-                            summary.effective_settings.trials_per_creature,
-                        "effective_trial_aggregation":
-                            summary.effective_settings.trial_aggregation,
-                        "effective_fitness_weights": summary.effective_settings.fitness.weights,
-                        "effective_world": summary.effective_settings.simulation.world,
-                        "active_timeline_events": summary.active_timeline_events,
-                        "triggered_timeline_events": summary.triggered_timeline_events,
-                        // Champion state remains in RAM during evolution.
-                        // The final champion is persisted once after the timed run.
-                    }),
-                );
+                    if first_visual {
+                        slow_visual_release_at = Some(Instant::now() + duration);
+                    } else {
+                        if let Some(release_at) = slow_visual_release_at {
+                            let now = Instant::now();
+                            if release_at > now {
+                                thread::sleep(release_at - now);
+                            }
+                        }
+                        if let Some(previous_event) = pending_generation_complete.take() {
+                            send_event(socket, &previous_event);
+                        }
+                        slow_visual_release_at = Some(Instant::now() + duration);
+                    }
+
+                    pending_generation_complete = Some(generation_complete_event);
+
+                    if summary.generation >= config.generations {
+                        if let Some(release_at) = slow_visual_release_at {
+                            let now = Instant::now();
+                            if release_at > now {
+                                thread::sleep(release_at - now);
+                            }
+                        }
+                        if let Some(final_event) = pending_generation_complete.take() {
+                            send_event(socket, &final_event);
+                        }
+                    }
+                } else {
+                    thread::sleep(duration);
+                    println!(
+                        "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  segments {}  brain {}",
+                        summary.generation,
+                        config.generations,
+                        summary.best_fitness,
+                        summary.average_fitness,
+                        summary.best_distance,
+                        summary.best_segments,
+                        summary.best_brain_nodes
+                    );
+                }
+            } else if let Some(socket) = socket {
+                send_event(socket, &generation_complete_event);
             } else {
                 println!(
                     "generation {:>4}/{:<4}  best {:>8.4}  avg {:>8.4}  distance {:>8.4} m  segments {}  brain {}",
@@ -1688,10 +1737,32 @@ struct PopulationVisualWriteProfile {
     body_count: usize,
     frozen_creatures: usize,
     replay_ms: f64,
+    replay_workers: usize,
     file_open_ms: f64,
     serialize_write_flush_ms: f64,
     total_ms: f64,
     file_bytes: u64,
+}
+
+fn population_visual_slot_path(base: &Path, generation: usize) -> PathBuf {
+    let slot = generation % 2;
+    let stem = base
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("population_visual");
+    let extension = base
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
+    base.with_file_name(format!("{stem}.slot{slot}.{extension}"))
+}
+
+fn visual_replay_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .saturating_sub(4)
+        .clamp(1, 8)
 }
 
 fn write_population_visualization(
@@ -1711,23 +1782,30 @@ fn write_population_visualization(
     let profile_started = Instant::now();
     let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
 
+    let replay_workers = visual_replay_worker_count();
+    let replay_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(replay_workers)
+        .build()
+        .map_err(|err| format!("failed to create visual replay worker pool: {err}"))?;
     let replay_started = Instant::now();
-    let trajectories = population
-        .par_iter()
-        .map(|creature| {
-            let mut frames = Vec::new();
-            let result = CreatureSimulator.run_streaming(
-                &settings.simulation,
-                &creature.genome,
-                sample_every_steps,
-                &mut |snapshot| {
-                    frames.push(snapshot.clone());
-                    Ok(())
-                },
-            );
-            (frames, result.is_err())
-        })
-        .collect::<Vec<_>>();
+    let trajectories = replay_pool.install(|| {
+        population
+            .par_iter()
+            .map(|creature| {
+                let mut frames = Vec::new();
+                let result = CreatureSimulator.run_streaming(
+                    &settings.simulation,
+                    &creature.genome,
+                    sample_every_steps,
+                    &mut |snapshot| {
+                        frames.push(snapshot.clone());
+                        Ok(())
+                    },
+                );
+                (frames, result.is_err())
+            })
+            .collect::<Vec<_>>()
+    });
     let replay_ms = replay_started.elapsed().as_secs_f64() * 1000.0;
 
     let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
@@ -1849,6 +1927,7 @@ fn write_population_visualization(
         body_count,
         frozen_creatures,
         replay_ms,
+        replay_workers,
         file_open_ms,
         serialize_write_flush_ms,
         total_ms,
