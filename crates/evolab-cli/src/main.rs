@@ -16,7 +16,7 @@ use evolab_core::{
     GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
     ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
-    mutate_genome, random_creature, run_cuda_probe_batch,
+    mutate_genome, random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -1520,6 +1520,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     summary.generation,
                     visual_population,
                     &summary.effective_settings,
+                    &config.accelerator,
+                    summary.execution.actual_mode == AcceleratorMode::Cuda,
                     request.visual_sample_hz,
                 )?;
                 let generation_best_index = visual_population
@@ -1569,6 +1571,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                                     summary.execution.cuda.result_decode_seconds * 1000.0,
                                 "visual_replay_ms": visual_profile.replay_ms,
                                 "visual_replay_workers": visual_profile.replay_workers,
+                                "visual_replay_source": visual_profile.replay_source,
                                 "visual_file_open_ms": visual_profile.file_open_ms,
                                 "visual_serialize_write_flush_ms":
                                     visual_profile.serialize_write_flush_ms,
@@ -1738,6 +1741,7 @@ struct PopulationVisualWriteProfile {
     frozen_creatures: usize,
     replay_ms: f64,
     replay_workers: usize,
+    replay_source: &'static str,
     file_open_ms: f64,
     serialize_write_flush_ms: f64,
     total_ms: f64,
@@ -1770,6 +1774,8 @@ fn write_population_visualization(
     generation: usize,
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
+    accelerator: &AcceleratorConfig,
+    use_cuda_capture: bool,
     sample_hz: f32,
 ) -> Result<PopulationVisualWriteProfile, String> {
     if population.is_empty() {
@@ -1782,42 +1788,85 @@ fn write_population_visualization(
     let profile_started = Instant::now();
     let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
 
-    let replay_workers = visual_replay_worker_count();
-    let replay_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(replay_workers)
-        .build()
-        .map_err(|err| format!("failed to create visual replay worker pool: {err}"))?;
-    let replay_started = Instant::now();
-    let trajectories = replay_pool.install(|| {
-        population
-            .par_iter()
-            .map(|creature| {
-                let mut frames = Vec::new();
-                let result = CreatureSimulator.run_streaming(
-                    &settings.simulation,
-                    &creature.genome,
-                    sample_every_steps,
-                    &mut |snapshot| {
-                        frames.push(snapshot.clone());
-                        Ok(())
-                    },
-                );
-                (frames, result.is_err())
-            })
-            .collect::<Vec<_>>()
-    });
-    let replay_ms = replay_started.elapsed().as_secs_f64() * 1000.0;
-
-    let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
     let total_steps = settings.simulation.step_count();
     let frame_count = 1
         + total_steps / sample_every_steps
         + usize::from(!total_steps.is_multiple_of(sample_every_steps));
-
     let body_count = population
         .iter()
         .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
+
+    let replay_started = Instant::now();
+    let mut cuda_trajectory = None;
+    let mut cpu_trajectories = Vec::new();
+    let mut replay_workers = 0usize;
+    let mut replay_source = "cpu";
+
+    if use_cuda_capture {
+        let genomes = population
+            .iter()
+            .map(|creature| creature.genome.clone())
+            .collect::<Vec<_>>();
+        if let Ok(batch) = run_cuda_creature_visual_batch(
+            &genomes,
+            &settings.simulation,
+            &settings.fitness,
+            accelerator,
+            sample_hz,
+        ) {
+            if let Some(trajectory) = batch.trajectory
+                && trajectory.frame_count == frame_count
+                && trajectory.part_count == body_count
+            {
+                cuda_trajectory = Some(trajectory);
+                replay_source = "cuda_capture";
+            }
+        }
+    }
+
+    if cuda_trajectory.is_none() {
+        replay_workers = visual_replay_worker_count();
+        let replay_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(replay_workers)
+            .build()
+            .map_err(|err| format!("failed to create visual replay worker pool: {err}"))?;
+        cpu_trajectories = replay_pool.install(|| {
+            population
+                .par_iter()
+                .map(|creature| {
+                    let mut frames = Vec::new();
+                    let result = CreatureSimulator.run_streaming(
+                        &settings.simulation,
+                        &creature.genome,
+                        sample_every_steps,
+                        &mut |snapshot| {
+                            frames.push(snapshot.clone());
+                            Ok(())
+                        },
+                    );
+                    (frames, result.is_err())
+                })
+                .collect::<Vec<_>>()
+        });
+        if use_cuda_capture {
+            replay_source = "cpu_fallback";
+        }
+    }
+
+    let replay_ms = replay_started.elapsed().as_secs_f64() * 1000.0;
+    let frozen_creatures = if let Some(trajectory) = cuda_trajectory.as_ref() {
+        trajectory
+            .valid_frames
+            .iter()
+            .filter(|valid| **valid as usize < frame_count)
+            .count()
+    } else {
+        cpu_trajectories
+            .iter()
+            .filter(|(_, failed)| *failed)
+            .count()
+    };
 
     let file_open_started = Instant::now();
     let file = fs::File::create(path)
@@ -1863,47 +1912,103 @@ fn write_population_visualization(
         write!(writer, "{{\"t\":{},\"creatures\":", simulated_seconds)
             .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
-        let compact = trajectories
-            .iter()
-            .zip(population.iter())
-            .map(|((trajectory, _failed), creature)| {
-                if trajectory.is_empty() {
-                    return creature
+        let compact = if let Some(trajectory) = cuda_trajectory.as_ref() {
+            let mut part_start = 0usize;
+            population
+                .iter()
+                .enumerate()
+                .map(|(creature_index, creature)| {
+                    let valid_frames = trajectory
+                        .valid_frames
+                        .get(creature_index)
+                        .copied()
+                        .unwrap_or(0) as usize;
+                    let source_frame = if valid_frames == 0 {
+                        None
+                    } else {
+                        Some(frame_index.min(valid_frames - 1))
+                    };
+                    let parts = creature
                         .genome
                         .segments
                         .iter()
-                        .map(|segment| {
-                            [
-                                segment.initial_position[0],
-                                segment.initial_position[1],
-                                segment.initial_position[2],
-                                0.0,
-                                0.0,
-                                0.0,
-                                1.0,
-                            ]
+                        .enumerate()
+                        .map(|(body_index, segment)| {
+                            if let Some(source_frame) = source_frame {
+                                let base = (
+                                    source_frame * trajectory.part_count
+                                        + part_start
+                                        + body_index
+                                ) * 7;
+                                [
+                                    trajectory.transforms[base + 0],
+                                    trajectory.transforms[base + 1],
+                                    trajectory.transforms[base + 2],
+                                    trajectory.transforms[base + 3],
+                                    trajectory.transforms[base + 4],
+                                    trajectory.transforms[base + 5],
+                                    trajectory.transforms[base + 6],
+                                ]
+                            } else {
+                                [
+                                    segment.initial_position[0],
+                                    segment.initial_position[1],
+                                    segment.initial_position[2],
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                ]
+                            }
                         })
                         .collect::<Vec<_>>();
-                }
+                    part_start += creature.genome.segments.len();
+                    parts
+                })
+                .collect::<Vec<_>>()
+        } else {
+            cpu_trajectories
+                .iter()
+                .zip(population.iter())
+                .map(|((trajectory, _failed), creature)| {
+                    if trajectory.is_empty() {
+                        return creature
+                            .genome
+                            .segments
+                            .iter()
+                            .map(|segment| {
+                                [
+                                    segment.initial_position[0],
+                                    segment.initial_position[1],
+                                    segment.initial_position[2],
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                ]
+                            })
+                            .collect::<Vec<_>>();
+                    }
 
-                let source_index = frame_index.min(trajectory.len() - 1);
-                trajectory[source_index]
-                    .bodies
-                    .iter()
-                    .map(|body| {
-                        [
-                            body.position[0],
-                            body.position[1],
-                            body.position[2],
-                            body.rotation_xyzw[0],
-                            body.rotation_xyzw[1],
-                            body.rotation_xyzw[2],
-                            body.rotation_xyzw[3],
-                        ]
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+                    let source_index = frame_index.min(trajectory.len() - 1);
+                    trajectory[source_index]
+                        .bodies
+                        .iter()
+                        .map(|body| {
+                            [
+                                body.position[0],
+                                body.position[1],
+                                body.position[2],
+                                body.rotation_xyzw[0],
+                                body.rotation_xyzw[1],
+                                body.rotation_xyzw[2],
+                                body.rotation_xyzw[3],
+                            ]
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
 
         serde_json::to_writer(&mut writer, &compact)
             .map_err(|err| format!("failed to serialize population visual frame: {err}"))?;
@@ -1928,6 +2033,7 @@ fn write_population_visualization(
         frozen_creatures,
         replay_ms,
         replay_workers,
+        replay_source,
         file_open_ms,
         serialize_write_flush_ms,
         total_ms,
