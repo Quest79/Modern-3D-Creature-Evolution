@@ -1751,6 +1751,7 @@ fn compact_visual_bodies(
 struct VisualCreatureState {
     session: Option<CreatureVisualSession>,
     snapshot: CreatureSnapshot,
+    chunk_frames: Vec<CreatureSnapshot>,
     frozen: bool,
 }
 
@@ -1782,11 +1783,13 @@ fn stream_population_visualization(
             Ok::<VisualCreatureState, String>(VisualCreatureState {
                 session: Some(session),
                 snapshot,
+                chunk_frames: Vec::new(),
                 frozen: false,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    const VISUAL_CHUNK_SAMPLES: usize = 12;
     let mut frame_count = 0usize;
 
     loop {
@@ -1801,50 +1804,80 @@ fn stream_population_visualization(
         }
 
         states.par_iter_mut().for_each(|state| {
-            let Some(session) = state.session.as_mut() else {
-                return;
-            };
-            if session.is_complete() {
-                state.session = None;
-                return;
-            }
+            state.chunk_frames.clear();
 
-            match session.advance_steps(sample_every_steps) {
-                Ok(snapshot) => {
-                    state.snapshot = snapshot;
-                    if session.is_complete() {
-                        state.session = None;
-                    }
-                }
-                Err(_) => {
-                    state.frozen = true;
+            for _ in 0..VISUAL_CHUNK_SAMPLES {
+                let Some(session) = state.session.as_mut() else {
+                    break;
+                };
+                if session.is_complete() {
                     state.session = None;
+                    break;
+                }
+
+                match session.advance_steps(sample_every_steps) {
+                    Ok(snapshot) => {
+                        state.snapshot = snapshot.clone();
+                        state.chunk_frames.push(snapshot);
+                        if session.is_complete() {
+                            state.session = None;
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        state.frozen = true;
+                        state.session = None;
+                        break;
+                    }
                 }
             }
         });
 
-        let simulated_seconds = states
+        let chunk_frame_count = states
             .iter()
-            .map(|state| state.snapshot.simulated_seconds)
-            .fold(0.0_f32, f32::max);
+            .map(|state| state.chunk_frames.len())
+            .max()
+            .unwrap_or(0);
+        if chunk_frame_count == 0 {
+            break;
+        }
 
-        let compact = states
-            .iter()
-            .zip(population.iter())
-            .map(|(state, creature)| compact_visual_bodies(Some(&state.snapshot), creature))
-            .collect::<Vec<_>>();
+        for chunk_frame_index in 0..chunk_frame_count {
+            let simulated_seconds = states
+                .iter()
+                .map(|state| {
+                    state
+                        .chunk_frames
+                        .get(chunk_frame_index)
+                        .unwrap_or(&state.snapshot)
+                        .simulated_seconds
+                })
+                .fold(0.0_f32, f32::max);
 
-        send_population_stream_message(
-            stream,
-            &json!({
-                "protocol_version": 1,
-                "kind": "population_visual_frame",
-                "generation": generation,
-                "t": simulated_seconds,
-                "creatures": compact,
-            }),
-        )?;
-        frame_count += 1;
+            let compact = states
+                .iter()
+                .zip(population.iter())
+                .map(|(state, creature)| {
+                    let snapshot = state
+                        .chunk_frames
+                        .get(chunk_frame_index)
+                        .unwrap_or(&state.snapshot);
+                    compact_visual_bodies(Some(snapshot), creature)
+                })
+                .collect::<Vec<_>>();
+
+            send_population_stream_message(
+                stream,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "population_visual_frame",
+                    "generation": generation,
+                    "t": simulated_seconds,
+                    "creatures": compact,
+                }),
+            )?;
+            frame_count += 1;
+        }
     }
 
     let frozen_creatures = states.iter().filter(|state| state.frozen).count();
