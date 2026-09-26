@@ -1331,6 +1331,95 @@ mod platform {
         })
     }
 
+    pub fn run_visual_batch(
+        genomes: &[CreatureGenome],
+        simulation: &SimulationConfig,
+        accelerator: &AcceleratorConfig,
+        devices: &[CudaDeviceInfo],
+        assignments: &[DeviceWorkAssignment],
+        sample_hz: f32,
+    ) -> Result<CudaCreatureVisualBatchResult, String> {
+        let device_id = assignments
+            .first()
+            .ok_or_else(|| "CUDA visual batch has no device assignment".to_string())?
+            .device_id;
+        let device = devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .ok_or_else(|| format!("CUDA device {device_id} disappeared"))?;
+        let (runtime, _) = get_or_create_runtime(device, accelerator.throughput_mode)?;
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
+        check_cuda(
+            unsafe { (runtime.api.ctx_set_current)(runtime.context) },
+            "cuCtxSetCurrent",
+        )?;
+
+        let fitness = FitnessConfig::default();
+        let result = run_chunk(
+            &mut runtime,
+            genomes,
+            simulation,
+            &fitness,
+            accelerator,
+            Some(sample_hz),
+        )?;
+        let visual = result
+            .visual
+            .ok_or_else(|| "CUDA visual batch did not produce samples".to_string())?;
+        let total_part_slots = visual
+            .part_count
+            .iter()
+            .map(|value| *value as usize)
+            .sum::<usize>();
+
+        let mut frames = Vec::with_capacity(visual.sample_count);
+        for sample_index in 0..visual.sample_count {
+            let completed_steps = if sample_index == 0 {
+                0
+            } else {
+                (sample_index * visual.sample_stride_steps).min(simulation.step_count())
+            };
+            let mut creatures = Vec::with_capacity(genomes.len());
+
+            for world in 0..genomes.len() {
+                let written = visual.samples_written[world].max(1) as usize;
+                let effective_sample = sample_index.min(written - 1);
+                let part_base = visual.part_base[world] as usize;
+                let part_count = visual.part_count[world] as usize;
+                let mut bodies = Vec::with_capacity(part_count);
+
+                for part in 0..part_count {
+                    let slot = part_base + part;
+                    let sample_slot = effective_sample * total_part_slots + slot;
+                    let p3 = sample_slot * 3;
+                    let p4 = sample_slot * 4;
+                    bodies.push([
+                        visual.position[p3],
+                        visual.position[p3 + 1],
+                        visual.position[p3 + 2],
+                        visual.rotation[p4],
+                        visual.rotation[p4 + 1],
+                        visual.rotation[p4 + 2],
+                        visual.rotation[p4 + 3],
+                    ]);
+                }
+                creatures.push(bodies);
+            }
+
+            frames.push(CudaCreatureVisualFrame {
+                simulated_seconds: completed_steps as f32 * simulation.dt,
+                creatures,
+            });
+        }
+
+        Ok(CudaCreatureVisualBatchResult {
+            frames,
+            unstable: visual.unstable,
+        })
+    }
+
     struct DeviceAssignmentResult {
         results: Vec<(usize, FitnessResult)>,
         performance: DevicePerformance,
