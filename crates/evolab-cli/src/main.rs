@@ -1859,7 +1859,7 @@ fn write_population_visualization(
         trajectory
             .valid_frames
             .iter()
-            .filter(|valid| **valid as usize < frame_count)
+            .filter(|valid| (**valid as usize) < frame_count)
             .count()
     } else {
         cpu_trajectories
