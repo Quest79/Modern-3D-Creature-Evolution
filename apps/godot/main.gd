@@ -603,6 +603,8 @@ func _poll_population_stream() -> void:
         _population_stream_text_buffer = ""
         if _population_tcp_server.is_connection_available():
             _population_tcp_peer = _population_tcp_server.take_connection()
+            if _population_tcp_peer != null:
+                _job_received_event = true
 
     if _population_tcp_peer == null:
         return
@@ -610,6 +612,7 @@ func _poll_population_stream() -> void:
     _population_tcp_peer.poll()
     var available := _population_tcp_peer.get_available_bytes()
     if available > 0:
+        _job_received_event = true
         _population_stream_text_buffer += (
             _population_tcp_peer.get_utf8_string(available)
         )
@@ -5742,6 +5745,12 @@ func _benchmark_handle_event(event: Dictionary) -> void:
     _benchmark_log("EVENT %s\n" % JSON.stringify(event))
 
     match kind:
+        "population_preview_started":
+            _set_status(
+                "Generating starting population preview in RAM • %s creatures..."
+                % str(event.get("population", 0))
+            )
+
         "evolution_started":
             _clear_population_preview()
             _build_world_from_geometry(event.get("world_geometry", []))
