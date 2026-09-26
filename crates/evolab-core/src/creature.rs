@@ -935,7 +935,7 @@ pub struct CreatureVisualSession {
     root_body_handle: RigidBodyHandle,
     impulse_joints: ImpulseJointSet,
     motor_handles: Vec<(ImpulseJointHandle, JointGene, f32, f32, f32)>,
-    gravity: Vector<Real>,
+    gravity: Vector,
     integration_parameters: IntegrationParameters,
     physics_pipeline: PhysicsPipeline,
     island_manager: IslandManager,
