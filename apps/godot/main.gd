@@ -163,6 +163,7 @@ var _population_layout_rows := 0
 var _population_layout_spacing := 0.0
 var _population_preview_sizes: Array = []
 var _population_preview_creature_ranges: Array = []
+var _population_preview_buffer := PackedFloat32Array()
 var _population_visual_frames: Array = []
 var _population_visual_root_starts: Array = []
 var _population_visual_active := false
@@ -7130,6 +7131,7 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
     )
 
     var multimesh_fill_started := Time.get_ticks_usec()
+    _population_preview_buffer.resize(total_segments * 16)
     var instance_index := 0
     for index in range(genomes.size()):
         var genome_value = genomes[index]
@@ -7164,23 +7166,39 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
             )
             _population_preview_sizes.append(size)
 
-            multimesh.set_instance_transform(
-                instance_index,
-                Transform3D(Basis().scaled(size), position)
-            )
+            var buffer_base := instance_index * 16
+            _population_preview_buffer[buffer_base + 0] = size.x
+            _population_preview_buffer[buffer_base + 1] = 0.0
+            _population_preview_buffer[buffer_base + 2] = 0.0
+            _population_preview_buffer[buffer_base + 3] = position.x
+            _population_preview_buffer[buffer_base + 4] = 0.0
+            _population_preview_buffer[buffer_base + 5] = size.y
+            _population_preview_buffer[buffer_base + 6] = 0.0
+            _population_preview_buffer[buffer_base + 7] = position.y
+            _population_preview_buffer[buffer_base + 8] = 0.0
+            _population_preview_buffer[buffer_base + 9] = 0.0
+            _population_preview_buffer[buffer_base + 10] = size.z
+            _population_preview_buffer[buffer_base + 11] = position.z
 
             var color := (
                 Color(1.0, 0.72, 0.18)
                 if index == champion_index
                 else _segment_color(int(segment.get("id", 0)))
             )
-            multimesh.set_instance_color(instance_index, color)
+            _population_preview_buffer[buffer_base + 12] = color.r
+            _population_preview_buffer[buffer_base + 13] = color.g
+            _population_preview_buffer[buffer_base + 14] = color.b
+            _population_preview_buffer[buffer_base + 15] = color.a
             instance_index += 1
 
         _population_preview_creature_ranges.append(
             [creature_start_index, instance_index]
         )
 
+    RenderingServer.multimesh_set_buffer(
+        multimesh.get_rid(),
+        _population_preview_buffer
+    )
     if instance_index < total_segments:
         multimesh.visible_instance_count = instance_index
 
@@ -7207,6 +7225,7 @@ func _clear_population_preview() -> void:
     _population_preview_offsets.clear()
     _population_preview_sizes.clear()
     _population_preview_creature_ranges.clear()
+    _population_preview_buffer.clear()
 
 
 
@@ -7496,6 +7515,9 @@ func _activate_population_visual_data(
         "visual_replay_workers": int(
             backend_profile.get("visual_replay_workers", 0)
         ),
+        "visual_replay_source": str(
+            backend_profile.get("visual_replay_source", "unknown")
+        ),
         "visual_file_open_ms": float(
             backend_profile.get("visual_file_open_ms", 0.0)
         ),
@@ -7748,10 +7770,26 @@ func _apply_population_visual_frame_pair(
             if instance_index >= _population_preview_sizes.size():
                 continue
             var size: Vector3 = _population_preview_sizes[instance_index]
-            multimesh.set_instance_transform(
-                instance_index,
-                Transform3D(Basis(rotation).scaled(size), position)
-            )
+            var basis := Basis(rotation).scaled(size)
+            var buffer_base := instance_index * 16
+            _population_preview_buffer[buffer_base + 0] = basis.x.x
+            _population_preview_buffer[buffer_base + 1] = basis.y.x
+            _population_preview_buffer[buffer_base + 2] = basis.z.x
+            _population_preview_buffer[buffer_base + 3] = position.x
+            _population_preview_buffer[buffer_base + 4] = basis.x.y
+            _population_preview_buffer[buffer_base + 5] = basis.y.y
+            _population_preview_buffer[buffer_base + 6] = basis.z.y
+            _population_preview_buffer[buffer_base + 7] = position.y
+            _population_preview_buffer[buffer_base + 8] = basis.x.z
+            _population_preview_buffer[buffer_base + 9] = basis.y.z
+            _population_preview_buffer[buffer_base + 10] = basis.z.z
+            _population_preview_buffer[buffer_base + 11] = position.z
+
+    if not _population_preview_buffer.is_empty():
+        RenderingServer.multimesh_set_buffer(
+            multimesh.get_rid(),
+            _population_preview_buffer
+        )
 
     _population_best_index = live_best_index
     _population_best_distance = maxf(0.0, live_best_distance)
