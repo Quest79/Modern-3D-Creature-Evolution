@@ -12,10 +12,9 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, CreatureVisualSession, EffectiveEvolutionSettings, EvaluatedCreature,
-    EvolutionCheckpoint,
-    EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights,
-    GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
-    ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig,
+    FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
     mutate_genome, random_creature, run_cuda_probe_batch,
 };
@@ -1769,8 +1768,7 @@ fn stream_population_visualization(
         return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
     }
 
-    let sample_every_steps =
-        ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
     let body_count = population
         .iter()
         .map(|creature| creature.genome.segments.len())
