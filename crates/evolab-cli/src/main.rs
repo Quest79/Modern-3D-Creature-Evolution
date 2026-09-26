@@ -1839,7 +1839,9 @@ fn write_population_visualization(
         .and_then(|_| writer.flush())
         .map_err(|err| format!("failed to finalize visual file {}: {err}", path.display()))?;
     let serialize_write_flush_ms = serialize_started.elapsed().as_secs_f64() * 1000.0;
-    let file_bytes = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let file_bytes = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     let total_ms = profile_started.elapsed().as_secs_f64() * 1000.0;
 
     Ok(PopulationVisualWriteProfile {
