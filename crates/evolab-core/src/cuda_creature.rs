@@ -1252,7 +1252,12 @@ mod platform {
 
         for assignment in assignments {
             let assignment = assignment.clone();
-            let genomes =
+            let global_part_start = genomes
+                .iter()
+                .take(assignment.start_index)
+                .map(|genome| genome.segments.len())
+                .sum::<usize>();
+            let assignment_genomes =
                 genomes[assignment.start_index..assignment.start_index + assignment.count].to_vec();
             let simulation = simulation.clone();
             let fitness = *fitness;
@@ -1262,14 +1267,9 @@ mod platform {
                 .find(|device| device.id == assignment.device_id)
                 .cloned()
                 .ok_or_else(|| format!("CUDA device {} disappeared", assignment.device_id))?;
-            let global_part_start = genomes
-                .iter()
-                .take(assignment.start_index)
-                .map(|genome| genome.segments.len())
-                .sum::<usize>();
             handles.push(thread::spawn(move || {
                 run_device_assignment(
-                    &genomes,
+                    &assignment_genomes,
                     &simulation,
                     &fitness,
                     &accelerator,
