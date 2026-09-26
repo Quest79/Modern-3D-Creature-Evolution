@@ -1944,6 +1944,12 @@ extern "C" __global__ void simulate_creatures(
     float* out_stability,
     float* out_energy,
     unsigned* out_unstable,
+    float* visual_position,
+    float* visual_rotation,
+    unsigned* visual_samples_written,
+    unsigned total_part_slots,
+    unsigned visual_sample_stride,
+    unsigned visual_sample_count,
     unsigned world_start,
     unsigned launch_world_count,
     float dt,
@@ -2005,6 +2011,25 @@ extern "C" __global__ void simulate_creatures(
         joint_torque[js * 3 + 0] = 0.0f;
         joint_torque[js * 3 + 1] = 0.0f;
         joint_torque[js * 3 + 2] = 0.0f;
+    }
+    __syncwarp(subgroup_mask);
+
+    if (visual_sample_count > 0) {
+        for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+            unsigned slot = part_base + p;
+            unsigned base3 = slot * 3;
+            unsigned base4 = slot * 4;
+            unsigned out3 = slot * 3;
+            unsigned out4 = slot * 4;
+            visual_position[out3 + 0] = state_position[base3 + 0];
+            visual_position[out3 + 1] = state_position[base3 + 1];
+            visual_position[out3 + 2] = state_position[base3 + 2];
+            visual_rotation[out4 + 0] = state_rotation[base4 + 0];
+            visual_rotation[out4 + 1] = state_rotation[base4 + 1];
+            visual_rotation[out4 + 2] = state_rotation[base4 + 2];
+            visual_rotation[out4 + 3] = state_rotation[base4 + 3];
+        }
+        if (lane == 0) visual_samples_written[world] = 1;
     }
     __syncwarp(subgroup_mask);
 
@@ -2311,6 +2336,39 @@ extern "C" __global__ void simulate_creatures(
         __syncwarp(subgroup_mask);
 
         if (group_unstable) break;
+
+        unsigned completed_steps = step + 1;
+        if (
+            visual_sample_count > 0
+            && visual_sample_stride > 0
+            && (
+                completed_steps % visual_sample_stride == 0
+                || completed_steps == steps
+            )
+        ) {
+            unsigned sample_index =
+                (completed_steps + visual_sample_stride - 1) / visual_sample_stride;
+            sample_index = min(sample_index, visual_sample_count - 1);
+            for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+                unsigned slot = part_base + p;
+                unsigned base3 = slot * 3;
+                unsigned base4 = slot * 4;
+                unsigned sample_slot = sample_index * total_part_slots + slot;
+                unsigned out3 = sample_slot * 3;
+                unsigned out4 = sample_slot * 4;
+                visual_position[out3 + 0] = state_position[base3 + 0];
+                visual_position[out3 + 1] = state_position[base3 + 1];
+                visual_position[out3 + 2] = state_position[base3 + 2];
+                visual_rotation[out4 + 0] = state_rotation[base4 + 0];
+                visual_rotation[out4 + 1] = state_rotation[base4 + 1];
+                visual_rotation[out4 + 2] = state_rotation[base4 + 2];
+                visual_rotation[out4 + 3] = state_rotation[base4 + 3];
+            }
+            if (lane == 0) {
+                visual_samples_written[world] = sample_index + 1;
+            }
+        }
+        __syncwarp(subgroup_mask);
 
         if (lane == 0) {
             float rvx = state_velocity[root_slot * 3 + 0];
