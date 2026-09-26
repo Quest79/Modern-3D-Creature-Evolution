@@ -1418,7 +1418,11 @@ mod platform {
         // A generation is one fixed evolutionary workload. Keep every candidate
         // assigned to this GPU in the same CUDA launch instead of serializing it
         // into smaller chunks based on a UI batch-size knob.
-        let batch_size = genomes.len().max(1);
+        let batch_size = if visual_capture.is_some() {
+            genomes.len().min(256).max(1)
+        } else {
+            genomes.len().max(1)
+        };
         let mut offset = 0usize;
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
