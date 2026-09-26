@@ -1364,7 +1364,8 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_result = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            let chunk_result =
+                run_chunk(&mut runtime, chunk, simulation, fitness, accelerator, None)?;
             cuda_telemetry.accumulate(&chunk_result.telemetry);
             all_results.extend(
                 chunk_result
@@ -1391,9 +1392,21 @@ mod platform {
         })
     }
 
+    struct ChunkVisualSamples {
+        sample_stride_steps: usize,
+        sample_count: usize,
+        part_count: Vec<u32>,
+        part_base: Vec<u32>,
+        position: Vec<f32>,
+        rotation: Vec<f32>,
+        samples_written: Vec<u32>,
+        unstable: Vec<bool>,
+    }
+
     struct ChunkResult {
         fitness: Vec<FitnessResult>,
         telemetry: CudaExecutionTelemetry,
+        visual: Option<ChunkVisualSamples>,
     }
 
     fn run_chunk(
@@ -1402,6 +1415,7 @@ mod platform {
         simulation: &SimulationConfig,
         fitness: &FitnessConfig,
         accelerator: &AcceleratorConfig,
+        visual_sample_hz: Option<f32>,
     ) -> Result<ChunkResult, String> {
         let mut telemetry = CudaExecutionTelemetry::default();
         telemetry.batch_count = 1;
@@ -1413,6 +1427,16 @@ mod platform {
         let world_count = packed.world_count;
         let part_slots = packed.inv_mass.len();
         let joint_slots = packed.parent.len();
+        let total_steps = simulation.step_count();
+        let visual_sample_stride_steps = visual_sample_hz
+            .map(|hz| ((1.0 / (simulation.dt * hz)).round() as usize).max(1))
+            .unwrap_or(0);
+        let visual_sample_count = if visual_sample_stride_steps > 0 {
+            1 + total_steps / visual_sample_stride_steps
+                + usize::from(!total_steps.is_multiple_of(visual_sample_stride_steps))
+        } else {
+            0
+        };
         telemetry.total_packed_parts = part_slots;
         telemetry.total_packed_joints = joint_slots;
         telemetry.total_brain_ops = packed.op_code.len();
@@ -1495,9 +1519,26 @@ mod platform {
             workspace.ensure(api, "out_energy", world_count * size_of::<f32>())?;
         let mut p_out_unstable =
             workspace.ensure(api, "out_unstable", world_count * size_of::<u32>())?;
+        let visual_position_len = visual_sample_count.saturating_mul(part_slots).saturating_mul(3);
+        let visual_rotation_len = visual_sample_count.saturating_mul(part_slots).saturating_mul(4);
+        let mut p_visual_position = workspace.ensure(
+            api,
+            "visual_position",
+            visual_position_len.max(1) * size_of::<f32>(),
+        )?;
+        let mut p_visual_rotation = workspace.ensure(
+            api,
+            "visual_rotation",
+            visual_rotation_len.max(1) * size_of::<f32>(),
+        )?;
+        let mut p_visual_samples_written = workspace.ensure(
+            api,
+            "visual_samples_written",
+            world_count.max(1) * size_of::<u32>(),
+        )?;
 
         let mut dt = simulation.dt;
-        let mut steps = simulation.step_count() as u32;
+        let mut steps = total_steps as u32;
         let mut gravity_y = simulation.world.gravity[1];
         let mut ground_y = simulation.world.surface_height_at(0.0, 0.0).unwrap_or(0.0);
         let mut activation = simulation.motor_strength_multiplier;
@@ -1506,6 +1547,9 @@ mod platform {
         let mut weight_upright = fitness.weights.upright;
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
+        let mut total_part_slots_arg = part_slots as u32;
+        let mut visual_sample_stride_arg = visual_sample_stride_steps as u32;
+        let mut visual_sample_count_arg = visual_sample_count as u32;
 
         // One full warp owns one creature. With one warp/block, a 50-creature
         // generation launches 50 independent blocks so the GPU scheduler can
@@ -1587,6 +1631,12 @@ mod platform {
                 (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_visual_position as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_visual_rotation as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_visual_samples_written as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut total_part_slots_arg as *mut u32).cast::<c_void>(),
+                (&mut visual_sample_stride_arg as *mut u32).cast::<c_void>(),
+                (&mut visual_sample_count_arg as *mut u32).cast::<c_void>(),
                 (&mut world_start_arg as *mut u32).cast::<c_void>(),
                 (&mut launch_count_arg as *mut u32).cast::<c_void>(),
                 (&mut dt as *mut f32).cast::<c_void>(),
@@ -1650,6 +1700,27 @@ mod platform {
         workspace.download(api, "out_stability", &mut stability)?;
         workspace.download(api, "out_energy", &mut energy)?;
         workspace.download(api, "out_unstable", &mut unstable)?;
+
+        let visual = if visual_sample_count > 0 {
+            let mut position = vec![0.0_f32; visual_position_len];
+            let mut rotation = vec![0.0_f32; visual_rotation_len];
+            let mut samples_written = vec![0_u32; world_count];
+            workspace.download(api, "visual_position", &mut position)?;
+            workspace.download(api, "visual_rotation", &mut rotation)?;
+            workspace.download(api, "visual_samples_written", &mut samples_written)?;
+            Some(ChunkVisualSamples {
+                sample_stride_steps: visual_sample_stride_steps,
+                sample_count: visual_sample_count,
+                part_count: packed.part_count.clone(),
+                part_base: packed.part_base.clone(),
+                position,
+                rotation,
+                samples_written,
+                unstable: unstable.iter().map(|value| *value != 0).collect(),
+            })
+        } else {
+            None
+        };
         telemetry.d_to_h_seconds = download_started.elapsed().as_secs_f64();
 
         let decode_started = Instant::now();
@@ -1687,6 +1758,7 @@ mod platform {
         Ok(ChunkResult {
             fitness: decoded,
             telemetry,
+            visual,
         })
     }
 
