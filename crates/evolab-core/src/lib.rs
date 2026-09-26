@@ -43,7 +43,10 @@ pub use creature::{
     CreatureSnapshot, CreatureVisualSession, JointGene, MAX_VALID_LINEAR_SPEED_M_S,
     MUSCLE_DENSITY_KG_M3, SegmentGene,
 };
-pub use cuda_creature::{CudaCreatureBatchResult, run_cuda_creature_batch};
+pub use cuda_creature::{
+    CudaCreatureBatchResult, CudaCreatureVisualBatchResult, CudaCreatureVisualFrame,
+    run_cuda_creature_batch, run_cuda_creature_visual_batch,
+};
 pub use cuda_probe::{CudaProbeBatchReport, discover_cuda_devices, run_cuda_probe_batch};
 pub use evolution::{
     GenomeRng, MutationConfig, MutationKind, MutationRecord, MutationResult,

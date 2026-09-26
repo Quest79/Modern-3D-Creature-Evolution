@@ -12,6 +12,18 @@ pub struct CudaCreatureBatchResult {
     pub execution: ExecutionPerformance,
 }
 
+#[derive(Clone, Debug)]
+pub struct CudaCreatureVisualFrame {
+    pub simulated_seconds: f32,
+    pub creatures: Vec<Vec<[f32; 7]>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CudaCreatureVisualBatchResult {
+    pub frames: Vec<CudaCreatureVisualFrame>,
+    pub unstable: Vec<bool>,
+}
+
 static CUDA_CREATURE_DEVICE_CACHE: std::sync::OnceLock<Result<Vec<crate::CudaDeviceInfo>, String>> =
     std::sync::OnceLock::new();
 
@@ -68,6 +80,55 @@ pub fn run_cuda_creature_batch(
         accelerator,
         devices,
         &assignments,
+    )
+}
+
+pub fn run_cuda_creature_visual_batch(
+    genomes: &[CreatureGenome],
+    simulation: &SimulationConfig,
+    accelerator: &AcceleratorConfig,
+    sample_hz: f32,
+) -> Result<CudaCreatureVisualBatchResult, String> {
+    if genomes.is_empty() {
+        return Err("CUDA creature visual batch must contain at least one genome".into());
+    }
+    if !sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0 {
+        return Err(
+            "CUDA creature visual sample rate must be greater than 0 and at most 60 Hz".into(),
+        );
+    }
+    simulation.validate()?;
+    accelerator.validate()?;
+    validate_cuda_creature_world(simulation)?;
+
+    for genome in genomes {
+        genome.validate()?;
+        let compatibility = accelerator.creature_compatibility(genome);
+        if !compatibility.compatible {
+            return Err(format!(
+                "creature is not compatible with CUDA limits: {}",
+                compatibility.reasons.join("; ")
+            ));
+        }
+    }
+
+    let devices = cached_cuda_devices()?;
+    if devices.is_empty() {
+        return Err("no CUDA devices were found".into());
+    }
+    let selected = accelerator.selected_gpu_ids(devices)?;
+    if selected.is_empty() {
+        return Err("no CUDA devices were selected".into());
+    }
+
+    let assignments = schedule_gpu_work(genomes.len(), &selected)?;
+    platform::run_visual_batch(
+        genomes,
+        simulation,
+        accelerator,
+        devices,
+        &assignments,
+        sample_hz,
     )
 }
 
@@ -454,7 +515,7 @@ mod platform {
         SimulationConfig,
     };
 
-    use super::CudaCreatureBatchResult;
+    use super::{CudaCreatureBatchResult, CudaCreatureVisualBatchResult};
 
     pub fn run_batch(
         _genomes: &[CreatureGenome],
@@ -465,6 +526,17 @@ mod platform {
         _assignments: &[DeviceWorkAssignment],
     ) -> Result<CudaCreatureBatchResult, String> {
         Err("CUDA articulated-creature physics currently supports Windows only".into())
+    }
+
+    pub fn run_visual_batch(
+        _genomes: &[CreatureGenome],
+        _simulation: &SimulationConfig,
+        _accelerator: &AcceleratorConfig,
+        _devices: &[CudaDeviceInfo],
+        _assignments: &[DeviceWorkAssignment],
+        _sample_hz: f32,
+    ) -> Result<CudaCreatureVisualBatchResult, String> {
+        Err("CUDA articulated-creature visual physics currently supports Windows only".into())
     }
 }
 
@@ -488,7 +560,10 @@ mod platform {
         FitnessMetrics, FitnessResult, SimulationConfig, ThroughputMode,
     };
 
-    use super::{CudaCreatureBatchResult, PackedCreatureBatch};
+    use super::{
+        CudaCreatureBatchResult, CudaCreatureVisualBatchResult, CudaCreatureVisualFrame,
+        PackedCreatureBatch,
+    };
 
     type CuResult = i32;
     type CuDevice = i32;
@@ -1258,6 +1333,95 @@ mod platform {
         })
     }
 
+    pub fn run_visual_batch(
+        genomes: &[CreatureGenome],
+        simulation: &SimulationConfig,
+        accelerator: &AcceleratorConfig,
+        devices: &[CudaDeviceInfo],
+        assignments: &[DeviceWorkAssignment],
+        sample_hz: f32,
+    ) -> Result<CudaCreatureVisualBatchResult, String> {
+        let device_id = assignments
+            .first()
+            .ok_or_else(|| "CUDA visual batch has no device assignment".to_string())?
+            .device_id;
+        let device = devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .ok_or_else(|| format!("CUDA device {device_id} disappeared"))?;
+        let (runtime, _) = get_or_create_runtime(device, accelerator.throughput_mode)?;
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| "CUDA device runtime mutex was poisoned".to_string())?;
+        check_cuda(
+            unsafe { (runtime.api.ctx_set_current)(runtime.context) },
+            "cuCtxSetCurrent",
+        )?;
+
+        let fitness = FitnessConfig::default();
+        let result = run_chunk(
+            &mut runtime,
+            genomes,
+            simulation,
+            &fitness,
+            accelerator,
+            Some(sample_hz),
+        )?;
+        let visual = result
+            .visual
+            .ok_or_else(|| "CUDA visual batch did not produce samples".to_string())?;
+        let total_part_slots = visual
+            .part_count
+            .iter()
+            .map(|value| *value as usize)
+            .sum::<usize>();
+
+        let mut frames = Vec::with_capacity(visual.sample_count);
+        for sample_index in 0..visual.sample_count {
+            let completed_steps = if sample_index == 0 {
+                0
+            } else {
+                (sample_index * visual.sample_stride_steps).min(simulation.step_count())
+            };
+            let mut creatures = Vec::with_capacity(genomes.len());
+
+            for world in 0..genomes.len() {
+                let written = visual.samples_written[world].max(1) as usize;
+                let effective_sample = sample_index.min(written - 1);
+                let part_base = visual.part_base[world] as usize;
+                let part_count = visual.part_count[world] as usize;
+                let mut bodies = Vec::with_capacity(part_count);
+
+                for part in 0..part_count {
+                    let slot = part_base + part;
+                    let sample_slot = effective_sample * total_part_slots + slot;
+                    let p3 = sample_slot * 3;
+                    let p4 = sample_slot * 4;
+                    bodies.push([
+                        visual.position[p3],
+                        visual.position[p3 + 1],
+                        visual.position[p3 + 2],
+                        visual.rotation[p4],
+                        visual.rotation[p4 + 1],
+                        visual.rotation[p4 + 2],
+                        visual.rotation[p4 + 3],
+                    ]);
+                }
+                creatures.push(bodies);
+            }
+
+            frames.push(CudaCreatureVisualFrame {
+                simulated_seconds: completed_steps as f32 * simulation.dt,
+                creatures,
+            });
+        }
+
+        Ok(CudaCreatureVisualBatchResult {
+            frames,
+            unstable: visual.unstable,
+        })
+    }
+
     struct DeviceAssignmentResult {
         results: Vec<(usize, FitnessResult)>,
         performance: DevicePerformance,
@@ -1291,7 +1455,8 @@ mod platform {
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
             let chunk = &genomes[offset..end];
-            let chunk_result = run_chunk(&mut runtime, chunk, simulation, fitness, accelerator)?;
+            let chunk_result =
+                run_chunk(&mut runtime, chunk, simulation, fitness, accelerator, None)?;
             cuda_telemetry.accumulate(&chunk_result.telemetry);
             all_results.extend(
                 chunk_result
@@ -1318,9 +1483,21 @@ mod platform {
         })
     }
 
+    struct ChunkVisualSamples {
+        sample_stride_steps: usize,
+        sample_count: usize,
+        part_count: Vec<u32>,
+        part_base: Vec<u32>,
+        position: Vec<f32>,
+        rotation: Vec<f32>,
+        samples_written: Vec<u32>,
+        unstable: Vec<bool>,
+    }
+
     struct ChunkResult {
         fitness: Vec<FitnessResult>,
         telemetry: CudaExecutionTelemetry,
+        visual: Option<ChunkVisualSamples>,
     }
 
     fn run_chunk(
@@ -1329,6 +1506,7 @@ mod platform {
         simulation: &SimulationConfig,
         fitness: &FitnessConfig,
         accelerator: &AcceleratorConfig,
+        visual_sample_hz: Option<f32>,
     ) -> Result<ChunkResult, String> {
         let mut telemetry = CudaExecutionTelemetry::default();
         telemetry.batch_count = 1;
@@ -1340,6 +1518,16 @@ mod platform {
         let world_count = packed.world_count;
         let part_slots = packed.inv_mass.len();
         let joint_slots = packed.parent.len();
+        let total_steps = simulation.step_count();
+        let visual_sample_stride_steps = visual_sample_hz
+            .map(|hz| ((1.0 / (simulation.dt * hz)).round() as usize).max(1))
+            .unwrap_or(0);
+        let visual_sample_count = if visual_sample_stride_steps > 0 {
+            1 + total_steps / visual_sample_stride_steps
+                + usize::from(!total_steps.is_multiple_of(visual_sample_stride_steps))
+        } else {
+            0
+        };
         telemetry.total_packed_parts = part_slots;
         telemetry.total_packed_joints = joint_slots;
         telemetry.total_brain_ops = packed.op_code.len();
@@ -1422,9 +1610,30 @@ mod platform {
             workspace.ensure(api, "out_energy", world_count * size_of::<f32>())?;
         let mut p_out_unstable =
             workspace.ensure(api, "out_unstable", world_count * size_of::<u32>())?;
+        let visual_position_len = visual_sample_count
+            .saturating_mul(part_slots)
+            .saturating_mul(3);
+        let visual_rotation_len = visual_sample_count
+            .saturating_mul(part_slots)
+            .saturating_mul(4);
+        let mut p_visual_position = workspace.ensure(
+            api,
+            "visual_position",
+            visual_position_len.max(1) * size_of::<f32>(),
+        )?;
+        let mut p_visual_rotation = workspace.ensure(
+            api,
+            "visual_rotation",
+            visual_rotation_len.max(1) * size_of::<f32>(),
+        )?;
+        let mut p_visual_samples_written = workspace.ensure(
+            api,
+            "visual_samples_written",
+            world_count.max(1) * size_of::<u32>(),
+        )?;
 
         let mut dt = simulation.dt;
-        let mut steps = simulation.step_count() as u32;
+        let mut steps = total_steps as u32;
         let mut gravity_y = simulation.world.gravity[1];
         let mut ground_y = simulation.world.surface_height_at(0.0, 0.0).unwrap_or(0.0);
         let mut activation = simulation.motor_strength_multiplier;
@@ -1433,6 +1642,9 @@ mod platform {
         let mut weight_upright = fitness.weights.upright;
         let mut weight_stability = fitness.weights.stability;
         let mut weight_energy = fitness.weights.energy;
+        let mut total_part_slots_arg = part_slots as u32;
+        let mut visual_sample_stride_arg = visual_sample_stride_steps as u32;
+        let mut visual_sample_count_arg = visual_sample_count as u32;
 
         // One full warp owns one creature. With one warp/block, a 50-creature
         // generation launches 50 independent blocks so the GPU scheduler can
@@ -1514,6 +1726,12 @@ mod platform {
                 (&mut p_out_stability as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_energy as *mut CuDevicePtr).cast::<c_void>(),
                 (&mut p_out_unstable as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_visual_position as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_visual_rotation as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut p_visual_samples_written as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut total_part_slots_arg as *mut u32).cast::<c_void>(),
+                (&mut visual_sample_stride_arg as *mut u32).cast::<c_void>(),
+                (&mut visual_sample_count_arg as *mut u32).cast::<c_void>(),
                 (&mut world_start_arg as *mut u32).cast::<c_void>(),
                 (&mut launch_count_arg as *mut u32).cast::<c_void>(),
                 (&mut dt as *mut f32).cast::<c_void>(),
@@ -1577,6 +1795,27 @@ mod platform {
         workspace.download(api, "out_stability", &mut stability)?;
         workspace.download(api, "out_energy", &mut energy)?;
         workspace.download(api, "out_unstable", &mut unstable)?;
+
+        let visual = if visual_sample_count > 0 {
+            let mut position = vec![0.0_f32; visual_position_len];
+            let mut rotation = vec![0.0_f32; visual_rotation_len];
+            let mut samples_written = vec![0_u32; world_count];
+            workspace.download(api, "visual_position", &mut position)?;
+            workspace.download(api, "visual_rotation", &mut rotation)?;
+            workspace.download(api, "visual_samples_written", &mut samples_written)?;
+            Some(ChunkVisualSamples {
+                sample_stride_steps: visual_sample_stride_steps,
+                sample_count: visual_sample_count,
+                part_count: packed.part_count.clone(),
+                part_base: packed.part_base.clone(),
+                position,
+                rotation,
+                samples_written,
+                unstable: unstable.iter().map(|value| *value != 0).collect(),
+            })
+        } else {
+            None
+        };
         telemetry.d_to_h_seconds = download_started.elapsed().as_secs_f64();
 
         let decode_started = Instant::now();
@@ -1614,6 +1853,7 @@ mod platform {
         Ok(ChunkResult {
             fitness: decoded,
             telemetry,
+            visual,
         })
     }
 
@@ -1799,6 +2039,12 @@ extern "C" __global__ void simulate_creatures(
     float* out_stability,
     float* out_energy,
     unsigned* out_unstable,
+    float* visual_position,
+    float* visual_rotation,
+    unsigned* visual_samples_written,
+    unsigned total_part_slots,
+    unsigned visual_sample_stride,
+    unsigned visual_sample_count,
     unsigned world_start,
     unsigned launch_world_count,
     float dt,
@@ -1860,6 +2106,25 @@ extern "C" __global__ void simulate_creatures(
         joint_torque[js * 3 + 0] = 0.0f;
         joint_torque[js * 3 + 1] = 0.0f;
         joint_torque[js * 3 + 2] = 0.0f;
+    }
+    __syncwarp(subgroup_mask);
+
+    if (visual_sample_count > 0) {
+        for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+            unsigned slot = part_base + p;
+            unsigned base3 = slot * 3;
+            unsigned base4 = slot * 4;
+            unsigned out3 = slot * 3;
+            unsigned out4 = slot * 4;
+            visual_position[out3 + 0] = state_position[base3 + 0];
+            visual_position[out3 + 1] = state_position[base3 + 1];
+            visual_position[out3 + 2] = state_position[base3 + 2];
+            visual_rotation[out4 + 0] = state_rotation[base4 + 0];
+            visual_rotation[out4 + 1] = state_rotation[base4 + 1];
+            visual_rotation[out4 + 2] = state_rotation[base4 + 2];
+            visual_rotation[out4 + 3] = state_rotation[base4 + 3];
+        }
+        if (lane == 0) visual_samples_written[world] = 1;
     }
     __syncwarp(subgroup_mask);
 
@@ -2166,6 +2431,40 @@ extern "C" __global__ void simulate_creatures(
         __syncwarp(subgroup_mask);
 
         if (group_unstable) break;
+
+        unsigned completed_steps = step + 1;
+        if (
+            visual_sample_count > 0
+            && visual_sample_stride > 0
+            && (
+                completed_steps % visual_sample_stride == 0
+                || completed_steps == steps
+            )
+        ) {
+            unsigned sample_index =
+                (completed_steps + visual_sample_stride - 1) / visual_sample_stride;
+            if (sample_index >= visual_sample_count)
+                sample_index = visual_sample_count - 1;
+            for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
+                unsigned slot = part_base + p;
+                unsigned base3 = slot * 3;
+                unsigned base4 = slot * 4;
+                unsigned sample_slot = sample_index * total_part_slots + slot;
+                unsigned out3 = sample_slot * 3;
+                unsigned out4 = sample_slot * 4;
+                visual_position[out3 + 0] = state_position[base3 + 0];
+                visual_position[out3 + 1] = state_position[base3 + 1];
+                visual_position[out3 + 2] = state_position[base3 + 2];
+                visual_rotation[out4 + 0] = state_rotation[base4 + 0];
+                visual_rotation[out4 + 1] = state_rotation[base4 + 1];
+                visual_rotation[out4 + 2] = state_rotation[base4 + 2];
+                visual_rotation[out4 + 3] = state_rotation[base4 + 3];
+            }
+            if (lane == 0) {
+                visual_samples_written[world] = sample_index + 1;
+            }
+        }
+        __syncwarp(subgroup_mask);
 
         if (lane == 0) {
             float rvx = state_velocity[root_slot * 3 + 0];
