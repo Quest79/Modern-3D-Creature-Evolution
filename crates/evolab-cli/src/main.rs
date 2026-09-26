@@ -1769,17 +1769,14 @@ fn stream_population_visualization(
         return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
     }
 
-    let sample_every_steps =
-        ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
     let body_count = population
         .iter()
         .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
 
-    let mut senders: Vec<SyncSender<VisualCreatureMessage>> =
-        Vec::with_capacity(population.len());
-    let mut receivers: Vec<Receiver<VisualCreatureMessage>> =
-        Vec::with_capacity(population.len());
+    let mut senders: Vec<SyncSender<VisualCreatureMessage>> = Vec::with_capacity(population.len());
+    let mut receivers: Vec<Receiver<VisualCreatureMessage>> = Vec::with_capacity(population.len());
     for _ in population {
         let (sender, receiver) = sync_channel(2);
         senders.push(sender);
@@ -1852,9 +1849,7 @@ fn stream_population_visualization(
             let compact = latest_snapshots
                 .iter()
                 .zip(population.iter())
-                .map(|(snapshot, creature)| {
-                    compact_visual_bodies(snapshot.as_ref(), creature)
-                })
+                .map(|(snapshot, creature)| compact_visual_bodies(snapshot.as_ref(), creature))
                 .collect::<Vec<_>>();
 
             send_population_stream_message(
