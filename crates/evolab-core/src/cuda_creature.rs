@@ -93,7 +93,9 @@ pub fn run_cuda_creature_visual_batch(
         return Err("CUDA creature visual batch must contain at least one genome".into());
     }
     if !sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0 {
-        return Err("CUDA creature visual sample rate must be greater than 0 and at most 60 Hz".into());
+        return Err(
+            "CUDA creature visual sample rate must be greater than 0 and at most 60 Hz".into(),
+        );
     }
     simulation.validate()?;
     accelerator.validate()?;
@@ -1608,8 +1610,12 @@ mod platform {
             workspace.ensure(api, "out_energy", world_count * size_of::<f32>())?;
         let mut p_out_unstable =
             workspace.ensure(api, "out_unstable", world_count * size_of::<u32>())?;
-        let visual_position_len = visual_sample_count.saturating_mul(part_slots).saturating_mul(3);
-        let visual_rotation_len = visual_sample_count.saturating_mul(part_slots).saturating_mul(4);
+        let visual_position_len = visual_sample_count
+            .saturating_mul(part_slots)
+            .saturating_mul(3);
+        let visual_rotation_len = visual_sample_count
+            .saturating_mul(part_slots)
+            .saturating_mul(4);
         let mut p_visual_position = workspace.ensure(
             api,
             "visual_position",
