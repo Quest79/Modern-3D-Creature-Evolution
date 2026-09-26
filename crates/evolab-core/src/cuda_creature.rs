@@ -2443,7 +2443,8 @@ extern "C" __global__ void simulate_creatures(
         ) {
             unsigned sample_index =
                 (completed_steps + visual_sample_stride - 1) / visual_sample_stride;
-            sample_index = min(sample_index, visual_sample_count - 1);
+            if (sample_index >= visual_sample_count)
+                sample_index = visual_sample_count - 1;
             for (unsigned p = lane; p < pc; p += GROUP_SIZE) {
                 unsigned slot = part_base + p;
                 unsigned base3 = slot * 3;
