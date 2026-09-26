@@ -2694,7 +2694,7 @@ func _build_settings_window() -> void:
     _camera_zoom_spin.value_changed.connect(_on_camera_zoom_changed)
 
     var help := Label.new()
-    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. Press Z to smoothly toggle camera zoom. HUD and camera settings are saved automatically."
+    help.text = "Hold right mouse and move to look. W/S move along your aim; A/D strafe. Hold Z to zoom; mouse look runs at half speed while Z is held. HUD and camera settings are saved automatically."
     help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     help.modulate = Color(0.70, 0.76, 0.86)
     column.add_child(help)
@@ -3725,7 +3725,6 @@ func _unhandled_input(event: InputEvent) -> void:
     if (
         event is InputEventKey
         and event.keycode == KEY_Z
-        and event.pressed
         and not event.echo
     ):
         if _settings_window != null and _settings_window.visible:
@@ -3733,7 +3732,7 @@ func _unhandled_input(event: InputEvent) -> void:
         var focus_owner := get_viewport().gui_get_focus_owner()
         if focus_owner is LineEdit:
             return
-        _camera_zoom_active = not _camera_zoom_active
+        _camera_zoom_active = event.pressed
         _start_camera_zoom_transition(
             _camera_zoom_factor if _camera_zoom_active else 1.0
         )
@@ -3754,6 +3753,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
     if event is InputEventMouseMotion and _mouse_looking:
         var sensitivity := deg_to_rad(_mouse_sensitivity_degrees)
+        if _camera_zoom_active:
+            sensitivity *= 0.5
         _camera_yaw -= event.relative.x * sensitivity
         _camera_pitch = clampf(
             _camera_pitch - event.relative.y * sensitivity,
