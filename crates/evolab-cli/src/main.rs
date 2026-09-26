@@ -1460,7 +1460,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 let visual_path = request
                     .visual_output
                     .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
-                let (frame_count, body_count, frozen_creatures) = write_population_visualization(
+                let visual_profile = write_population_visualization(
                     visual_path,
                     summary.generation,
                     visual_population,
@@ -1481,9 +1481,30 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                             "generations": config.generations,
                             "visual_file": visual_path.display().to_string(),
                             "population": visual_population.len(),
-                            "frames": frame_count,
-                            "bodies": body_count,
-                            "frozen_creatures": frozen_creatures,
+                            "frames": visual_profile.frame_count,
+                            "bodies": visual_profile.body_count,
+                            "frozen_creatures": visual_profile.frozen_creatures,
+                            "handoff_profile": {
+                                "generation_wall_ms": summary.timing.total_wall_seconds * 1000.0,
+                                "evaluation_ms": summary.timing.evaluation_seconds * 1000.0,
+                                "cuda_eval_wall_ms": summary.execution.wall_seconds * 1000.0,
+                                "cuda_kernel_ms":
+                                    summary.execution.cuda.kernel_execution_seconds * 1000.0,
+                                "cuda_host_packing_ms":
+                                    summary.execution.cuda.host_packing_seconds * 1000.0,
+                                "cuda_h_to_d_ms":
+                                    summary.execution.cuda.h_to_d_seconds * 1000.0,
+                                "cuda_d_to_h_ms":
+                                    summary.execution.cuda.d_to_h_seconds * 1000.0,
+                                "cuda_result_decode_ms":
+                                    summary.execution.cuda.result_decode_seconds * 1000.0,
+                                "visual_replay_ms": visual_profile.replay_ms,
+                                "visual_file_open_ms": visual_profile.file_open_ms,
+                                "visual_serialize_write_flush_ms":
+                                    visual_profile.serialize_write_flush_ms,
+                                "visual_prepare_total_ms": visual_profile.total_ms,
+                                "visual_file_bytes": visual_profile.file_bytes,
+                            },
                             "generation_best_index": generation_best_index,
                             "generation_best_id": summary.champion_id,
                             "generation_best_fitness": summary.best_fitness,
@@ -1661,13 +1682,25 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PopulationVisualWriteProfile {
+    frame_count: usize,
+    body_count: usize,
+    frozen_creatures: usize,
+    replay_ms: f64,
+    file_open_ms: f64,
+    serialize_write_flush_ms: f64,
+    total_ms: f64,
+    file_bytes: u64,
+}
+
 fn write_population_visualization(
     path: &Path,
     generation: usize,
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
     sample_hz: f32,
-) -> Result<(usize, usize, usize), String> {
+) -> Result<PopulationVisualWriteProfile, String> {
     if population.is_empty() {
         return Err("cannot visualize an empty population".into());
     }
@@ -1675,8 +1708,10 @@ fn write_population_visualization(
         return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
     }
 
+    let profile_started = Instant::now();
     let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
 
+    let replay_started = Instant::now();
     let trajectories = population
         .par_iter()
         .map(|creature| {
@@ -1693,6 +1728,7 @@ fn write_population_visualization(
             (frames, result.is_err())
         })
         .collect::<Vec<_>>();
+    let replay_ms = replay_started.elapsed().as_secs_f64() * 1000.0;
 
     let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
     let total_steps = settings.simulation.step_count();
@@ -1705,10 +1741,13 @@ fn write_population_visualization(
         .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
 
+    let file_open_started = Instant::now();
     let file = fs::File::create(path)
         .map_err(|err| format!("failed to create visual file {}: {err}", path.display()))?;
+    let file_open_ms = file_open_started.elapsed().as_secs_f64() * 1000.0;
     let mut writer = BufWriter::new(file);
 
+    let serialize_started = Instant::now();
     write!(
         writer,
         "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"genomes\":[",
@@ -1799,8 +1838,20 @@ fn write_population_visualization(
         .write_all(b"]}")
         .and_then(|_| writer.flush())
         .map_err(|err| format!("failed to finalize visual file {}: {err}", path.display()))?;
+    let serialize_write_flush_ms = serialize_started.elapsed().as_secs_f64() * 1000.0;
+    let file_bytes = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let total_ms = profile_started.elapsed().as_secs_f64() * 1000.0;
 
-    Ok((frame_count, body_count, frozen_creatures))
+    Ok(PopulationVisualWriteProfile {
+        frame_count,
+        body_count,
+        frozen_creatures,
+        replay_ms,
+        file_open_ms,
+        serialize_write_flush_ms,
+        total_ms,
+        file_bytes,
+    })
 }
 
 fn run_experiment(
