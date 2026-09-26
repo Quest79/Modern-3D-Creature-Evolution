@@ -1410,7 +1410,7 @@ fn run_evolve_inner(
             )?;
         } else if request.preview_output.is_none() {
             return Err(
-                "--preview-only requires --population-stream-port or --preview-output".into()
+                "--preview-only requires --population-stream-port or --preview-output".into(),
             );
         }
         return Ok(());
@@ -1481,9 +1481,7 @@ fn run_evolve_inner(
             if request.slow_visual {
                 let stream = population_stream
                     .as_deref_mut()
-                    .ok_or_else(|| {
-                        "--slow-visual requires --population-stream-port".to_string()
-                    })?;
+                    .ok_or_else(|| "--slow-visual requires --population-stream-port".to_string())?;
 
                 send_population_stream_message(
                     stream,
@@ -1505,14 +1503,13 @@ fn run_evolve_inner(
                     }),
                 )?;
 
-                let (frame_count, body_count, frozen_creatures) =
-                    stream_population_visualization(
-                        stream,
-                        summary.generation,
-                        visual_population,
-                        &summary.effective_settings,
-                        request.visual_sample_hz,
-                    )?;
+                let (frame_count, body_count, frozen_creatures) = stream_population_visualization(
+                    stream,
+                    summary.generation,
+                    visual_population,
+                    &summary.effective_settings,
+                    request.visual_sample_hz,
+                )?;
 
                 send_population_stream_message(
                     stream,
@@ -1691,10 +1688,7 @@ fn run_evolve_inner(
     Ok(())
 }
 
-fn send_population_stream_message(
-    stream: &mut TcpStream,
-    value: &Value,
-) -> Result<(), String> {
+fn send_population_stream_message(stream: &mut TcpStream, value: &Value) -> Result<(), String> {
     serde_json::to_writer(&mut *stream, value)
         .map_err(|err| format!("failed to serialize RAM population message: {err}"))?;
     stream
@@ -1717,8 +1711,7 @@ fn stream_population_visualization(
         return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
     }
 
-    let sample_every_steps =
-        ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
 
     let trajectories = population
         .par_iter()
