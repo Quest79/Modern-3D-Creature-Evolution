@@ -1590,10 +1590,11 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     if first_visual {
                         slow_visual_release_at = Some(Instant::now() + duration);
                     } else {
-                        if let Some(release_at) = slow_visual_release_at
-                            && release_at > Instant::now()
-                        {
-                            thread::sleep(release_at - Instant::now());
+                        if let Some(release_at) = slow_visual_release_at {
+                            let now = Instant::now();
+                            if release_at > now {
+                                thread::sleep(release_at - now);
+                            }
                         }
                         if let Some(previous_event) = pending_generation_complete.take() {
                             send_event(socket, &previous_event);
@@ -1604,10 +1605,11 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     pending_generation_complete = Some(generation_complete_event);
 
                     if summary.generation >= config.generations {
-                        if let Some(release_at) = slow_visual_release_at
-                            && release_at > Instant::now()
-                        {
-                            thread::sleep(release_at - Instant::now());
+                        if let Some(release_at) = slow_visual_release_at {
+                            let now = Instant::now();
+                            if release_at > now {
+                                thread::sleep(release_at - now);
+                            }
                         }
                         if let Some(final_event) = pending_generation_complete.take() {
                             send_event(socket, &final_event);
