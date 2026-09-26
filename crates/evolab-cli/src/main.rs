@@ -12,12 +12,11 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
-    EvolutionConfig,
-    EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng, MutationConfig,
-    PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig,
-    TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices,
-    evolve_population_checkpointed, generate_initial_population_preview, mutate_genome,
-    random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
+    EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights,
+    GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
+    ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
+    mutate_genome, random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
 };
 use serde_json::{Value, json};
 
