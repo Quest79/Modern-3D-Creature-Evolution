@@ -1378,6 +1378,17 @@ fn run_evolve_inner(
     config.validate()?;
 
     if request.preview_only {
+        if let Some(socket) = socket {
+            send_event(
+                socket,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "population_preview_started",
+                    "population": config.population_size,
+                }),
+            );
+        }
+
         let population = generate_initial_population_preview(&ancestor, &config)?;
 
         if let Some(preview_path) = request.preview_output {
