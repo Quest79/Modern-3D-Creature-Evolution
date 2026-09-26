@@ -25,6 +25,7 @@ pub struct CudaCreatureBatchResult {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 struct CudaVisualCaptureConfig {
     sample_every_steps: usize,
     frame_count: usize,
