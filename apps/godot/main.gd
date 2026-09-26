@@ -2,6 +2,9 @@ extends Node
 
 const EVENT_PORT_START := 47821
 const EVENT_PORT_TRIES := 32
+const POPULATION_STREAM_PORT_START := 47853
+const POPULATION_STREAM_PORT_TRIES := 32
+const POPULATION_STREAM_MESSAGES_PER_FRAME := 12
 const PORTABLE_DATA_DIR_NAME := "portable_data"
 const PORTABLE_RUNTIME_DIR_NAME := "runtime"
 const PORTABLE_SAVES_DIR_NAME := "saves"
@@ -255,6 +258,10 @@ var _results_load_dialog: FileDialog
 
 var _udp: PacketPeerUDP
 var _event_port := 0
+var _population_tcp_server: TCPServer
+var _population_tcp_peer: StreamPeerTCP
+var _population_stream_port := 0
+var _population_stream_text_buffer := ""
 var _job_pid := 0
 var _job_kind := ""
 var _dead_process_since_ms := -1
@@ -325,6 +332,10 @@ func _ready() -> void:
         _set_status("Could not open a local event port for the simulator.")
         _set_controls_enabled(false)
         return
+    if not _open_population_stream_server():
+        _set_status("Could not open the local RAM population stream.")
+        _set_controls_enabled(false)
+        return
 
     _load_capabilities()
     _refresh_world_preview()
@@ -336,6 +347,7 @@ func _process(delta: float) -> void:
     _update_camera_movement(delta)
     _update_camera_zoom(delta)
     _update_population_visual(delta)
+    _poll_population_stream()
 
     _performance_update_accumulator += delta
     if _performance_update_accumulator >= 0.1:
@@ -562,6 +574,158 @@ func _open_event_socket() -> bool:
 
     _udp = null
     return false
+
+
+func _open_population_stream_server() -> bool:
+    _population_tcp_server = TCPServer.new()
+    for port in range(
+        POPULATION_STREAM_PORT_START,
+        POPULATION_STREAM_PORT_START + POPULATION_STREAM_PORT_TRIES
+    ):
+        if _population_tcp_server.listen(port, "127.0.0.1") == OK:
+            _population_stream_port = port
+            return true
+
+    _population_tcp_server = null
+    return false
+
+
+func _poll_population_stream() -> void:
+    if _population_tcp_server == null:
+        return
+
+    if (
+        _population_tcp_peer == null
+        or _population_tcp_peer.get_status() == StreamPeerTCP.STATUS_NONE
+        or _population_tcp_peer.get_status() == StreamPeerTCP.STATUS_ERROR
+    ):
+        _population_tcp_peer = null
+        _population_stream_text_buffer = ""
+        if _population_tcp_server.is_connection_available():
+            _population_tcp_peer = _population_tcp_server.take_connection()
+
+    if _population_tcp_peer == null:
+        return
+
+    _population_tcp_peer.poll()
+    var available := _population_tcp_peer.get_available_bytes()
+    if available > 0:
+        _population_stream_text_buffer += (
+            _population_tcp_peer.get_utf8_string(available)
+        )
+
+    var handled := 0
+    while handled < POPULATION_STREAM_MESSAGES_PER_FRAME:
+        var newline_index := _population_stream_text_buffer.find("\n")
+        if newline_index < 0:
+            break
+        var line := _population_stream_text_buffer.substr(0, newline_index)
+        _population_stream_text_buffer = _population_stream_text_buffer.substr(
+            newline_index + 1
+        )
+        if not line.is_empty():
+            var parsed = JSON.parse_string(line)
+            if typeof(parsed) == TYPE_DICTIONARY:
+                _handle_population_stream_message(parsed)
+        handled += 1
+
+
+func _handle_population_stream_message(message: Dictionary) -> void:
+    _job_received_event = true
+    var kind := str(message.get("kind", ""))
+
+    match kind:
+        "population_preview":
+            var preview_population = message.get("genomes", [])
+            if typeof(preview_population) != TYPE_ARRAY or preview_population.is_empty():
+                _population_preview_active = false
+                _pending_evolution_args = PackedStringArray()
+                _pending_evolution_label = ""
+                _set_status("Population preview could not be received from RAM.")
+                _finish_job_controls()
+                return
+
+            _job_pid = 0
+            _job_kind = ""
+            _dead_process_since_ms = -1
+            _job_started_ms = -1
+            _build_world_from_geometry(message.get("world_geometry", []))
+            _show_population_preview(
+                preview_population,
+                int(message.get("champion_index", -1))
+            )
+            _population_preview_active = true
+            _progress_bar.value = 0
+            _set_status(
+                "Starting population preview • %s creatures • RAM transport"
+                % str(preview_population.size())
+            )
+            _metrics.text = (
+                "[b]Starting population preview[/b]\n"
+                + "%s creatures received directly in memory. "
+                % str(preview_population.size())
+                + "No evaluation or evolution has started yet.\n"
+                + "Press [b]Continue Evolution[/b] when you are ready."
+            )
+            _finish_job_controls()
+
+        "population_visual_begin":
+            var visual_genomes = message.get("genomes", [])
+            if typeof(visual_genomes) != TYPE_ARRAY or visual_genomes.is_empty():
+                _set_status("Slow visual mode received an invalid RAM population.")
+                return
+
+            _build_world_from_geometry(message.get("world_geometry", []))
+            _show_population_preview(visual_genomes, -1)
+            _capture_population_visual_root_starts(visual_genomes)
+            _population_best_index = -1
+            _population_best_distance = 0.0
+            _ensure_population_best_marker()
+            _population_visual_frames.clear()
+            _population_visual_clock = 0.0
+            _population_visual_duration = float(
+                message.get("duration_seconds", _seconds_spin.value)
+            )
+            _population_visual_generation = int(message.get("generation", 0))
+            _population_visual_frame_index = 0
+            _population_visual_active = false
+            _set_status(
+                "Slow visual • Generation %d / %d • %s creatures • preparing motion in RAM"
+                % [
+                    _population_visual_generation,
+                    int(message.get("generations", 0)),
+                    str(message.get("population", visual_genomes.size())),
+                ]
+            )
+
+        "population_visual_frame":
+            if int(message.get("generation", -1)) != _population_visual_generation:
+                return
+            _population_visual_frames.append({
+                "t": float(message.get("t", 0.0)),
+                "creatures": message.get("creatures", []),
+            })
+            if _population_visual_frames.size() == 1:
+                _apply_population_visual_frame_pair(
+                    _population_visual_frames[0],
+                    _population_visual_frames[0],
+                    0.0
+                )
+            elif not _population_visual_active:
+                _population_visual_clock = 0.0
+                _population_visual_frame_index = 0
+                _population_visual_active = true
+                _set_status(
+                    "Slow visual • Generation %d • %s creatures • %.1f s real-time test"
+                    % [
+                        _population_visual_generation,
+                        str(_population_preview_offsets.size()),
+                        _population_visual_duration,
+                    ]
+                )
+
+        "population_visual_end":
+            pass
 
 
 func _build_3d_preview() -> void:
@@ -4188,16 +4352,14 @@ func _start_evolution_run(continue_current: bool) -> void:
 
     var run_label := "champion continuation" if continue_current else "new random lineage"
     if _preview_population_before_evolution:
-        var preview_path := _runtime_path("population_preview.json")
-        if FileAccess.file_exists(preview_path):
-            DirAccess.remove_absolute(preview_path)
-
         _pending_evolution_args = PackedStringArray(args)
         _pending_evolution_label = run_label
         var preview_args := PackedStringArray(args)
         preview_args.append("--preview-only")
-        preview_args.append_array(PackedStringArray(["--preview-output", preview_path]))
-        _set_status("Generating exact starting population preview...")
+        preview_args.append_array(PackedStringArray([
+            "--population-stream-port", str(_population_stream_port),
+        ]))
+        _set_status("Generating exact starting population preview in RAM...")
         if _start_job("population_preview", preview_args):
             _metrics.text = (
                 "[color=#9aa7bd]Generating %s frozen starting creatures for inspection...[/color]"
@@ -6173,91 +6335,6 @@ func _handle_event(event: Dictionary) -> void:
         return
 
     match kind:
-        "population_preview_ready":
-            var preview_file := str(event.get("preview_file", ""))
-            var preview_population := _load_population_preview_file(preview_file)
-            if preview_population.is_empty():
-                _population_preview_active = false
-                _pending_evolution_args = PackedStringArray()
-                _pending_evolution_label = ""
-                _job_pid = 0
-                _job_kind = ""
-                _dead_process_since_ms = -1
-                _job_started_ms = -1
-                _set_status("Population preview could not be loaded.")
-                _finish_job_controls()
-                return
-
-            _job_pid = 0
-            _job_kind = ""
-            _dead_process_since_ms = -1
-            _job_started_ms = -1
-            _build_world_from_geometry(event.get("world_geometry", []))
-            _show_population_preview(
-                preview_population,
-                int(event.get("champion_index", -1))
-            )
-            _population_preview_active = true
-            _progress_bar.value = 0
-            _set_status(
-                "Starting population preview • %s creatures • frozen until Continue Evolution"
-                % str(preview_population.size())
-            )
-            _metrics.text = (
-                "[b]Starting population preview[/b]\n"
-                + "%s creatures shown in a frozen grid. "
-                % str(preview_population.size())
-                + "No evaluation or evolution has started yet.\n"
-                + "Press [b]Continue Evolution[/b] when you are ready."
-            )
-            _finish_job_controls()
-
-        "population_visual_ready":
-            var visual_file := str(event.get("visual_file", ""))
-            var visual_data := _load_population_visual_file(visual_file)
-            if visual_data.is_empty():
-                _set_status("Slow visual mode could not load the population trajectory.")
-                return
-
-            var visual_genomes = visual_data.get("genomes", [])
-            var visual_frames = visual_data.get("frames", [])
-            if typeof(visual_genomes) != TYPE_ARRAY or typeof(visual_frames) != TYPE_ARRAY:
-                _set_status("Slow visual mode received an invalid trajectory.")
-                return
-
-            _build_world_from_geometry(event.get("world_geometry", []))
-            _show_population_preview(visual_genomes, -1)
-            _capture_population_visual_root_starts(visual_genomes)
-            _population_best_index = -1
-            _population_best_distance = 0.0
-            _ensure_population_best_marker()
-            _population_visual_frames = visual_frames
-            _population_visual_clock = 0.0
-            _population_visual_duration = float(
-                visual_data.get(
-                    "duration_seconds",
-                    event.get("duration_seconds", _seconds_spin.value)
-                )
-            )
-            _population_visual_generation = int(event.get("generation", 0))
-            _population_visual_frame_index = 0
-            _population_visual_active = not _population_visual_frames.is_empty()
-            if _population_visual_active:
-                _apply_population_visual_frame_pair(
-                    _population_visual_frames[0],
-                    _population_visual_frames[0],
-                    0.0
-                )
-            _set_status(
-                "Slow visual • Generation %d / %d • %s creatures • %.1f s real-time test"
-                % [
-                    _population_visual_generation,
-                    int(event.get("generations", 0)),
-                    str(event.get("population", 0)),
-                    _population_visual_duration,
-                ]
-            )
-
         "evolution_started":
             _build_world_from_geometry(event.get("world_geometry", []))
             _progress_bar.value = 0
@@ -6809,7 +6886,7 @@ func _append_slow_visual_args(args: PackedStringArray) -> void:
         return
     args.append("--slow-visual")
     args.append_array(PackedStringArray([
-        "--visual-output", _runtime_path("population_visual.json"),
+        "--population-stream-port", str(_population_stream_port),
         "--visual-sample-hz", "10.0",
     ]))
 
@@ -6843,17 +6920,6 @@ func _cancel_population_preview() -> void:
     _set_status("Starting population preview cancelled.")
     _metrics.text = "[color=#9aa7bd]Population preview cancelled.[/color]"
     _finish_job_controls()
-
-
-func _load_population_preview_file(path: String) -> Array:
-    if path.is_empty() or not FileAccess.file_exists(path):
-        return []
-    var file := FileAccess.open(path, FileAccess.READ)
-    if file == null:
-        return []
-    var parsed = JSON.parse_string(file.get_as_text())
-    file.close()
-    return parsed if typeof(parsed) == TYPE_ARRAY else []
 
 
 func _reset_population_layout() -> void:
@@ -7034,17 +7100,6 @@ func _clear_population_preview() -> void:
     _population_preview_sizes.clear()
     _population_preview_creature_ranges.clear()
 
-
-
-func _load_population_visual_file(path: String) -> Dictionary:
-    if path.is_empty() or not FileAccess.file_exists(path):
-        return {}
-    var file := FileAccess.open(path, FileAccess.READ)
-    if file == null:
-        return {}
-    var parsed = JSON.parse_string(file.get_as_text())
-    file.close()
-    return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
 func _capture_population_visual_root_starts(genomes: Array) -> void:
