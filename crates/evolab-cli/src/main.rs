@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
-    EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint, EvolutionConfig,
+    CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
+    EvolutionConfig,
     EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng, MutationConfig,
     PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig,
     TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices,
     evolve_population_checkpointed, generate_initial_population_preview, mutate_genome,
     random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
 };
-use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Stream simulation snapshots ahead of the viewer so slow-motion playback can
