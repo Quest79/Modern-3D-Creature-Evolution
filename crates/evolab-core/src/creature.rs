@@ -921,7 +921,6 @@ impl CreatureSimulator {
     }
 }
 
-
 /// Resumable Rapier creature simulation used by live population visualization.
 ///
 /// Unlike the full streaming runner, this keeps physics state alive between
@@ -1156,8 +1155,7 @@ impl CreatureVisualSession {
                 let angular_speed = sensor.velocity_radians_per_second.abs();
                 let power_limit = *biological_power_limit * strength;
                 if angular_speed > 1.0e-4 && power_limit > 0.0 {
-                    effective_max_torque =
-                        effective_max_torque.min(power_limit / angular_speed);
+                    effective_max_torque = effective_max_torque.min(power_limit / angular_speed);
                 }
 
                 let joint_span = (gene.limits_radians[1] - gene.limits_radians[0])
@@ -1167,8 +1165,8 @@ impl CreatureVisualSession {
                 let stiffness = effective_max_torque / characteristic_error;
                 let damping = 2.0 * (stiffness * *effective_inertia).sqrt();
 
-                let torque_proxy =
-                    (position_error * stiffness + angular_speed * damping).min(effective_max_torque);
+                let torque_proxy = (position_error * stiffness + angular_speed * damping)
+                    .min(effective_max_torque);
                 self.motor_effort += torque_proxy * angular_speed * self.config.dt;
 
                 if let Some(joint) = self.impulse_joints.get_mut(*joint_handle, true) {
