@@ -5,6 +5,8 @@ const EVENT_PORT_TRIES := 32
 const POPULATION_STREAM_PORT_START := 47853
 const POPULATION_STREAM_PORT_TRIES := 32
 const POPULATION_STREAM_MESSAGES_PER_FRAME := 12
+const POPULATION_STREAM_READ_BYTES_PER_FRAME := 2097152
+const POPULATION_VISUAL_START_BUFFER_FRAMES := 4
 const PORTABLE_DATA_DIR_NAME := "portable_data"
 const PORTABLE_RUNTIME_DIR_NAME := "runtime"
 const PORTABLE_SAVES_DIR_NAME := "saves"
@@ -610,7 +612,10 @@ func _poll_population_stream() -> void:
         return
 
     _population_tcp_peer.poll()
-    var available := _population_tcp_peer.get_available_bytes()
+    var available := mini(
+        _population_tcp_peer.get_available_bytes(),
+        POPULATION_STREAM_READ_BYTES_PER_FRAME
+    )
     if available > 0:
         _job_received_event = true
         _population_stream_text_buffer += (
@@ -714,7 +719,11 @@ func _handle_population_stream_message(message: Dictionary) -> void:
                     _population_visual_frames[0],
                     0.0
                 )
-            elif not _population_visual_active:
+            elif (
+                not _population_visual_active
+                and _population_visual_frames.size()
+                    >= POPULATION_VISUAL_START_BUFFER_FRAMES
+            ):
                 _population_visual_clock = 0.0
                 _population_visual_frame_index = 0
                 _population_visual_active = true
@@ -728,7 +737,13 @@ func _handle_population_stream_message(message: Dictionary) -> void:
                 )
 
         "population_visual_end":
-            pass
+            if (
+                not _population_visual_active
+                and _population_visual_frames.size() >= 2
+            ):
+                _population_visual_clock = 0.0
+                _population_visual_frame_index = 0
+                _population_visual_active = true
 
 
 func _build_3d_preview() -> void:
@@ -6896,7 +6911,7 @@ func _append_slow_visual_args(args: PackedStringArray) -> void:
     args.append("--slow-visual")
     args.append_array(PackedStringArray([
         "--population-stream-port", str(_population_stream_port),
-        "--visual-sample-hz", "10.0",
+        "--visual-sample-hz", "60.0",
     ]))
 
 
@@ -7153,9 +7168,15 @@ func _update_population_visual(delta: float) -> void:
         _reset_population_visual()
         return
 
+    var latest_value = _population_visual_frames[
+        _population_visual_frames.size() - 1
+    ]
+    if typeof(latest_value) != TYPE_DICTIONARY:
+        return
+    var latest_time := float(latest_value.get("t", 0.0))
     _population_visual_clock = minf(
         _population_visual_clock + delta,
-        _population_visual_duration
+        minf(_population_visual_duration, latest_time)
     )
 
     while _population_visual_frame_index + 1 < _population_visual_frames.size():
@@ -7190,6 +7211,11 @@ func _update_population_visual(delta: float) -> void:
         )
 
     _apply_population_visual_frame_pair(first, second, weight)
+
+    if _population_visual_frame_index > 2:
+        var drop_count := _population_visual_frame_index - 1
+        _population_visual_frames = _population_visual_frames.slice(drop_count)
+        _population_visual_frame_index -= drop_count
 
     if _population_visual_clock >= _population_visual_duration:
         _population_visual_active = false

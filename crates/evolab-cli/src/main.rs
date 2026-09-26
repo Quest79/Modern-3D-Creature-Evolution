@@ -5,6 +5,8 @@ use std::io::{BufWriter, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -391,7 +393,7 @@ enum Command {
         population_stream_port: Option<u16>,
 
         /// Sample rate for slow visual trajectories. The GUI interpolates between samples.
-        #[arg(long, default_value_t = 10.0)]
+        #[arg(long, default_value_t = 60.0)]
         visual_sample_hz: f32,
 
         /// Emit final evolution result as JSON.
@@ -1708,6 +1710,51 @@ fn send_population_stream_message(stream: &mut TcpStream, value: &Value) -> Resu
         .map_err(|err| format!("failed to send RAM population message: {err}"))
 }
 
+enum VisualCreatureMessage {
+    Frame(CreatureSnapshot),
+    Done,
+}
+
+fn compact_visual_bodies(
+    snapshot: Option<&CreatureSnapshot>,
+    creature: &EvaluatedCreature,
+) -> Vec<[f32; 7]> {
+    if let Some(snapshot) = snapshot {
+        return snapshot
+            .bodies
+            .iter()
+            .map(|body| {
+                [
+                    body.position[0],
+                    body.position[1],
+                    body.position[2],
+                    body.rotation_xyzw[0],
+                    body.rotation_xyzw[1],
+                    body.rotation_xyzw[2],
+                    body.rotation_xyzw[3],
+                ]
+            })
+            .collect();
+    }
+
+    creature
+        .genome
+        .segments
+        .iter()
+        .map(|segment| {
+            [
+                segment.initial_position[0],
+                segment.initial_position[1],
+                segment.initial_position[2],
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ]
+        })
+        .collect()
+}
+
 fn stream_population_visualization(
     stream: &mut TcpStream,
     generation: usize,
@@ -1723,97 +1770,112 @@ fn stream_population_visualization(
     }
 
     let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
-
-    let trajectories = population
-        .par_iter()
-        .map(|creature| {
-            let mut frames = Vec::new();
-            let result = CreatureSimulator.run_streaming(
-                &settings.simulation,
-                &creature.genome,
-                sample_every_steps,
-                &mut |snapshot| {
-                    frames.push(snapshot.clone());
-                    Ok(())
-                },
-            );
-            (frames, result.is_err())
-        })
-        .collect::<Vec<_>>();
-
-    let frozen_creatures = trajectories.iter().filter(|(_, failed)| *failed).count();
-    let total_steps = settings.simulation.step_count();
-    let frame_count = 1
-        + total_steps / sample_every_steps
-        + usize::from(!total_steps.is_multiple_of(sample_every_steps));
     let body_count = population
         .iter()
         .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
 
-    for frame_index in 0..frame_count {
-        let step = if frame_index + 1 == frame_count {
-            total_steps
-        } else {
-            frame_index * sample_every_steps
-        };
-        let simulated_seconds = step as f32 * settings.simulation.dt;
-
-        let compact = trajectories
-            .iter()
-            .zip(population.iter())
-            .map(|((trajectory, _failed), creature)| {
-                if trajectory.is_empty() {
-                    return creature
-                        .genome
-                        .segments
-                        .iter()
-                        .map(|segment| {
-                            [
-                                segment.initial_position[0],
-                                segment.initial_position[1],
-                                segment.initial_position[2],
-                                0.0,
-                                0.0,
-                                0.0,
-                                1.0,
-                            ]
-                        })
-                        .collect::<Vec<_>>();
-                }
-
-                let source_index = frame_index.min(trajectory.len() - 1);
-                trajectory[source_index]
-                    .bodies
-                    .iter()
-                    .map(|body| {
-                        [
-                            body.position[0],
-                            body.position[1],
-                            body.position[2],
-                            body.rotation_xyzw[0],
-                            body.rotation_xyzw[1],
-                            body.rotation_xyzw[2],
-                            body.rotation_xyzw[3],
-                        ]
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
-        send_population_stream_message(
-            stream,
-            &json!({
-                "protocol_version": 1,
-                "kind": "population_visual_frame",
-                "generation": generation,
-                "t": simulated_seconds,
-                "creatures": compact,
-            }),
-        )?;
+    let mut senders: Vec<SyncSender<VisualCreatureMessage>> = Vec::with_capacity(population.len());
+    let mut receivers: Vec<Receiver<VisualCreatureMessage>> = Vec::with_capacity(population.len());
+    for _ in population {
+        let (sender, receiver) = sync_channel(2);
+        senders.push(sender);
+        receivers.push(receiver);
     }
 
-    Ok((frame_count, body_count, frozen_creatures))
+    let frozen_creatures = AtomicUsize::new(0);
+    let mut latest_snapshots: Vec<Option<CreatureSnapshot>> = vec![None; population.len()];
+    let mut done = vec![false; population.len()];
+    let mut frame_count = 0usize;
+
+    thread::scope(|scope| -> Result<(), String> {
+        let frozen_counter = &frozen_creatures;
+        let producer_senders = senders;
+        let producer = scope.spawn(move || {
+            population
+                .par_iter()
+                .enumerate()
+                .for_each(|(creature_index, creature)| {
+                    let sender = &producer_senders[creature_index];
+                    let result = CreatureSimulator.run_streaming(
+                        &settings.simulation,
+                        &creature.genome,
+                        sample_every_steps,
+                        &mut |snapshot| {
+                            sender
+                                .send(VisualCreatureMessage::Frame(snapshot.clone()))
+                                .map_err(|_| "population visual receiver closed".to_string())
+                        },
+                    );
+                    if result.is_err() {
+                        frozen_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let _ = sender.send(VisualCreatureMessage::Done);
+                });
+        });
+
+        loop {
+            let mut received_frame = false;
+
+            for creature_index in 0..population.len() {
+                if done[creature_index] {
+                    continue;
+                }
+
+                match receivers[creature_index].recv() {
+                    Ok(VisualCreatureMessage::Frame(snapshot)) => {
+                        latest_snapshots[creature_index] = Some(snapshot);
+                        received_frame = true;
+                    }
+                    Ok(VisualCreatureMessage::Done) | Err(_) => {
+                        done[creature_index] = true;
+                    }
+                }
+            }
+
+            if done.iter().all(|value| *value) && !received_frame {
+                break;
+            }
+            if !received_frame {
+                continue;
+            }
+
+            let simulated_seconds = latest_snapshots
+                .iter()
+                .filter_map(|snapshot| snapshot.as_ref())
+                .map(|snapshot| snapshot.simulated_seconds)
+                .fold(0.0_f32, f32::max);
+
+            let compact = latest_snapshots
+                .iter()
+                .zip(population.iter())
+                .map(|(snapshot, creature)| compact_visual_bodies(snapshot.as_ref(), creature))
+                .collect::<Vec<_>>();
+
+            send_population_stream_message(
+                stream,
+                &json!({
+                    "protocol_version": 1,
+                    "kind": "population_visual_frame",
+                    "generation": generation,
+                    "t": simulated_seconds,
+                    "creatures": compact,
+                }),
+            )?;
+            frame_count += 1;
+        }
+
+        producer
+            .join()
+            .map_err(|_| "population visual worker panicked".to_string())?;
+        Ok(())
+    })?;
+
+    Ok((
+        frame_count,
+        body_count,
+        frozen_creatures.load(Ordering::Relaxed),
+    ))
 }
 
 fn run_experiment(
