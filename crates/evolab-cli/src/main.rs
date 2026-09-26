@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
-    CreatureSnapshot, CreatureVisualSession, EffectiveEvolutionSettings, EvaluatedCreature,
-    EvolutionCheckpoint, EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig,
+    EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint, EvolutionConfig,
+    EvolutionResultsFile, ExperimentFile, FitnessConfig,
     FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
     SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
-    mutate_genome, random_creature, run_cuda_probe_batch,
+    mutate_genome, random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -1519,6 +1519,7 @@ fn run_evolve_inner(
                     summary.generation,
                     visual_population,
                     &summary.effective_settings,
+                    &config.accelerator,
                     request.visual_sample_hz,
                 )?;
 
@@ -1708,181 +1709,52 @@ fn send_population_stream_message(stream: &mut TcpStream, value: &Value) -> Resu
         .map_err(|err| format!("failed to send RAM population message: {err}"))
 }
 
-fn compact_visual_bodies(
-    snapshot: Option<&CreatureSnapshot>,
-    creature: &EvaluatedCreature,
-) -> Vec<[f32; 7]> {
-    if let Some(snapshot) = snapshot {
-        return snapshot
-            .bodies
-            .iter()
-            .map(|body| {
-                [
-                    body.position[0],
-                    body.position[1],
-                    body.position[2],
-                    body.rotation_xyzw[0],
-                    body.rotation_xyzw[1],
-                    body.rotation_xyzw[2],
-                    body.rotation_xyzw[3],
-                ]
-            })
-            .collect();
-    }
-
-    creature
-        .genome
-        .segments
-        .iter()
-        .map(|segment| {
-            [
-                segment.initial_position[0],
-                segment.initial_position[1],
-                segment.initial_position[2],
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-            ]
-        })
-        .collect()
-}
-
-struct VisualCreatureState {
-    session: Option<CreatureVisualSession>,
-    snapshot: CreatureSnapshot,
-    chunk_frames: Vec<CreatureSnapshot>,
-    frozen: bool,
-}
-
 fn stream_population_visualization(
     stream: &mut TcpStream,
     generation: usize,
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
+    accelerator: &AcceleratorConfig,
     sample_hz: f32,
 ) -> Result<(usize, usize, usize), String> {
     if population.is_empty() {
         return Err("cannot visualize an empty population".into());
     }
-    if !sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0 {
-        return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
-    }
 
-    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
-    let body_count = population
+    let genomes = population
         .iter()
-        .map(|creature| creature.genome.segments.len())
+        .map(|creature| creature.genome.clone())
+        .collect::<Vec<_>>();
+    let body_count = genomes
+        .iter()
+        .map(|genome| genome.segments.len())
         .sum::<usize>();
 
-    let mut states = population
-        .par_iter()
-        .map(|creature| {
-            let session = CreatureVisualSession::new(&settings.simulation, &creature.genome)?;
-            let snapshot = session.snapshot()?;
-            Ok::<VisualCreatureState, String>(VisualCreatureState {
-                session: Some(session),
-                snapshot,
-                chunk_frames: Vec::new(),
-                frozen: false,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let visual = run_cuda_creature_visual_batch(
+        &genomes,
+        &settings.simulation,
+        accelerator,
+        sample_hz,
+    )?;
 
-    const VISUAL_CHUNK_SAMPLES: usize = 12;
-    let mut frame_count = 0usize;
-
-    loop {
-        let any_running = states.iter().any(|state| {
-            state
-                .session
-                .as_ref()
-                .is_some_and(|session| !session.is_complete())
-        });
-        if !any_running {
-            break;
-        }
-
-        states.par_iter_mut().for_each(|state| {
-            state.chunk_frames.clear();
-
-            for _ in 0..VISUAL_CHUNK_SAMPLES {
-                let Some(session) = state.session.as_mut() else {
-                    break;
-                };
-                if session.is_complete() {
-                    state.session = None;
-                    break;
-                }
-
-                match session.advance_steps(sample_every_steps) {
-                    Ok(snapshot) => {
-                        state.snapshot = snapshot.clone();
-                        state.chunk_frames.push(snapshot);
-                        if session.is_complete() {
-                            state.session = None;
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        state.frozen = true;
-                        state.session = None;
-                        break;
-                    }
-                }
-            }
-        });
-
-        let chunk_frame_count = states
-            .iter()
-            .map(|state| state.chunk_frames.len())
-            .max()
-            .unwrap_or(0);
-        if chunk_frame_count == 0 {
-            break;
-        }
-
-        for chunk_frame_index in 0..chunk_frame_count {
-            let simulated_seconds = states
-                .iter()
-                .map(|state| {
-                    state
-                        .chunk_frames
-                        .get(chunk_frame_index)
-                        .unwrap_or(&state.snapshot)
-                        .simulated_seconds
-                })
-                .fold(0.0_f32, f32::max);
-
-            let compact = states
-                .iter()
-                .zip(population.iter())
-                .map(|(state, creature)| {
-                    let snapshot = state
-                        .chunk_frames
-                        .get(chunk_frame_index)
-                        .unwrap_or(&state.snapshot);
-                    compact_visual_bodies(Some(snapshot), creature)
-                })
-                .collect::<Vec<_>>();
-
-            send_population_stream_message(
-                stream,
-                &json!({
-                    "protocol_version": 1,
-                    "kind": "population_visual_frame",
-                    "generation": generation,
-                    "t": simulated_seconds,
-                    "creatures": compact,
-                }),
-            )?;
-            frame_count += 1;
-        }
+    for frame in &visual.frames {
+        send_population_stream_message(
+            stream,
+            &json!({
+                "protocol_version": 1,
+                "kind": "population_visual_frame",
+                "generation": generation,
+                "t": frame.simulated_seconds,
+                "creatures": frame.creatures,
+            }),
+        )?;
     }
 
-    let frozen_creatures = states.iter().filter(|state| state.frozen).count();
-
-    Ok((frame_count, body_count, frozen_creatures))
+    Ok((
+        visual.frames.len(),
+        body_count,
+        visual.unstable.iter().filter(|value| **value).count(),
+    ))
 }
 
 fn run_experiment(
