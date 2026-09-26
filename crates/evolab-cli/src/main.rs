@@ -2,8 +2,8 @@
 
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::net::{TcpStream, UdpSocket};
-use std::path::PathBuf;
+use std::net::UdpSocket;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -378,7 +378,7 @@ enum Command {
         #[arg(long, default_value_t = false)]
         preview_only: bool,
 
-        /// Optional file export for --preview-only. The GUI uses the RAM stream instead.
+        /// JSON file written by --preview-only.
         #[arg(long)]
         preview_output: Option<PathBuf>,
 
@@ -386,9 +386,9 @@ enum Command {
         #[arg(long, default_value_t = false)]
         slow_visual: bool,
 
-        /// Local TCP port used for RAM-only population preview/visual transport.
+        /// JSON trajectory file used by --slow-visual. Rewritten once per generation.
         #[arg(long)]
-        population_stream_port: Option<u16>,
+        visual_output: Option<PathBuf>,
 
         /// Sample rate for slow visual trajectories. The GUI interpolates between samples.
         #[arg(long, default_value_t = 10.0)]
@@ -594,7 +594,7 @@ fn run() -> Result<(), String> {
             preview_only,
             preview_output,
             slow_visual,
-            population_stream_port,
+            visual_output,
             visual_sample_hz,
             json,
         } => run_evolve(EvolveRequest {
@@ -644,7 +644,7 @@ fn run() -> Result<(), String> {
             preview_only,
             preview_output: preview_output.as_ref(),
             slow_visual,
-            population_stream_port,
+            visual_output: visual_output.as_ref(),
             visual_sample_hz,
             json_output: json,
         }),
@@ -1248,29 +1248,14 @@ struct EvolveRequest<'a> {
     preview_only: bool,
     preview_output: Option<&'a PathBuf>,
     slow_visual: bool,
-    population_stream_port: Option<u16>,
+    visual_output: Option<&'a PathBuf>,
     visual_sample_hz: f32,
     json_output: bool,
 }
 
 fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
     let socket = make_event_socket(request.event_host, request.event_port)?;
-    let mut population_stream = match request.population_stream_port {
-        Some(port) => {
-            let stream = TcpStream::connect((request.event_host, port)).map_err(|err| {
-                format!(
-                    "failed to connect RAM population stream {}:{}: {err}",
-                    request.event_host, port
-                )
-            })?;
-            stream
-                .set_nodelay(true)
-                .map_err(|err| format!("failed to configure RAM population stream: {err}"))?;
-            Some(stream)
-        }
-        None => None,
-    };
-    let result = run_evolve_inner(&request, socket.as_ref(), population_stream.as_mut());
+    let result = run_evolve_inner(&request, socket.as_ref());
 
     if let Err(err) = &result
         && let Some(socket) = socket.as_ref()
@@ -1288,11 +1273,7 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
     result
 }
 
-fn run_evolve_inner(
-    request: &EvolveRequest<'_>,
-    socket: Option<&UdpSocket>,
-    mut population_stream: Option<&mut TcpStream>,
-) -> Result<(), String> {
+fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> Result<(), String> {
     let mutation_config = MutationConfig {
         max_segments: request.max_segments.max(2),
         structural_mutation_chance: request.structural_mutation_chance,
@@ -1378,37 +1359,27 @@ fn run_evolve_inner(
     config.validate()?;
 
     if request.preview_only {
+        let preview_path = request
+            .preview_output
+            .ok_or_else(|| "--preview-only requires --preview-output".to_string())?;
+        let population = generate_initial_population_preview(&ancestor, &config)?;
+        let preview_json = serde_json::to_string_pretty(&population)
+            .map_err(|err| format!("failed to serialize population preview: {err}"))?;
+        fs::write(preview_path, preview_json).map_err(|err| {
+            format!(
+                "failed to write population preview {}: {err}",
+                preview_path.display()
+            )
+        })?;
+
         if let Some(socket) = socket {
             send_event(
                 socket,
                 &json!({
                     "protocol_version": 1,
-                    "kind": "population_preview_started",
-                    "population": config.population_size,
-                }),
-            );
-        }
-
-        let population = generate_initial_population_preview(&ancestor, &config)?;
-
-        if let Some(preview_path) = request.preview_output {
-            let preview_json = serde_json::to_string_pretty(&population)
-                .map_err(|err| format!("failed to serialize population preview: {err}"))?;
-            fs::write(preview_path, preview_json).map_err(|err| {
-                format!(
-                    "failed to write population preview {}: {err}",
-                    preview_path.display()
-                )
-            })?;
-        }
-
-        if let Some(stream) = population_stream.as_deref_mut() {
-            send_population_stream_message(
-                stream,
-                &json!({
-                    "protocol_version": 1,
-                    "kind": "population_preview",
-                    "genomes": population,
+                    "kind": "population_preview_ready",
+                    "population": population.len(),
+                    "preview_file": preview_path.to_string_lossy().to_string(),
                     "champion_index": if config.seed_population_from_ancestor {
                         0_i64
                     } else {
@@ -1418,10 +1389,6 @@ fn run_evolve_inner(
                     "world": config.simulation.world,
                     "world_geometry": config.simulation.world.geometry(),
                 }),
-            )?;
-        } else if request.preview_output.is_none() {
-            return Err(
-                "--preview-only requires --population-stream-port or --preview-output".into(),
             );
         }
         return Ok(());
@@ -1490,50 +1457,45 @@ fn run_evolve_inner(
         request.checkpoint_output.is_some(),
         |summary, visual_population| {
             if request.slow_visual {
-                let stream = population_stream
-                    .as_deref_mut()
-                    .ok_or_else(|| "--slow-visual requires --population-stream-port".to_string())?;
-
-                send_population_stream_message(
-                    stream,
-                    &json!({
-                        "protocol_version": 1,
-                        "kind": "population_visual_begin",
-                        "generation": summary.generation,
-                        "generations": config.generations,
-                        "genomes": visual_population
-                            .iter()
-                            .map(|candidate| &candidate.genome)
-                            .collect::<Vec<_>>(),
-                        "population": visual_population.len(),
-                        "duration_seconds":
-                            summary.effective_settings.simulation.duration_seconds,
-                        "sample_hz": request.visual_sample_hz,
-                        "world_geometry":
-                            summary.effective_settings.simulation.world.geometry(),
-                    }),
-                )?;
-
-                let (frame_count, body_count, frozen_creatures) = stream_population_visualization(
-                    stream,
+                let visual_path = request
+                    .visual_output
+                    .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
+                let (frame_count, body_count, frozen_creatures) = write_population_visualization(
+                    visual_path,
                     summary.generation,
                     visual_population,
                     &summary.effective_settings,
                     request.visual_sample_hz,
                 )?;
-
-                send_population_stream_message(
-                    stream,
-                    &json!({
-                        "protocol_version": 1,
-                        "kind": "population_visual_end",
-                        "generation": summary.generation,
-                        "frames": frame_count,
-                        "bodies": body_count,
-                        "frozen_creatures": frozen_creatures,
-                    }),
-                )?;
-
+                let generation_best_index = visual_population
+                    .iter()
+                    .position(|candidate| candidate.individual_id == summary.champion_id)
+                    .unwrap_or(0);
+                if let Some(socket) = socket {
+                    send_event(
+                        socket,
+                        &json!({
+                            "protocol_version": 1,
+                            "kind": "population_visual_ready",
+                            "generation": summary.generation,
+                            "generations": config.generations,
+                            "visual_file": visual_path.display().to_string(),
+                            "population": visual_population.len(),
+                            "frames": frame_count,
+                            "bodies": body_count,
+                            "frozen_creatures": frozen_creatures,
+                            "generation_best_index": generation_best_index,
+                            "generation_best_id": summary.champion_id,
+                            "generation_best_fitness": summary.best_fitness,
+                            "generation_best_distance": summary.best_metrics.distance,
+                            "duration_seconds":
+                                summary.effective_settings.simulation.duration_seconds,
+                            "sample_hz": request.visual_sample_hz,
+                            "world_geometry":
+                                summary.effective_settings.simulation.world.geometry(),
+                        }),
+                    );
+                }
                 thread::sleep(Duration::from_secs_f32(
                     summary
                         .effective_settings
@@ -1699,17 +1661,8 @@ fn run_evolve_inner(
     Ok(())
 }
 
-fn send_population_stream_message(stream: &mut TcpStream, value: &Value) -> Result<(), String> {
-    serde_json::to_writer(&mut *stream, value)
-        .map_err(|err| format!("failed to serialize RAM population message: {err}"))?;
-    stream
-        .write_all(b"\n")
-        .and_then(|_| stream.flush())
-        .map_err(|err| format!("failed to send RAM population message: {err}"))
-}
-
-fn stream_population_visualization(
-    stream: &mut TcpStream,
+fn write_population_visualization(
+    path: &Path,
     generation: usize,
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
@@ -1746,18 +1699,52 @@ fn stream_population_visualization(
     let frame_count = 1
         + total_steps / sample_every_steps
         + usize::from(!total_steps.is_multiple_of(sample_every_steps));
+
     let body_count = population
         .iter()
         .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
 
+    let file = fs::File::create(path)
+        .map_err(|err| format!("failed to create visual file {}: {err}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+
+    write!(
+        writer,
+        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"genomes\":[",
+        generation, sample_hz, settings.simulation.duration_seconds
+    )
+    .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+
+    for (index, creature) in population.iter().enumerate() {
+        if index > 0 {
+            writer
+                .write_all(b",")
+                .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+        }
+        serde_json::to_writer(&mut writer, &creature.genome)
+            .map_err(|err| format!("failed to serialize visual genome: {err}"))?;
+    }
+
+    writer
+        .write_all(b"],\"frames\":[")
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+
     for frame_index in 0..frame_count {
+        if frame_index > 0 {
+            writer
+                .write_all(b",")
+                .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+        }
+
         let step = if frame_index + 1 == frame_count {
             total_steps
         } else {
             frame_index * sample_every_steps
         };
         let simulated_seconds = step as f32 * settings.simulation.dt;
+        write!(writer, "{{\"t\":{},\"creatures\":", simulated_seconds)
+            .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
         let compact = trajectories
             .iter()
@@ -1801,17 +1788,17 @@ fn stream_population_visualization(
             })
             .collect::<Vec<_>>();
 
-        send_population_stream_message(
-            stream,
-            &json!({
-                "protocol_version": 1,
-                "kind": "population_visual_frame",
-                "generation": generation,
-                "t": simulated_seconds,
-                "creatures": compact,
-            }),
-        )?;
+        serde_json::to_writer(&mut writer, &compact)
+            .map_err(|err| format!("failed to serialize population visual frame: {err}"))?;
+        writer
+            .write_all(b"}")
+            .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
     }
+
+    writer
+        .write_all(b"]}")
+        .and_then(|_| writer.flush())
+        .map_err(|err| format!("failed to finalize visual file {}: {err}", path.display()))?;
 
     Ok((frame_count, body_count, frozen_creatures))
 }
