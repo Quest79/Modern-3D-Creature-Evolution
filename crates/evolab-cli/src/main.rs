@@ -1750,7 +1750,10 @@ fn population_visual_slot_path(base: &Path, generation: usize) -> PathBuf {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("population_visual");
-    let extension = base.extension().and_then(|value| value.to_str()).unwrap_or("json");
+    let extension = base
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
     base.with_file_name(format!("{stem}.slot{slot}.{extension}"))
 }
 
