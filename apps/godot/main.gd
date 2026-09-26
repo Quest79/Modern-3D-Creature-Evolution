@@ -163,6 +163,7 @@ var _population_layout_spacing := 0.0
 var _population_preview_sizes: Array = []
 var _population_preview_creature_ranges: Array = []
 var _population_visual_frames: Array = []
+var _population_visual_root_starts: Array = []
 var _population_visual_active := false
 var _population_visual_clock := 0.0
 var _population_visual_duration := 0.0
@@ -170,8 +171,6 @@ var _population_visual_generation := 0
 var _population_visual_frame_index := 0
 var _population_best_marker: Label
 var _population_best_index := -1
-var _population_best_id := -1
-var _population_best_fitness := 0.0
 var _population_best_distance := 0.0
 var _pending_evolution_args := PackedStringArray()
 var _pending_evolution_label := ""
@@ -6226,19 +6225,11 @@ func _handle_event(event: Dictionary) -> void:
                 _set_status("Slow visual mode received an invalid trajectory.")
                 return
 
-            var generation_best_index := int(
-                event.get("generation_best_index", -1)
-            )
             _build_world_from_geometry(event.get("world_geometry", []))
-            _show_population_preview(visual_genomes, generation_best_index)
-            _population_best_index = generation_best_index
-            _population_best_id = int(event.get("generation_best_id", -1))
-            _population_best_fitness = float(
-                event.get("generation_best_fitness", 0.0)
-            )
-            _population_best_distance = float(
-                event.get("generation_best_distance", 0.0)
-            )
+            _show_population_preview(visual_genomes, -1)
+            _capture_population_visual_root_starts(visual_genomes)
+            _population_best_index = -1
+            _population_best_distance = 0.0
             _ensure_population_best_marker()
             _population_visual_frames = visual_frames
             _population_visual_clock = 0.0
@@ -6249,7 +6240,6 @@ func _handle_event(event: Dictionary) -> void:
                 )
             )
             _population_visual_generation = int(event.get("generation", 0))
-            _update_population_best_marker_text()
             _population_visual_frame_index = 0
             _population_visual_active = not _population_visual_frames.is_empty()
             if _population_visual_active:
@@ -7057,16 +7047,36 @@ func _load_population_visual_file(path: String) -> Dictionary:
     return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
+func _capture_population_visual_root_starts(genomes: Array) -> void:
+    _population_visual_root_starts.clear()
+    for genome_value in genomes:
+        var start := Vector3.ZERO
+        if typeof(genome_value) == TYPE_DICTIONARY:
+            var genome: Dictionary = genome_value
+            var segments = genome.get("segments", [])
+            if typeof(segments) == TYPE_ARRAY and not segments.is_empty():
+                var root_value = segments[0]
+                if typeof(root_value) == TYPE_DICTIONARY:
+                    var root: Dictionary = root_value
+                    var initial = root.get("initial_position", [0.0, 0.0, 0.0])
+                    if typeof(initial) == TYPE_ARRAY and initial.size() >= 3:
+                        start = Vector3(
+                            float(initial[0]),
+                            float(initial[1]),
+                            float(initial[2])
+                        )
+        _population_visual_root_starts.append(start)
+
+
 func _reset_population_visual() -> void:
     _population_visual_frames.clear()
+    _population_visual_root_starts.clear()
     _population_visual_active = false
     _population_visual_clock = 0.0
     _population_visual_duration = 0.0
     _population_visual_generation = 0
     _population_visual_frame_index = 0
     _population_best_index = -1
-    _population_best_id = -1
-    _population_best_fitness = 0.0
     _population_best_distance = 0.0
     if is_instance_valid(_population_best_marker):
         _population_best_marker.visible = false
@@ -7139,6 +7149,8 @@ func _apply_population_visual_frame_pair(
         mini(first_creatures.size(), second_creatures.size()),
         _population_preview_offsets.size()
     )
+    var live_best_index := -1
+    var live_best_distance := -1.0
 
     for creature_index in range(creature_count):
         var first_bodies = first_creatures[creature_index]
@@ -7158,6 +7170,43 @@ func _apply_population_visual_frame_pair(
             end_index - start_index
         )
         var offset: Vector3 = _population_preview_offsets[creature_index]
+
+        if (
+            not first_bodies.is_empty()
+            and not second_bodies.is_empty()
+            and creature_index < _population_visual_root_starts.size()
+        ):
+            var first_root = first_bodies[0]
+            var second_root = second_bodies[0]
+            if (
+                typeof(first_root) == TYPE_ARRAY
+                and typeof(second_root) == TYPE_ARRAY
+                and first_root.size() >= 3
+                and second_root.size() >= 3
+            ):
+                var first_root_position := Vector3(
+                    float(first_root[0]),
+                    float(first_root[1]),
+                    float(first_root[2])
+                )
+                var second_root_position := Vector3(
+                    float(second_root[0]),
+                    float(second_root[1]),
+                    float(second_root[2])
+                )
+                var current_root := first_root_position.lerp(
+                    second_root_position,
+                    weight
+                )
+                var start_root: Vector3 = (
+                    _population_visual_root_starts[creature_index]
+                )
+                var dx := current_root.x - start_root.x
+                var dz := current_root.z - start_root.z
+                var live_distance := sqrt(dx * dx + dz * dz)
+                if live_distance > live_best_distance:
+                    live_best_distance = live_distance
+                    live_best_index = creature_index
 
         for body_index in range(body_count):
             var first_body = first_bodies[body_index]
@@ -7205,6 +7254,9 @@ func _apply_population_visual_frame_pair(
                 Transform3D(Basis(rotation).scaled(size), position)
             )
 
+    _population_best_index = live_best_index
+    _population_best_distance = maxf(0.0, live_best_distance)
+    _update_population_best_marker_text()
     _update_population_best_marker(first_creatures, second_creatures, weight)
 
 
@@ -7238,12 +7290,13 @@ func _update_population_best_marker_text() -> void:
         return
 
     _population_best_marker.text = (
-        "GEN %d BEST  •  #%s\nFitness %.4f  •  Distance %.2f m\n▼"
+        "GEN %d LIVE FURTHEST  •  Creature %d\nDistance %.2f m  •  %.1f / %.1f s\n▼"
         % [
             _population_visual_generation,
-            str(_population_best_id),
-            _population_best_fitness,
+            _population_best_index + 1,
             _population_best_distance,
+            _population_visual_clock,
+            _population_visual_duration,
         ]
     )
 
