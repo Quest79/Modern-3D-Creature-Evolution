@@ -814,7 +814,9 @@ func _build_ui() -> void:
     column.add_child(header_row)
 
     _title_label = Label.new()
-    _title_label.text = "Modern 3D Creature Evolution • v%s" % str(\n        ProjectSettings.get_setting("application/config/version", "0.0.0")\n    )
+    _title_label.text = "Modern 3D Creature Evolution • v%s" % str(
+        ProjectSettings.get_setting("application/config/version", "0.0.0")
+    )
     _title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     header_row.add_child(_title_label)
 
