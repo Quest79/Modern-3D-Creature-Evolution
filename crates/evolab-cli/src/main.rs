@@ -5,15 +5,14 @@ use std::io::{BufWriter, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
-    CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
+    CreatureSnapshot, CreatureVisualSession, EffectiveEvolutionSettings, EvaluatedCreature,
+    EvolutionCheckpoint,
     EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights,
     GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
     ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
@@ -1710,11 +1709,6 @@ fn send_population_stream_message(stream: &mut TcpStream, value: &Value) -> Resu
         .map_err(|err| format!("failed to send RAM population message: {err}"))
 }
 
-enum VisualCreatureMessage {
-    Frame(CreatureSnapshot),
-    Done,
-}
-
 fn compact_visual_bodies(
     snapshot: Option<&CreatureSnapshot>,
     creature: &EvaluatedCreature,
@@ -1755,6 +1749,12 @@ fn compact_visual_bodies(
         .collect()
 }
 
+struct VisualCreatureState {
+    session: Option<CreatureVisualSession>,
+    snapshot: CreatureSnapshot,
+    frozen: bool,
+}
+
 fn stream_population_visualization(
     stream: &mut TcpStream,
     generation: usize,
@@ -1769,113 +1769,89 @@ fn stream_population_visualization(
         return Err("visual sample rate must be greater than 0 and at most 60 Hz".into());
     }
 
-    let sample_every_steps = ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
+    let sample_every_steps =
+        ((1.0 / (settings.simulation.dt * sample_hz)).round() as usize).max(1);
     let body_count = population
         .iter()
         .map(|creature| creature.genome.segments.len())
         .sum::<usize>();
 
-    let mut senders: Vec<SyncSender<VisualCreatureMessage>> = Vec::with_capacity(population.len());
-    let mut receivers: Vec<Receiver<VisualCreatureMessage>> = Vec::with_capacity(population.len());
-    for _ in population {
-        let (sender, receiver) = sync_channel(2);
-        senders.push(sender);
-        receivers.push(receiver);
-    }
+    let mut states = population
+        .par_iter()
+        .map(|creature| {
+            let session = CreatureVisualSession::new(&settings.simulation, &creature.genome)?;
+            let snapshot = session.snapshot()?;
+            Ok::<VisualCreatureState, String>(VisualCreatureState {
+                session: Some(session),
+                snapshot,
+                frozen: false,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let frozen_creatures = AtomicUsize::new(0);
-    let mut latest_snapshots: Vec<Option<CreatureSnapshot>> = vec![None; population.len()];
-    let mut done = vec![false; population.len()];
     let mut frame_count = 0usize;
 
-    thread::scope(|scope| -> Result<(), String> {
-        let frozen_counter = &frozen_creatures;
-        let producer_senders = senders;
-        let producer = scope.spawn(move || {
-            population
-                .par_iter()
-                .enumerate()
-                .for_each(|(creature_index, creature)| {
-                    let sender = &producer_senders[creature_index];
-                    let result = CreatureSimulator.run_streaming(
-                        &settings.simulation,
-                        &creature.genome,
-                        sample_every_steps,
-                        &mut |snapshot| {
-                            sender
-                                .send(VisualCreatureMessage::Frame(snapshot.clone()))
-                                .map_err(|_| "population visual receiver closed".to_string())
-                        },
-                    );
-                    if result.is_err() {
-                        frozen_counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                    let _ = sender.send(VisualCreatureMessage::Done);
-                });
+    loop {
+        let any_running = states.iter().any(|state| {
+            state
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.is_complete())
         });
-
-        loop {
-            let mut received_frame = false;
-
-            for creature_index in 0..population.len() {
-                if done[creature_index] {
-                    continue;
-                }
-
-                match receivers[creature_index].recv() {
-                    Ok(VisualCreatureMessage::Frame(snapshot)) => {
-                        latest_snapshots[creature_index] = Some(snapshot);
-                        received_frame = true;
-                    }
-                    Ok(VisualCreatureMessage::Done) | Err(_) => {
-                        done[creature_index] = true;
-                    }
-                }
-            }
-
-            if done.iter().all(|value| *value) && !received_frame {
-                break;
-            }
-            if !received_frame {
-                continue;
-            }
-
-            let simulated_seconds = latest_snapshots
-                .iter()
-                .filter_map(|snapshot| snapshot.as_ref())
-                .map(|snapshot| snapshot.simulated_seconds)
-                .fold(0.0_f32, f32::max);
-
-            let compact = latest_snapshots
-                .iter()
-                .zip(population.iter())
-                .map(|(snapshot, creature)| compact_visual_bodies(snapshot.as_ref(), creature))
-                .collect::<Vec<_>>();
-
-            send_population_stream_message(
-                stream,
-                &json!({
-                    "protocol_version": 1,
-                    "kind": "population_visual_frame",
-                    "generation": generation,
-                    "t": simulated_seconds,
-                    "creatures": compact,
-                }),
-            )?;
-            frame_count += 1;
+        if !any_running {
+            break;
         }
 
-        producer
-            .join()
-            .map_err(|_| "population visual worker panicked".to_string())?;
-        Ok(())
-    })?;
+        states.par_iter_mut().for_each(|state| {
+            let Some(session) = state.session.as_mut() else {
+                return;
+            };
+            if session.is_complete() {
+                state.session = None;
+                return;
+            }
 
-    Ok((
-        frame_count,
-        body_count,
-        frozen_creatures.load(Ordering::Relaxed),
-    ))
+            match session.advance_steps(sample_every_steps) {
+                Ok(snapshot) => {
+                    state.snapshot = snapshot;
+                    if session.is_complete() {
+                        state.session = None;
+                    }
+                }
+                Err(_) => {
+                    state.frozen = true;
+                    state.session = None;
+                }
+            }
+        });
+
+        let simulated_seconds = states
+            .iter()
+            .map(|state| state.snapshot.simulated_seconds)
+            .fold(0.0_f32, f32::max);
+
+        let compact = states
+            .iter()
+            .zip(population.iter())
+            .map(|(state, creature)| compact_visual_bodies(Some(&state.snapshot), creature))
+            .collect::<Vec<_>>();
+
+        send_population_stream_message(
+            stream,
+            &json!({
+                "protocol_version": 1,
+                "kind": "population_visual_frame",
+                "generation": generation,
+                "t": simulated_seconds,
+                "creatures": compact,
+            }),
+        )?;
+        frame_count += 1;
+    }
+
+    let frozen_creatures = states.iter().filter(|state| state.frozen).count();
+
+    Ok((frame_count, body_count, frozen_creatures))
 }
 
 fn run_experiment(
