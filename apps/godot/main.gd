@@ -8,6 +8,7 @@ const PORTABLE_SAVES_DIR_NAME := "saves"
 const PORTABLE_CHAMPIONS_DIR_NAME := "champions"
 const PORTABLE_EXPERIMENTS_DIR_NAME := "experiments"
 const PORTABLE_BENCHMARKS_DIR_NAME := "benchmarks"
+const HANDOFF_PROFILE_FILE_NAME := "generation_handoff_profile.jsonl"
 const DEFAULT_HUD_WIDTH := 400.0
 const MIN_HUD_WIDTH := 160.0
 const MAX_HUD_WIDTH := 400.0
@@ -169,6 +170,12 @@ var _population_visual_clock := 0.0
 var _population_visual_duration := 0.0
 var _population_visual_generation := 0
 var _population_visual_frame_index := 0
+var _handoff_profile_records: Array[Dictionary] = []
+var _handoff_profile_pending_record: Dictionary = {}
+var _handoff_profile_last_file_read_ms := 0.0
+var _handoff_profile_last_json_parse_ms := 0.0
+var _handoff_profile_last_file_bytes := 0
+var _handoff_profile_last_preview_timing: Dictionary = {}
 var _population_best_marker: Label
 var _population_best_index := -1
 var _population_best_distance := 0.0
@@ -333,6 +340,13 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+    if not _handoff_profile_pending_record.is_empty():
+        var completed_record := _handoff_profile_pending_record.duplicate(true)
+        completed_record["frame_spike_ms"] = delta * 1000.0
+        _handoff_profile_records.append(completed_record)
+        _handoff_profile_append(completed_record)
+        _handoff_profile_pending_record = {}
+
     _update_camera_movement(delta)
     _update_camera_zoom(delta)
     _update_population_visual(delta)
@@ -520,6 +534,119 @@ func _portable_benchmarks_dir() -> String:
 
 func _runtime_path(file_name: String) -> String:
     return _portable_runtime_dir().path_join(file_name)
+
+
+func _handoff_profile_path() -> String:
+    return _portable_data_root().path_join(HANDOFF_PROFILE_FILE_NAME)
+
+
+func _handoff_profile_append(record: Dictionary) -> void:
+    var path := _handoff_profile_path()
+    var file := FileAccess.open(path, FileAccess.READ_WRITE)
+    if file == null:
+        file = FileAccess.open(path, FileAccess.WRITE)
+    if file == null:
+        return
+    file.seek_end()
+    file.store_line(JSON.stringify(record))
+    file.close()
+
+
+func _handoff_profile_reset() -> void:
+    _handoff_profile_records.clear()
+    _handoff_profile_pending_record = {}
+    _handoff_profile_last_file_read_ms = 0.0
+    _handoff_profile_last_json_parse_ms = 0.0
+    _handoff_profile_last_file_bytes = 0
+    _handoff_profile_last_preview_timing = {}
+
+    var file := FileAccess.open(_handoff_profile_path(), FileAccess.WRITE)
+    if file == null:
+        return
+    file.store_line(
+        JSON.stringify(
+            {
+                "type": "meta",
+                "format": 1,
+                "created_unix": Time.get_unix_time_from_system(),
+                "app_version": str(
+                    ProjectSettings.get_setting(
+                        "application/config/version",
+                        "0.1.0"
+                    )
+                ),
+                "commit": _git_short_revision(),
+            }
+        )
+    )
+    file.close()
+
+
+func _handoff_profile_stats(key: String) -> Dictionary:
+    var values: Array = []
+    var total := 0.0
+    for record in _handoff_profile_records:
+        if not record.has(key):
+            continue
+        var value := float(record[key])
+        values.append(value)
+        total += value
+    if values.is_empty():
+        return {}
+
+    values.sort()
+    var count := values.size()
+    var median := 0.0
+    if count % 2 == 1:
+        median = float(values[int(count / 2)])
+    else:
+        median = (
+            float(values[int(count / 2) - 1])
+            + float(values[int(count / 2)])
+        ) * 0.5
+    var p95_index := clampi(
+        int(ceil(float(count) * 0.95)) - 1,
+        0,
+        count - 1
+    )
+    return {
+        "avg": total / float(count),
+        "median": median,
+        "p95": float(values[p95_index]),
+        "worst": float(values[count - 1]),
+    }
+
+
+func _handoff_profile_finish() -> void:
+    if not _handoff_profile_pending_record.is_empty():
+        var pending := _handoff_profile_pending_record.duplicate(true)
+        pending["frame_spike_ms"] = 0.0
+        _handoff_profile_records.append(pending)
+        _handoff_profile_append(pending)
+        _handoff_profile_pending_record = {}
+
+    var metric_keys := [
+        "handoff_total_ms",
+        "visual_replay_ms",
+        "visual_serialize_write_flush_ms",
+        "godot_file_read_ms",
+        "godot_json_parse_ms",
+        "godot_preview_total_ms",
+        "godot_multimesh_fill_ms",
+        "godot_handler_total_ms",
+        "frame_spike_ms",
+    ]
+    var metrics := {}
+    for key in metric_keys:
+        metrics[key] = _handoff_profile_stats(key)
+
+    _handoff_profile_append(
+        {
+            "type": "summary",
+            "generations_profiled": _handoff_profile_records.size(),
+            "metrics": metrics,
+        }
+    )
 
 
 func _settings_path() -> String:
@@ -4108,6 +4235,7 @@ func _start_evolution_run(continue_current: bool) -> void:
         _set_status("Elite kept must be smaller than population.")
         return
 
+    _handoff_profile_reset()
     _reset_population_layout()
     _probe_mesh.visible = false
     _progress_bar.value = 0
@@ -6213,6 +6341,7 @@ func _handle_event(event: Dictionary) -> void:
             _finish_job_controls()
 
         "population_visual_ready":
+            var handler_started := Time.get_ticks_usec()
             var visual_file := str(event.get("visual_file", ""))
             var visual_data := _load_population_visual_file(visual_file)
             if visual_data.is_empty():
@@ -6225,8 +6354,15 @@ func _handle_event(event: Dictionary) -> void:
                 _set_status("Slow visual mode received an invalid trajectory.")
                 return
 
+            var world_started := Time.get_ticks_usec()
             _build_world_from_geometry(event.get("world_geometry", []))
+            var world_build_ms := (
+                float(Time.get_ticks_usec() - world_started) / 1000.0
+            )
+
             _show_population_preview(visual_genomes, -1)
+
+            var visual_setup_started := Time.get_ticks_usec()
             _capture_population_visual_root_starts(visual_genomes)
             _population_best_index = -1
             _population_best_distance = 0.0
@@ -6248,6 +6384,10 @@ func _handle_event(event: Dictionary) -> void:
                     _population_visual_frames[0],
                     0.0
                 )
+            var visual_setup_ms := (
+                float(Time.get_ticks_usec() - visual_setup_started) / 1000.0
+            )
+
             _set_status(
                 "Slow visual • Generation %d / %d • %s creatures • %.1f s real-time test"
                 % [
@@ -6257,6 +6397,95 @@ func _handle_event(event: Dictionary) -> void:
                     _population_visual_duration,
                 ]
             )
+
+            var handler_total_ms := (
+                float(Time.get_ticks_usec() - handler_started) / 1000.0
+            )
+            var backend_profile_value = event.get("handoff_profile", {})
+            var backend_profile: Dictionary = {}
+            if typeof(backend_profile_value) == TYPE_DICTIONARY:
+                backend_profile = backend_profile_value
+
+            var preview_profile := _handoff_profile_last_preview_timing
+            var backend_visual_total_ms := float(
+                backend_profile.get("visual_prepare_total_ms", 0.0)
+            )
+            _handoff_profile_pending_record = {
+                "type": "generation",
+                "generation": _population_visual_generation,
+                "population": int(event.get("population", 0)),
+                "segments": int(preview_profile.get("segments", event.get("bodies", 0))),
+                "frames": int(event.get("frames", 0)),
+                "sample_hz": float(event.get("sample_hz", 0.0)),
+                "duration_seconds": _population_visual_duration,
+                "generation_wall_ms": float(
+                    backend_profile.get("generation_wall_ms", 0.0)
+                ),
+                "evaluation_ms": float(
+                    backend_profile.get("evaluation_ms", 0.0)
+                ),
+                "cuda_eval_wall_ms": float(
+                    backend_profile.get("cuda_eval_wall_ms", 0.0)
+                ),
+                "cuda_kernel_ms": float(
+                    backend_profile.get("cuda_kernel_ms", 0.0)
+                ),
+                "cuda_host_packing_ms": float(
+                    backend_profile.get("cuda_host_packing_ms", 0.0)
+                ),
+                "cuda_h_to_d_ms": float(
+                    backend_profile.get("cuda_h_to_d_ms", 0.0)
+                ),
+                "cuda_d_to_h_ms": float(
+                    backend_profile.get("cuda_d_to_h_ms", 0.0)
+                ),
+                "cuda_result_decode_ms": float(
+                    backend_profile.get("cuda_result_decode_ms", 0.0)
+                ),
+                "visual_replay_ms": float(
+                    backend_profile.get("visual_replay_ms", 0.0)
+                ),
+                "visual_file_open_ms": float(
+                    backend_profile.get("visual_file_open_ms", 0.0)
+                ),
+                "visual_serialize_write_flush_ms": float(
+                    backend_profile.get(
+                        "visual_serialize_write_flush_ms",
+                        0.0
+                    )
+                ),
+                "visual_prepare_total_ms": backend_visual_total_ms,
+                "visual_file_bytes": int(
+                    backend_profile.get(
+                        "visual_file_bytes",
+                        _handoff_profile_last_file_bytes
+                    )
+                ),
+                "godot_file_read_ms": _handoff_profile_last_file_read_ms,
+                "godot_json_parse_ms": _handoff_profile_last_json_parse_ms,
+                "godot_world_build_ms": world_build_ms,
+                "godot_preview_clear_ms": float(
+                    preview_profile.get("clear_ms", 0.0)
+                ),
+                "godot_segment_scan_ms": float(
+                    preview_profile.get("segment_scan_ms", 0.0)
+                ),
+                "godot_layout_ms": float(
+                    preview_profile.get("layout_ms", 0.0)
+                ),
+                "godot_multimesh_alloc_ms": float(
+                    preview_profile.get("multimesh_alloc_ms", 0.0)
+                ),
+                "godot_multimesh_fill_ms": float(
+                    preview_profile.get("multimesh_fill_ms", 0.0)
+                ),
+                "godot_preview_total_ms": float(
+                    preview_profile.get("total_ms", 0.0)
+                ),
+                "godot_visual_setup_ms": visual_setup_ms,
+                "godot_handler_total_ms": handler_total_ms,
+                "handoff_total_ms": backend_visual_total_ms + handler_total_ms,
+            }
 
         "evolution_started":
             _build_world_from_geometry(event.get("world_geometry", []))
@@ -6348,6 +6577,7 @@ func _handle_event(event: Dictionary) -> void:
             )
 
         "evolution_complete":
+            _handoff_profile_finish()
             _reset_population_visual()
             _clear_population_preview()
             var completed_checkpoint := _evolution_checkpoint_path()
@@ -6926,12 +7156,25 @@ func _ensure_population_layout_capacity(required_count: int) -> void:
 
 
 func _show_population_preview(genomes: Array, champion_index: int) -> void:
+    var profile_started := Time.get_ticks_usec()
+    var clear_started := Time.get_ticks_usec()
     _clear_population_preview()
     _clear_creature_meshes()
     _probe_mesh.visible = false
+    var clear_ms := float(Time.get_ticks_usec() - clear_started) / 1000.0
     if genomes.is_empty():
+        _handoff_profile_last_preview_timing = {
+            "clear_ms": clear_ms,
+            "segment_scan_ms": 0.0,
+            "layout_ms": 0.0,
+            "multimesh_alloc_ms": 0.0,
+            "multimesh_fill_ms": 0.0,
+            "total_ms": float(Time.get_ticks_usec() - profile_started) / 1000.0,
+            "segments": 0,
+        }
         return
 
+    var segment_scan_started := Time.get_ticks_usec()
     var total_segments := 0
     for genome_value in genomes:
         if typeof(genome_value) != TYPE_DICTIONARY:
@@ -6941,14 +7184,29 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
         if typeof(segments) == TYPE_ARRAY:
             total_segments += segments.size()
 
+    var segment_scan_ms := (
+        float(Time.get_ticks_usec() - segment_scan_started) / 1000.0
+    )
     if total_segments <= 0:
+        _handoff_profile_last_preview_timing = {
+            "clear_ms": clear_ms,
+            "segment_scan_ms": segment_scan_ms,
+            "layout_ms": 0.0,
+            "multimesh_alloc_ms": 0.0,
+            "multimesh_fill_ms": 0.0,
+            "total_ms": float(Time.get_ticks_usec() - profile_started) / 1000.0,
+            "segments": 0,
+        }
         return
 
+    var layout_started := Time.get_ticks_usec()
     _ensure_population_layout(genomes)
+    var layout_ms := float(Time.get_ticks_usec() - layout_started) / 1000.0
     _population_preview_offsets.clear()
     _population_preview_sizes.clear()
     _population_preview_creature_ranges.clear()
 
+    var multimesh_alloc_started := Time.get_ticks_usec()
     var preview_mesh := BoxMesh.new()
     preview_mesh.size = Vector3.ONE
 
@@ -6967,7 +7225,11 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
     _population_preview_multimesh = MultiMeshInstance3D.new()
     _population_preview_multimesh.multimesh = multimesh
     add_child(_population_preview_multimesh)
+    var multimesh_alloc_ms := (
+        float(Time.get_ticks_usec() - multimesh_alloc_started) / 1000.0
+    )
 
+    var multimesh_fill_started := Time.get_ticks_usec()
     var instance_index := 0
     for index in range(genomes.size()):
         var genome_value = genomes[index]
@@ -7023,6 +7285,18 @@ func _show_population_preview(genomes: Array, champion_index: int) -> void:
         multimesh.visible_instance_count = instance_index
 
     _population_preview_instance_count = instance_index
+    var multimesh_fill_ms := (
+        float(Time.get_ticks_usec() - multimesh_fill_started) / 1000.0
+    )
+    _handoff_profile_last_preview_timing = {
+        "clear_ms": clear_ms,
+        "segment_scan_ms": segment_scan_ms,
+        "layout_ms": layout_ms,
+        "multimesh_alloc_ms": multimesh_alloc_ms,
+        "multimesh_fill_ms": multimesh_fill_ms,
+        "total_ms": float(Time.get_ticks_usec() - profile_started) / 1000.0,
+        "segments": total_segments,
+    }
 
 
 func _clear_population_preview() -> void:
@@ -7037,13 +7311,28 @@ func _clear_population_preview() -> void:
 
 
 func _load_population_visual_file(path: String) -> Dictionary:
+    _handoff_profile_last_file_read_ms = 0.0
+    _handoff_profile_last_json_parse_ms = 0.0
+    _handoff_profile_last_file_bytes = 0
     if path.is_empty() or not FileAccess.file_exists(path):
         return {}
     var file := FileAccess.open(path, FileAccess.READ)
     if file == null:
         return {}
-    var parsed = JSON.parse_string(file.get_as_text())
+
+    _handoff_profile_last_file_bytes = file.get_length()
+    var read_started := Time.get_ticks_usec()
+    var raw_text := file.get_as_text()
     file.close()
+    _handoff_profile_last_file_read_ms = (
+        float(Time.get_ticks_usec() - read_started) / 1000.0
+    )
+
+    var parse_started := Time.get_ticks_usec()
+    var parsed = JSON.parse_string(raw_text)
+    _handoff_profile_last_json_parse_ms = (
+        float(Time.get_ticks_usec() - parse_started) / 1000.0
+    )
     return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
