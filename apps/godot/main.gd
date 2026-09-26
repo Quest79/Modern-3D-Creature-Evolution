@@ -6129,6 +6129,8 @@ func _can_start_action(action_name: String) -> bool:
     _dead_process_since_ms = -1
     _job_started_ms = -1
     _job_received_event = false
+    _reset_population_visual_prefetch()
+    _pending_evolution_complete_event = {}
     _reset_replay()
     _finish_job_controls()
     return true
