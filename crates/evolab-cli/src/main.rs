@@ -1935,11 +1935,10 @@ fn write_population_visualization(
                         .enumerate()
                         .map(|(body_index, segment)| {
                             if let Some(source_frame) = source_frame {
-                                let base = (
-                                    source_frame * trajectory.part_count
-                                        + part_start
-                                        + body_index
-                                ) * 7;
+                                let base = (source_frame * trajectory.part_count
+                                    + part_start
+                                    + body_index)
+                                    * 7;
                                 [
                                     trajectory.transforms[base + 0],
                                     trajectory.transforms[base + 1],
