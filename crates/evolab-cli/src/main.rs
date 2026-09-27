@@ -390,6 +390,10 @@ enum Command {
         #[arg(long)]
         visual_output: Option<PathBuf>,
 
+        /// Final-generation top-5 trajectory file used by the GUI Watch Top 5 button.
+        #[arg(long)]
+        top5_visual_output: Option<PathBuf>,
+
         /// Sample rate for slow visual trajectories. The GUI interpolates between samples.
         #[arg(long, default_value_t = 10.0)]
         visual_sample_hz: f32,
@@ -609,6 +613,7 @@ fn run() -> Result<(), String> {
             preview_output,
             slow_visual,
             visual_output,
+            top5_visual_output,
             visual_sample_hz,
             playback_speed,
             json,
@@ -660,6 +665,7 @@ fn run() -> Result<(), String> {
             preview_output: preview_output.as_ref(),
             slow_visual,
             visual_output: visual_output.as_ref(),
+            top5_visual_output: top5_visual_output.as_ref(),
             visual_sample_hz,
             playback_speed,
             json_output: json,
@@ -1402,6 +1408,7 @@ struct EvolveRequest<'a> {
     preview_output: Option<&'a PathBuf>,
     slow_visual: bool,
     visual_output: Option<&'a PathBuf>,
+    top5_visual_output: Option<&'a PathBuf>,
     visual_sample_hz: f32,
     playback_speed: f32,
     json_output: bool,
@@ -1598,7 +1605,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 "champion_verification": if config.accelerator.mode == AcceleratorMode::Cpu {
                     "same-pass-rapier"
                 } else {
-                    "rapier-top-candidates"
+                    "cuda-direct"
                 },
                 "resuming_from_generation": resume_checkpoint
                     .as_ref()
@@ -1669,6 +1676,19 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 // Champion state remains in RAM during evolution.
                 // The final champion is persisted once after the timed run.
             });
+
+            if summary.generation == config.generations
+                && let Some(top5_path) = request.top5_visual_output
+            {
+                let top_count = visual_population.len().min(5);
+                write_population_visualization(
+                    top5_path,
+                    summary.generation,
+                    &visual_population[..top_count],
+                    &summary.effective_settings,
+                    request.visual_sample_hz,
+                )?;
+            }
 
             if request.slow_visual {
                 let visual_base_path = request
@@ -1853,6 +1873,9 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
         "results_file": request
             .result_output
             .map(|path| path.to_string_lossy().to_string()),
+        "top5_visual_file": request
+            .top5_visual_output
+            .map(|path| path.to_string_lossy().to_string()),
         "checkpoint_file": request
             .checkpoint_output
             .map(|path| path.to_string_lossy().to_string()),
@@ -1991,10 +2014,24 @@ fn write_population_visualization(
     let serialize_started = Instant::now();
     write!(
         writer,
-        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"genomes\":[",
+        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"world_geometry\":",
         generation, sample_hz, settings.simulation.duration_seconds
     )
     .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+    serde_json::to_writer(&mut writer, &settings.simulation.world.geometry())
+        .map_err(|err| format!("failed to serialize visual world geometry: {err}"))?;
+    writer
+        .write_all(b",\"fitness\":")
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+    let ranked_fitness = population
+        .iter()
+        .map(|creature| creature.fitness)
+        .collect::<Vec<_>>();
+    serde_json::to_writer(&mut writer, &ranked_fitness)
+        .map_err(|err| format!("failed to serialize visual fitness ranking: {err}"))?;
+    writer
+        .write_all(b",\"genomes\":[")
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
     for (index, creature) in population.iter().enumerate() {
         if index > 0 {

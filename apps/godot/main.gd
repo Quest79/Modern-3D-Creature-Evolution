@@ -87,6 +87,7 @@ var _evolve_button: Button
 var _continue_champion_button: Button
 var _resume_evolution_button: Button
 var _watch_champion_button: Button
+var _watch_top5_button: Button
 var _population_preview_check: CheckBox
 var _slow_visual_check: CheckBox
 var _population_preview_continue_button: Button
@@ -926,6 +927,16 @@ func _build_ui() -> void:
     _watch_champion_button.disabled = true
     _watch_champion_button.pressed.connect(_on_watch_champion_pressed)
     quick_evolution_row_2.add_child(_watch_champion_button)
+
+    _watch_top5_button = Button.new()
+    _watch_top5_button.text = "Watch Top 5"
+    _watch_top5_button.tooltip_text = (
+        "Replay the final generation's five highest-ranked evolution candidates together."
+    )
+    _watch_top5_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _watch_top5_button.disabled = true
+    _watch_top5_button.pressed.connect(_on_watch_top5_pressed)
+    quick_evolution_row_2.add_child(_watch_top5_button)
 
     _population_preview_check = CheckBox.new()
     _population_preview_check.button_pressed = _preview_population_before_evolution
@@ -4295,6 +4306,7 @@ func _start_evolution_run(continue_current: bool) -> void:
     _latest_results_path = ""
     _results_button.disabled = true
     _watch_champion_button.disabled = true
+    _watch_top5_button.disabled = true
     _continue_champion_button.disabled = true
     _metrics.text = (
         "[color=#9aa7bd]Continuing champion with fresh random challengers...[/color]"
@@ -4304,11 +4316,14 @@ func _start_evolution_run(continue_current: bool) -> void:
 
     var champion_path := _evolution_champion_path()
     var results_path := _evolution_results_path()
+    var top5_visual_path := _evolution_top5_visual_path()
     var checkpoint_path := _evolution_checkpoint_path()
     if FileAccess.file_exists(champion_path):
         DirAccess.remove_absolute(champion_path)
     if FileAccess.file_exists(results_path):
         DirAccess.remove_absolute(results_path)
+    if FileAccess.file_exists(top5_visual_path):
+        DirAccess.remove_absolute(top5_visual_path)
     if FileAccess.file_exists(checkpoint_path):
         DirAccess.remove_absolute(checkpoint_path)
 
@@ -4352,6 +4367,7 @@ func _start_evolution_run(continue_current: bool) -> void:
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
         "--result-output", results_path,
+        "--top5-visual-output", top5_visual_path,
         "--experiment-name", _experiment_name,
     ])
     args.append_array(_accelerator_cli_args())
@@ -4416,6 +4432,7 @@ func _on_resume_evolution_pressed() -> void:
 
     var champion_path := _evolution_champion_path()
     var results_path := _evolution_results_path()
+    var top5_visual_path := _evolution_top5_visual_path()
     var world_file := _world_file_for_cli()
     var timeline_file := _timeline_file_for_cli()
     if world_file.is_empty() or timeline_file.is_empty():
@@ -4486,6 +4503,53 @@ func _on_watch_champion_pressed() -> void:
 
     if _start_job("creature", args):
         _set_status("Watching evolution champion in real time...")
+
+
+func _on_watch_top5_pressed() -> void:
+    if _job_pid > 0:
+        return
+
+    var top5_path := _evolution_top5_visual_path()
+    var visual_data := _load_population_visual_file(top5_path)
+    if visual_data.is_empty():
+        _set_status("Top-5 replay is not available for this evolution run.")
+        return
+
+    _reset_population_visual()
+    var genomes_value = visual_data.get("genomes", [])
+    var population_count := 0
+    if typeof(genomes_value) == TYPE_ARRAY:
+        population_count = genomes_value.size()
+
+    var event := {
+        "display_label": "Top 5 finalists",
+        "generation": int(visual_data.get("generation", 0)),
+        "generations": int(visual_data.get("generation", 0)),
+        "population": population_count,
+        "sample_hz": float(visual_data.get("sample_hz", 0.0)),
+        "duration_seconds": float(
+            visual_data.get("duration_seconds", _seconds_spin.value)
+        ),
+        "world_geometry": visual_data.get("world_geometry", []),
+    }
+    _activate_population_visual_data(
+        event,
+        visual_data,
+        false,
+        _handoff_profile_last_file_read_ms,
+        _handoff_profile_last_json_parse_ms,
+        _handoff_profile_last_file_bytes
+    )
+
+    var fitness_value = visual_data.get("fitness", [])
+    if typeof(fitness_value) == TYPE_ARRAY:
+        var ranking_lines: Array[String] = ["[b]Final-generation top 5[/b]"]
+        for index in range(mini(5, fitness_value.size())):
+            ranking_lines.append(
+                "#%d evolution score: %.4f"
+                % [index + 1, float(fitness_value[index])]
+            )
+        _metrics.text = "\n".join(ranking_lines)
 
 
 func _on_save_experiment_pressed() -> void:
@@ -4945,6 +5009,10 @@ func _evolution_champion_path() -> String:
 
 func _evolution_results_path() -> String:
     return _runtime_path("active_evolution_results.evoresults")
+
+
+func _evolution_top5_visual_path() -> String:
+    return _runtime_path("active_evolution_top5_visual.json")
 
 
 func _evolution_checkpoint_path() -> String:
@@ -6439,6 +6507,10 @@ func _set_run_buttons_disabled(disabled: bool) -> void:
         disabled or not FileAccess.file_exists(_evolution_checkpoint_path())
     )
     _watch_champion_button.disabled = disabled or not _has_evolution_champion
+    if _watch_top5_button != null:
+        _watch_top5_button.disabled = (
+            disabled or not FileAccess.file_exists(_evolution_top5_visual_path())
+        )
     if _population_preview_check != null:
         _population_preview_check.disabled = disabled
     if _slow_visual_check != null:
@@ -6684,6 +6756,9 @@ func _handle_event(event: Dictionary) -> void:
             _build_creature_from_genome(_current_genome)
             _has_evolution_champion = not _current_genome.is_empty()
             _continue_champion_button.disabled = _current_genome.is_empty()
+            _watch_top5_button.disabled = not FileAccess.file_exists(
+                _evolution_top5_visual_path()
+            )
 
             var final_settings_value = event.get("final_settings", {})
             if typeof(final_settings_value) == TYPE_DICTIONARY:
@@ -7583,7 +7658,9 @@ func _activate_population_visual_data(
         return
 
     var world_started := Time.get_ticks_usec()
-    _build_world_from_geometry(event.get("world_geometry", []))
+    _build_world_from_geometry(
+        event.get("world_geometry", visual_data.get("world_geometry", []))
+    )
     var world_build_ms := float(Time.get_ticks_usec() - world_started) / 1000.0
 
     _show_population_preview(visual_genomes, -1)
@@ -7615,8 +7692,9 @@ func _activate_population_visual_data(
     )
 
     _set_status(
-        "Slow visual • Generation %d / %d • %s creatures • %.1f s test • %.2fx playback"
+        "%s • Generation %d / %d • %s creatures • %.1f s test • %.2fx playback"
         % [
+            str(event.get("display_label", "Slow visual")),
             _population_visual_generation,
             int(event.get("generations", 0)),
             str(event.get("population", 0)),
