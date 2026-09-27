@@ -452,28 +452,14 @@ where
 
         let statistics_started = Instant::now();
         let verified_best = if execution.actual_mode == AcceleratorMode::Cuda {
-            // CUDA searches the whole population. Rapier verifies only a small
-            // finalist set, but the previously verified champion is always
-            // included again so elitism cannot lose score merely because that
-            // genome ranked lower in the approximate CUDA ordering this round.
+            // CUDA searches the current generation. Rapier verifies the leading
+            // current-generation finalists only. Previous champions are archived,
+            // while their elite lineages continue as mutated descendants, so an
+            // exact previous champion genome is not expected to still exist.
             let verification_count = evaluated
                 .len()
                 .min(config.elite_count.saturating_mul(4).max(8));
-            let mut verification_candidates = evaluated[..verification_count].to_vec();
-
-            if let Some(previous_champion) = final_champion.as_ref()
-                && !verification_candidates
-                    .iter()
-                    .any(|candidate| candidate.genome == previous_champion.genome)
-            {
-                let carried_champion = evaluated
-                    .iter()
-                    .find(|candidate| candidate.genome == previous_champion.genome)
-                    .ok_or_else(|| {
-                        "elite champion disappeared from the next generation".to_string()
-                    })?;
-                verification_candidates.push(carried_champion.clone());
-            }
+            let verification_candidates = evaluated[..verification_count].to_vec();
 
             let verified =
                 verify_top_candidates_with_rapier(&pool, &verification_candidates, &settings)?;
