@@ -1744,6 +1744,66 @@ mod tests {
     }
 
     #[test]
+    fn next_generation_evolves_elites_and_reseeds_everyone_else() {
+        let config = EvolutionConfig {
+            population_size: 6,
+            generations: 2,
+            elite_count: 2,
+            mutations_per_child: 1,
+            mutation_probability: 1.0,
+            ..EvolutionConfig::default()
+        };
+        let settings = super::EffectiveEvolutionSettings::from(&config);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        let mut evaluated = Vec::new();
+        for index in 0..6_u64 {
+            let mut genome = CreatureGenome::three_segment_walker();
+            genome.name = format!("candidate-{index}");
+            evaluated.push(super::EvaluatedCreature {
+                individual_id: index + 1,
+                parent_ids: Vec::new(),
+                species_id: index + 1,
+                genome,
+                fitness: 100.0 - index as f32,
+                metrics: Default::default(),
+                trial_seeds: vec![1],
+                mutations: Vec::new(),
+                unstable_trials: 0,
+            });
+        }
+
+        let mut rng = super::GenomeRng::new(123456);
+        let mut next_individual_id = 1000;
+        let (next, _) = super::breed_next_generation(
+            &pool,
+            &evaluated,
+            None,
+            &config,
+            &settings,
+            &mut rng,
+            &mut next_individual_id,
+        )
+        .unwrap();
+
+        assert_eq!(next.len(), 6);
+
+        // The two strongest lineages continue, but only as genuinely mutated descendants.
+        assert_eq!(next[0].parent_ids, vec![1]);
+        assert_eq!(next[1].parent_ids, vec![2]);
+        assert!(!next[0].mutations.is_empty());
+        assert!(!next[1].mutations.is_empty());
+        assert_ne!(next[0].genome, evaluated[0].genome);
+        assert_ne!(next[1].genome, evaluated[1].genome);
+
+        // Losing genomes are not parents of the remaining slots; those slots are fresh randoms.
+        assert!(next[2..].iter().all(|candidate| candidate.parent_ids.is_empty()));
+    }
+
+    #[test]
     fn short_evolution_returns_generation_history() {
         let config = EvolutionConfig {
             population_size: 6,
