@@ -1800,7 +1800,11 @@ mod tests {
         assert_ne!(next[1].genome, evaluated[1].genome);
 
         // Losing genomes are not parents of the remaining slots; those slots are fresh randoms.
-        assert!(next[2..].iter().all(|candidate| candidate.parent_ids.is_empty()));
+        assert!(
+            next[2..]
+                .iter()
+                .all(|candidate| candidate.parent_ids.is_empty())
+        );
     }
 
     #[test]
