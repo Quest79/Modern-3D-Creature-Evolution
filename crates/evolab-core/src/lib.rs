@@ -55,7 +55,8 @@ pub use experiment::{EXPERIMENT_FORMAT_VERSION, ExperimentFile};
 pub use fitness::{FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, evaluate_fitness};
 pub use ga::{
     EvaluatedCreature, EvolutionConfig, EvolutionResult, EvolutionVisualCandidateCapture,
-    EvolutionVisualCapture, GenerationSummary, GenerationTiming, OffspringTelemetry,
+    EvolutionVisualCapture, EvolutionVisualCaptureRequest, GenerationSummary, GenerationTiming,
+    OffspringTelemetry,
     PopulationTelemetry, evolve_population, evolve_population_checkpointed,
     evolve_population_checkpointed_with_visual_capture, generate_initial_population_preview,
 };
