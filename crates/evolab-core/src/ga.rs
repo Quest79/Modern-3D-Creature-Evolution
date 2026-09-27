@@ -903,6 +903,7 @@ fn execute_mutation_plans(
                 for (attempt_index, seed) in plan.seeds.into_iter().enumerate() {
                     if let Ok(result) =
                         mutate_genome(&plan.base, seed, plan.mutation_count, mutation)
+                        && !result.mutations.is_empty()
                     {
                         return MutationAttemptOutcome {
                             result: Some(result),
@@ -1312,100 +1313,100 @@ fn breed_next_generation(
         .elite_count
         .min(next_settings.population_size.saturating_sub(1))
         .max(1);
-    let tournament_size = config.tournament_size.min(evaluated.len()).max(1);
 
+    // Preserve successful lineages, not frozen genomes. Select the strongest
+    // unique elite genomes, then force every carried lineage to produce a
+    // genuinely mutated descendant for the next generation.
+    let mut elite_sources: Vec<&EvaluatedCreature> = Vec::with_capacity(elite_count);
     if let Some(champion) = verified_champion {
-        let individual_id = *next_individual_id;
-        *next_individual_id += 1;
-        next.push(Candidate {
-            individual_id,
-            parent_ids: vec![champion.individual_id],
-            genome: champion.genome.clone(),
-            mutations: Vec::new(),
-        });
+        elite_sources.push(champion);
     }
-
-    for elite in evaluated.iter() {
-        if next.len() >= elite_count {
+    for candidate in evaluated {
+        if elite_sources.len() >= elite_count {
             break;
         }
-        if verified_champion.is_some_and(|champion| champion.genome == elite.genome) {
+        if elite_sources
+            .iter()
+            .any(|elite| elite.genome == candidate.genome)
+        {
             continue;
         }
+        elite_sources.push(candidate);
+    }
+
+    let mut elite_plans = Vec::with_capacity(elite_sources.len());
+    for elite in &elite_sources {
+        let mutation_count = sample_mutation_count(
+            rng,
+            next_settings.mutations_per_child,
+            next_settings.mutation_probability,
+        )
+        .max(1);
+        elite_plans.push(MutationPlan {
+            parent_ids: vec![elite.individual_id],
+            base: elite.genome.clone(),
+            mutation_count,
+            seeds: [
+                rng.next_seed(),
+                rng.next_seed(),
+                rng.next_seed(),
+                rng.next_seed(),
+                rng.next_seed(),
+            ],
+        });
+    }
+
+    telemetry.attempted_offspring += elite_plans.len();
+    let elite_results = execute_mutation_plans(pool, &elite_plans, &next_settings.mutation);
+    for (plan, outcome) in elite_plans.into_iter().zip(elite_results) {
+        telemetry.mutation_attempts += outcome.attempts;
+        telemetry.offspring_retries += outcome.attempts.saturating_sub(1);
+        let Some(mutation_result) = outcome.result else {
+            return Err(
+                "failed to produce a mutated descendant for an elite lineage after 5 attempts"
+                    .to_string(),
+            );
+        };
+
+        telemetry.accepted_offspring += 1;
         let individual_id = *next_individual_id;
         *next_individual_id += 1;
         next.push(Candidate {
             individual_id,
-            parent_ids: vec![elite.individual_id],
-            genome: elite.genome.clone(),
-            mutations: Vec::new(),
+            parent_ids: plan.parent_ids,
+            genome: mutation_result.genome,
+            mutations: mutation_result.mutations,
         });
     }
 
+    // Everyone outside the elite group is discarded. Their slots are filled by
+    // independent, freshly generated random creatures with no parent lineage.
+    let min_segments = next_settings.mutation.min_segments;
+    let segment_span = next_settings
+        .mutation
+        .max_segments
+        .saturating_sub(min_segments)
+        .saturating_add(1);
+
     while next.len() < next_settings.population_size {
-        let needed = next_settings.population_size - next.len();
-        let mut plans = Vec::with_capacity(needed);
+        telemetry.attempted_offspring += 1;
+        let seed = rng.next_seed();
+        let target_segments = min_segments + rng.range_usize(segment_span);
 
-        for _ in 0..needed {
-            let parent_index = tournament_select(evaluated, tournament_size, rng);
-            let parent = &evaluated[parent_index];
-            let mut parent_ids = vec![parent.individual_id];
-            let use_crossover = rng.chance(config.crossover_chance);
-
-            let base = if use_crossover {
-                telemetry.crossover_count += 1;
-                let donor_index = tournament_select(evaluated, tournament_size, rng);
-                let donor = &evaluated[donor_index];
-                if donor.individual_id != parent.individual_id {
-                    parent_ids.push(donor.individual_id);
-                }
-                crossover_brain_subtree(&parent.genome, &donor.genome, rng)
-            } else {
-                parent.genome.clone()
-            };
-
-            let mutation_count = sample_mutation_count(
-                rng,
-                next_settings.mutations_per_child,
-                next_settings.mutation_probability,
-            );
-            plans.push(MutationPlan {
-                parent_ids,
-                base,
-                mutation_count,
-                seeds: [
-                    rng.next_seed(),
-                    rng.next_seed(),
-                    rng.next_seed(),
-                    rng.next_seed(),
-                    rng.next_seed(),
-                ],
-            });
-        }
-
-        telemetry.attempted_offspring += plans.len();
-        let results = execute_mutation_plans(pool, &plans, &next_settings.mutation);
-
-        for (plan, outcome) in plans.into_iter().zip(results) {
-            telemetry.mutation_attempts += outcome.attempts;
-            telemetry.offspring_retries += outcome.attempts.saturating_sub(1);
-            let Some(mutation_result) = outcome.result else {
+        match random_creature(seed, target_segments, &next_settings.mutation) {
+            Ok(randomized) => {
+                telemetry.accepted_offspring += 1;
+                let individual_id = *next_individual_id;
+                *next_individual_id += 1;
+                next.push(Candidate {
+                    individual_id,
+                    parent_ids: Vec::new(),
+                    genome: randomized.genome,
+                    mutations: randomized.mutations,
+                });
+            }
+            Err(_) => {
                 telemetry.discarded_invalid_offspring += 1;
-                continue;
-            };
-            telemetry.accepted_offspring += 1;
-
-            let individual_id = *next_individual_id;
-            *next_individual_id += 1;
-            next.push(Candidate {
-                individual_id,
-                parent_ids: plan.parent_ids,
-                genome: mutation_result.genome,
-                mutations: mutation_result.mutations,
-            });
-
-            if next.len() == next_settings.population_size {
-                break;
             }
         }
     }
@@ -1681,23 +1682,6 @@ fn build_map_elites(generation: usize, evaluated: &[EvaluatedCreature]) -> Vec<M
         .collect()
 }
 
-fn tournament_select(
-    evaluated: &[EvaluatedCreature],
-    tournament_size: usize,
-    rng: &mut GenomeRng,
-) -> usize {
-    let mut best_index = rng.range_usize(evaluated.len());
-
-    for _ in 1..tournament_size {
-        let candidate = rng.range_usize(evaluated.len());
-        if evaluated[candidate].fitness > evaluated[best_index].fitness {
-            best_index = candidate;
-        }
-    }
-
-    best_index
-}
-
 #[cfg(test)]
 mod tests {
     use super::{EvolutionConfig, GenerationSummary, evolve_population};
@@ -1756,6 +1740,70 @@ mod tests {
             population[1..]
                 .iter()
                 .all(|candidate| candidate.genome != ancestor)
+        );
+    }
+
+    #[test]
+    fn next_generation_evolves_elites_and_reseeds_everyone_else() {
+        let config = EvolutionConfig {
+            population_size: 6,
+            generations: 2,
+            elite_count: 2,
+            mutations_per_child: 1,
+            mutation_probability: 1.0,
+            ..EvolutionConfig::default()
+        };
+        let settings = super::EffectiveEvolutionSettings::from(&config);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        let mut evaluated = Vec::new();
+        for index in 0..6_u64 {
+            let mut genome = CreatureGenome::three_segment_walker();
+            genome.name = format!("candidate-{index}");
+            evaluated.push(super::EvaluatedCreature {
+                individual_id: index + 1,
+                parent_ids: Vec::new(),
+                species_id: index + 1,
+                genome,
+                fitness: 100.0 - index as f32,
+                metrics: Default::default(),
+                trial_seeds: vec![1],
+                mutations: Vec::new(),
+                unstable_trials: 0,
+            });
+        }
+
+        let mut rng = super::GenomeRng::new(123456);
+        let mut next_individual_id = 1000;
+        let (next, _) = super::breed_next_generation(
+            &pool,
+            &evaluated,
+            None,
+            &config,
+            &settings,
+            &mut rng,
+            &mut next_individual_id,
+        )
+        .unwrap();
+
+        assert_eq!(next.len(), 6);
+
+        // The two strongest lineages continue, but only as genuinely mutated descendants.
+        assert_eq!(next[0].parent_ids, vec![1]);
+        assert_eq!(next[1].parent_ids, vec![2]);
+        assert!(!next[0].mutations.is_empty());
+        assert!(!next[1].mutations.is_empty());
+        assert_ne!(next[0].genome, evaluated[0].genome);
+        assert_ne!(next[1].genome, evaluated[1].genome);
+
+        // Losing genomes are not parents of the remaining slots; those slots are fresh randoms.
+        assert!(
+            next[2..]
+                .iter()
+                .all(|candidate| candidate.parent_ids.is_empty())
         );
     }
 
