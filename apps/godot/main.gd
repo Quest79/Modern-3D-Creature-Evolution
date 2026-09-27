@@ -1031,7 +1031,7 @@ func _build_ui() -> void:
 
     var evolution_section := _add_collapsible_section(column, "Evolution Settings", false)
 
-    _population_spin = _add_number_row(evolution_section, "Population", 2, 10000, 50, 1)
+    _population_spin = _add_number_row(evolution_section, "Population", 2, 10000, 1000, 1)
     _generations_spin = _add_number_row(evolution_section, "Generations", 1, 10000, 100, 1)
     _tournament_spin = _add_number_row(evolution_section, "Tournament size", 1, 1000, 7, 1)
     _elite_spin = _add_number_row(evolution_section, "Elite kept", 1, 999, 2, 1)
@@ -1308,12 +1308,12 @@ func _build_ui() -> void:
         sim_section,
         "Playback speed",
         0.01,
-        2.0,
+        10.0,
         _playback_speed,
         0.01
     )
     _playback_speed_spin.suffix = "x"
-    _playback_speed_spin.tooltip_text = "Live viewer speed. 0.01x = 100× slower, 2.00x = 2× faster."
+    _playback_speed_spin.tooltip_text = "Viewer speed from 0.01x slow motion through 10.00x fast-forward."
     _playback_speed_spin.value_changed.connect(_on_playback_speed_changed)
     _batch_spin = _add_number_row(
         sim_section, "Parallel probe simulations", 1, 1000000, 1000, 1
@@ -2888,7 +2888,7 @@ func _on_camera_zoom_changed(value: float) -> void:
 
 
 func _on_playback_speed_changed(value: float) -> void:
-    _playback_speed = clampf(float(value), 0.01, 2.0)
+    _playback_speed = clampf(float(value), 0.01, 10.0)
     _save_settings()
 
 
@@ -3504,7 +3504,7 @@ func _load_settings() -> void:
     _playback_speed = float(
         config.get_value("viewer", "playback_speed", _playback_speed)
     )
-    _playback_speed = clampf(_playback_speed, 0.01, 2.0)
+    _playback_speed = clampf(_playback_speed, 0.01, 10.0)
     _fitness_distance_weight = float(
         config.get_value("fitness", "distance", _fitness_distance_weight)
     )
@@ -7433,12 +7433,13 @@ func _activate_population_visual_data(
     )
 
     _set_status(
-        "Slow visual • Generation %d / %d • %s creatures • %.1f s real-time test"
+        "Slow visual • Generation %d / %d • %s creatures • %.1f s test • %.2fx playback"
         % [
             _population_visual_generation,
             int(event.get("generations", 0)),
             str(event.get("population", 0)),
             _population_visual_duration,
+            _playback_speed,
         ]
     )
 
@@ -7586,7 +7587,7 @@ func _update_population_visual(delta: float) -> void:
         return
 
     _population_visual_clock = minf(
-        _population_visual_clock + delta,
+        _population_visual_clock + delta * _playback_speed,
         _population_visual_duration
     )
 
