@@ -12,8 +12,9 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
-    EvolutionConfig, EvolutionResultsFile, EvolutionVisualCapture, ExperimentFile, FitnessConfig,
-    FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    EvolutionConfig, EvolutionResultsFile, EvolutionVisualCapture, EvolutionVisualCaptureRequest,
+    ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend,
+    ProbeSpec, RapierCpuBackend,
     SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed,
     evolve_population_checkpointed_with_visual_capture, generate_initial_population_preview,
@@ -1621,14 +1622,16 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     let mut slow_visual_release_at: Option<Instant> = None;
     let mut pending_generation_complete: Option<Value> = None;
     let capture_visuals = request.slow_visual || request.top5_visual_output.is_some();
-    let visual_capture_sample_hz = capture_visuals.then_some(request.visual_sample_hz);
+    let visual_capture_request = capture_visuals.then_some(EvolutionVisualCaptureRequest {
+        sample_hz: request.visual_sample_hz,
+        every_generation: request.slow_visual,
+    });
     let result = evolve_population_checkpointed_with_visual_capture(
         &ancestor,
         &config,
         resume_checkpoint.as_ref(),
         request.checkpoint_output.is_some(),
-        visual_capture_sample_hz,
-        request.slow_visual,
+        visual_capture_request,
         |summary, visual_population, visual_capture| {
             let generation_complete_event = json!({
                 "protocol_version": 1,
