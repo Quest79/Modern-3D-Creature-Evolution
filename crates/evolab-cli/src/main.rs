@@ -13,9 +13,8 @@ use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
     EvolutionConfig, EvolutionResultsFile, EvolutionVisualCapture, ExperimentFile, FitnessConfig,
-    FitnessWeights,
-    GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
-    ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend,
+    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
     discover_cuda_devices, evolve_population_checkpointed,
     evolve_population_checkpointed_with_visual_capture, generate_initial_population_preview,
     mutate_genome, random_creature, run_cuda_probe_batch,
@@ -2015,15 +2014,16 @@ fn write_population_visualization(
             ));
         }
         for creature in population {
-            let candidate_capture = capture
-                .candidates
-                .get(&creature.individual_id)
-                .ok_or_else(|| {
-                    format!(
-                        "CUDA evaluation capture is missing candidate {}",
-                        creature.individual_id
-                    )
-                })?;
+            let candidate_capture =
+                capture
+                    .candidates
+                    .get(&creature.individual_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "CUDA evaluation capture is missing candidate {}",
+                            creature.individual_id
+                        )
+                    })?;
             if candidate_capture.part_count != creature.genome.segments.len() {
                 return Err(format!(
                     "CUDA evaluation capture body mismatch for candidate {}",
@@ -2064,7 +2064,8 @@ fn write_population_visualization(
         population
             .iter()
             .filter(|creature| {
-                let Some(candidate_capture) = capture.candidates.get(&creature.individual_id) else {
+                let Some(candidate_capture) = capture.candidates.get(&creature.individual_id)
+                else {
                     return true;
                 };
                 (capture
