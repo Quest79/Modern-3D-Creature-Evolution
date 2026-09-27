@@ -91,6 +91,7 @@ var _population_preview_check: CheckBox
 var _slow_visual_check: CheckBox
 var _population_preview_continue_button: Button
 var _stop_button: Button
+var _pause_button: Button
 var _settings_button: Button
 var _results_button: Button
 var _save_experiment_button: Button
@@ -268,6 +269,7 @@ var _udp: PacketPeerUDP
 var _event_port := 0
 var _job_pid := 0
 var _job_kind := ""
+var _job_paused := false
 var _dead_process_since_ms := -1
 var _job_started_ms := -1
 var _job_received_event := false
@@ -364,6 +366,9 @@ func _process(delta: float) -> void:
     if _udp == null:
         return
 
+    if _job_paused:
+        return
+
     while _udp.get_available_packet_count() > 0:
         var raw := _udp.get_packet().get_string_from_utf8()
         var parsed = JSON.parse_string(raw)
@@ -376,7 +381,8 @@ func _process(delta: float) -> void:
         if OS.is_process_running(_job_pid):
             _dead_process_since_ms = -1
             if (
-                not _job_received_event
+                not _job_paused
+                and not _job_received_event
                 and _job_started_ms >= 0
                 and Time.get_ticks_msec() - _job_started_ms >= 5000
             ):
@@ -954,12 +960,34 @@ func _build_ui() -> void:
     )
     quick_section.add_child(_population_preview_continue_button)
 
+    var run_control_row := HBoxContainer.new()
+    run_control_row.add_theme_constant_override("separation", 6)
+    quick_section.add_child(run_control_row)
+
     _stop_button = Button.new()
     _stop_button.text = "■ Stop Current Run"
     _stop_button.custom_minimum_size = Vector2(0, 32)
+    _stop_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     _stop_button.disabled = true
     _stop_button.pressed.connect(_on_stop_pressed)
-    quick_section.add_child(_stop_button)
+    _apply_run_control_button_style(
+        _stop_button,
+        Color(0.30, 0.07, 0.08, 0.34),
+        Color(0.62, 0.20, 0.22, 0.58)
+    )
+    run_control_row.add_child(_stop_button)
+
+    _pause_button = Button.new()
+    _pause_button.text = "⏸ Pause Current Run"
+    _pause_button.custom_minimum_size = Vector2(0, 32)
+    _pause_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    _pause_button.disabled = true
+    _pause_button.tooltip_text = (
+        "Pause or unpause the active simulator process without ending the run."
+    )
+    _pause_button.pressed.connect(_on_pause_pressed)
+    _refresh_pause_button()
+    run_control_row.add_child(_pause_button)
 
     var creature_section := _add_collapsible_section(column, "Creature Generation & Files", false)
 
@@ -6141,6 +6169,8 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
         _begin_replay(kind)
 
     _job_kind = kind
+    _job_paused = false
+    _refresh_pause_button()
     _dead_process_since_ms = -1
     _job_started_ms = Time.get_ticks_msec()
     _job_received_event = false
@@ -6157,7 +6187,136 @@ func _start_job(kind: String, args: PackedStringArray) -> bool:
     _set_world_controls_enabled(false)
     _set_timeline_controls_enabled(false)
     _stop_button.disabled = false
+    _pause_button.disabled = false
     return true
+
+
+func _make_run_control_style(
+    background: Color,
+    border: Color
+) -> StyleBoxFlat:
+    var style := StyleBoxFlat.new()
+    style.bg_color = background
+    style.border_color = border
+    style.set_border_width_all(1)
+    style.set_corner_radius_all(4)
+    style.content_margin_left = 8.0
+    style.content_margin_right = 8.0
+    return style
+
+
+func _apply_run_control_button_style(
+    button: Button,
+    background: Color,
+    border: Color
+) -> void:
+    button.add_theme_stylebox_override(
+        "normal",
+        _make_run_control_style(background, border)
+    )
+    button.add_theme_stylebox_override(
+        "hover",
+        _make_run_control_style(
+            Color(
+                background.r,
+                background.g,
+                background.b,
+                minf(background.a + 0.10, 1.0)
+            ),
+            Color(
+                border.r,
+                border.g,
+                border.b,
+                minf(border.a + 0.12, 1.0)
+            )
+        )
+    )
+    button.add_theme_stylebox_override(
+        "pressed",
+        _make_run_control_style(
+            Color(
+                background.r,
+                background.g,
+                background.b,
+                minf(background.a + 0.16, 1.0)
+            ),
+            Color(
+                border.r,
+                border.g,
+                border.b,
+                minf(border.a + 0.18, 1.0)
+            )
+        )
+    )
+
+
+func _refresh_pause_button() -> void:
+    if _pause_button == null:
+        return
+
+    if _job_paused:
+        _pause_button.text = "▶ Unpause Current Run"
+        _apply_run_control_button_style(
+            _pause_button,
+            Color(0.34, 0.27, 0.06, 0.36),
+            Color(0.72, 0.57, 0.16, 0.66)
+        )
+    else:
+        _pause_button.text = "⏸ Pause Current Run"
+        _apply_run_control_button_style(
+            _pause_button,
+            Color(0.06, 0.25, 0.11, 0.32),
+            Color(0.20, 0.58, 0.29, 0.60)
+        )
+
+
+func _set_backend_process_paused(paused: bool) -> bool:
+    if _job_pid <= 0 or not OS.is_process_running(_job_pid):
+        return false
+
+    var output: Array = []
+    var action := "pause" if paused else "resume"
+    var exit_code := OS.execute(
+        _backend_path(),
+        PackedStringArray([
+            "process-control",
+            "--pid", str(_job_pid),
+            "--action", action,
+        ]),
+        output,
+        true
+    )
+    if exit_code != 0:
+        var details := ""
+        if not output.is_empty():
+            details = str(output[0]).strip_edges()
+        _set_status(
+            "Could not %s current run%s."
+            % [
+                action,
+                "" if details.is_empty() else ": %s" % details,
+            ]
+        )
+        return false
+    return true
+
+
+func _on_pause_pressed() -> void:
+    if _job_pid <= 0 or not OS.is_process_running(_job_pid):
+        return
+
+    var target_paused := not _job_paused
+    if not _set_backend_process_paused(target_paused):
+        return
+
+    _job_paused = target_paused
+    _dead_process_since_ms = -1
+    if not _job_paused:
+        _job_started_ms = Time.get_ticks_msec()
+        _job_received_event = true
+
+    _refresh_pause_button()
+    _set_status("Paused current run." if _job_paused else "Unpaused current run.")
 
 
 func _on_stop_pressed() -> void:
@@ -6186,6 +6345,8 @@ func _stop_current_job() -> void:
         OS.kill(_job_pid)
     _job_pid = 0
     _job_kind = ""
+    _job_paused = false
+    _refresh_pause_button()
     _dead_process_since_ms = -1
     _job_started_ms = -1
     _job_received_event = false
@@ -6205,6 +6366,8 @@ func _finish_job_controls() -> void:
             _slow_visual_check.disabled = false
             _slow_visual_check.text = _slow_visual_checkbox_text(_slow_visual_mode)
         _stop_button.disabled = false
+        if _pause_button != null:
+            _pause_button.disabled = true
         return
 
     _set_run_buttons_disabled(false)
@@ -6221,6 +6384,10 @@ func _finish_job_controls() -> void:
     if _population_preview_continue_button != null:
         _population_preview_continue_button.visible = false
     _stop_button.disabled = true
+    if _pause_button != null:
+        _pause_button.disabled = true
+    _job_paused = false
+    _refresh_pause_button()
     _save_button.disabled = _current_genome.is_empty()
 
 
@@ -6691,6 +6858,8 @@ func _queue_replay_state(state_value) -> void:
 
 
 func _update_replay(delta: float) -> void:
+    if _job_paused:
+        return
     if not _replay_active or _replay_frames.is_empty():
         return
 
@@ -7580,6 +7749,8 @@ func _reset_population_visual() -> void:
 
 
 func _update_population_visual(delta: float) -> void:
+    if _job_paused:
+        return
     if not _population_visual_active or _population_visual_frames.is_empty():
         return
     if not is_instance_valid(_population_preview_multimesh):
