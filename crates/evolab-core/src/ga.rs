@@ -63,7 +63,7 @@ impl Default for EvolutionConfig {
             evaluation_pool_size: 0,
             generations: 100,
             tournament_size: 7,
-            elite_count: 2,
+            elite_count: 20,
             crossover_chance: 0.5,
             mutations_per_child: 8,
             mutation_probability: default_mutation_probability(),

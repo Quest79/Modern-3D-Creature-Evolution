@@ -1062,7 +1062,7 @@ func _build_ui() -> void:
     _population_spin = _add_number_row(evolution_section, "Population", 2, 10000, 1000, 1)
     _generations_spin = _add_number_row(evolution_section, "Generations", 1, 10000, 100, 1)
     _tournament_spin = _add_number_row(evolution_section, "Tournament size", 1, 1000, 7, 1)
-    _elite_spin = _add_number_row(evolution_section, "Elite kept", 1, 999, 2, 1)
+    _elite_spin = _add_number_row(evolution_section, "Elite kept", 1, 999, 20, 1)
     _crossover_spin = _add_number_row(evolution_section, "Brain crossover", 0.0, 1.0, 0.5, 0.05)
     _crossover_spin.tooltip_text = "Chance that a child receives a brain subtree from a second selected parent."
     _evolution_mutations_spin = _add_number_row(
