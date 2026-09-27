@@ -7110,6 +7110,7 @@ func _append_slow_visual_args(args: PackedStringArray) -> void:
     args.append_array(PackedStringArray([
         "--visual-output", _runtime_path("population_visual.json"),
         "--visual-sample-hz", "10.0",
+        "--playback-speed", "%.2f" % _playback_speed,
     ]))
 
 
