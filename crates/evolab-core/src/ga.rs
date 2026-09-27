@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceleratorConfig, AcceleratorMode, CHECKPOINT_FORMAT_VERSION, ChampionArchiveEntry,
-    CheckpointCandidate, ConditionContext, CreatureGenome, DiversitySummary,
-    EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
-    FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
-    MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    CudaCreatureTrajectory, TrialAggregation, crossover_brain_subtree, evaluate_fitness,
-    mutate_genome, random_creature, run_cuda_creature_batch, run_cuda_creature_visual_batch,
+    CheckpointCandidate, ConditionContext, CreatureGenome, CudaCreatureTrajectory,
+    DiversitySummary, EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance,
+    FitnessConfig, FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell,
+    MutationConfig, MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary,
+    TimelineConfig, TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
+    random_creature, run_cuda_creature_batch, run_cuda_creature_visual_batch,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -491,9 +491,8 @@ where
         offspring_telemetry.accumulate(&expansion_telemetry);
 
         let evaluation_started = Instant::now();
-        let generation_visual_sample_hz = visual_capture_sample_hz.filter(|_| {
-            capture_every_generation || generation == config.generations
-        });
+        let generation_visual_sample_hz = visual_capture_sample_hz
+            .filter(|_| capture_every_generation || generation == config.generations);
         let (mut evaluated, execution, visual_capture) = evaluate_population(
             &pool,
             &evaluation_pool,
