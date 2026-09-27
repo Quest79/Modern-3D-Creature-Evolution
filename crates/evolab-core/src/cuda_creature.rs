@@ -25,6 +25,7 @@ pub struct CudaCreatureBatchResult {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 struct CudaVisualCaptureConfig {
     sample_every_steps: usize,
     frame_count: usize,
@@ -1251,7 +1252,12 @@ mod platform {
 
         for assignment in assignments {
             let assignment = assignment.clone();
-            let genomes =
+            let global_part_start = genomes
+                .iter()
+                .take(assignment.start_index)
+                .map(|genome| genome.segments.len())
+                .sum::<usize>();
+            let assignment_genomes =
                 genomes[assignment.start_index..assignment.start_index + assignment.count].to_vec();
             let simulation = simulation.clone();
             let fitness = *fitness;
@@ -1261,14 +1267,9 @@ mod platform {
                 .find(|device| device.id == assignment.device_id)
                 .cloned()
                 .ok_or_else(|| format!("CUDA device {} disappeared", assignment.device_id))?;
-            let global_part_start = genomes
-                .iter()
-                .take(assignment.start_index)
-                .map(|genome| genome.segments.len())
-                .sum::<usize>();
             handles.push(thread::spawn(move || {
                 run_device_assignment(
-                    &genomes,
+                    &assignment_genomes,
                     &simulation,
                     &fitness,
                     &accelerator,
@@ -1298,11 +1299,7 @@ mod platform {
                 results[index] = fitness;
             }
             if let Some(visual) = result.visual {
-                device_visuals.push((
-                    result.global_world_start,
-                    result.global_part_start,
-                    visual,
-                ));
+                device_visuals.push((result.global_world_start, result.global_part_start, visual));
             }
             device_stats.push(result.performance);
         }
@@ -1318,15 +1315,13 @@ mod platform {
                 for frame_index in 0..capture.frame_count {
                     let src_start = frame_index * visual.part_count * 7;
                     let src_end = src_start + visual.part_count * 7;
-                    let dst_start =
-                        (frame_index * total_parts + global_part_start) * 7;
+                    let dst_start = (frame_index * total_parts + global_part_start) * 7;
                     let dst_end = dst_start + visual.part_count * 7;
                     transforms[dst_start..dst_end]
                         .copy_from_slice(&visual.transforms[src_start..src_end]);
                 }
                 let world_end = global_world_start + visual.valid_frames.len();
-                valid_frames[global_world_start..world_end]
-                    .copy_from_slice(&visual.valid_frames);
+                valid_frames[global_world_start..world_end].copy_from_slice(&visual.valid_frames);
             }
             Some(CudaCreatureTrajectory {
                 sample_every_steps: capture.sample_every_steps,
@@ -1408,17 +1403,18 @@ mod platform {
             .sum::<usize>();
         let mut assignment_visual = visual_capture.map(|capture| DeviceVisualCapture {
             part_count: assignment_part_count,
-            transforms: vec![
-                0.0;
-                capture.frame_count * assignment_part_count * 7
-            ],
+            transforms: vec![0.0; capture.frame_count * assignment_part_count * 7],
             valid_frames: vec![0; genomes.len()],
         });
 
         // A generation is one fixed evolutionary workload. Keep every candidate
         // assigned to this GPU in the same CUDA launch instead of serializing it
         // into smaller chunks based on a UI batch-size knob.
-        let batch_size = genomes.len().max(1);
+        let batch_size = if visual_capture.is_some() {
+            genomes.len().min(256).max(1)
+        } else {
+            genomes.len().max(1)
+        };
         let mut offset = 0usize;
         while offset < genomes.len() {
             let end = (offset + batch_size).min(genomes.len());
@@ -1432,8 +1428,7 @@ mod platform {
                 visual_capture,
             )?;
             cuda_telemetry.accumulate(&chunk_result.telemetry);
-            if let (Some(target), Some(source)) =
-                (assignment_visual.as_mut(), chunk_result.visual)
+            if let (Some(target), Some(source)) = (assignment_visual.as_mut(), chunk_result.visual)
             {
                 let chunk_part_start = genomes
                     .iter()
@@ -1443,8 +1438,7 @@ mod platform {
                 for frame_index in 0..visual_capture.expect("capture exists").frame_count {
                     let src_start = frame_index * source.part_count * 7;
                     let src_end = src_start + source.part_count * 7;
-                    let dst_start =
-                        (frame_index * target.part_count + chunk_part_start) * 7;
+                    let dst_start = (frame_index * target.part_count + chunk_part_start) * 7;
                     let dst_end = dst_start + source.part_count * 7;
                     target.transforms[dst_start..dst_end]
                         .copy_from_slice(&source.transforms[src_start..src_end]);
