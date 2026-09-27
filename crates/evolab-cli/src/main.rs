@@ -2067,12 +2067,12 @@ fn write_population_visualization(
                 let Some(candidate_capture) = capture.candidates.get(&creature.individual_id) else {
                     return true;
                 };
-                capture
+                (capture
                     .trajectory
                     .valid_frames
                     .get(candidate_capture.world_index)
                     .copied()
-                    .unwrap_or(0) as usize
+                    .unwrap_or(0) as usize)
                     < frame_count
             })
             .count()
