@@ -14,11 +14,10 @@ use evolab_core::{
     CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
     EvolutionConfig, EvolutionResultsFile, EvolutionVisualCapture, EvolutionVisualCaptureRequest,
     ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend,
-    ProbeSpec, RapierCpuBackend,
-    SimulationConfig, ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
-    discover_cuda_devices, evolve_population_checkpointed,
-    evolve_population_checkpointed_with_visual_capture, generate_initial_population_preview,
-    mutate_genome, random_creature, run_cuda_probe_batch,
+    ProbeSpec, RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig,
+    TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices,
+    evolve_population_checkpointed, evolve_population_checkpointed_with_visual_capture,
+    generate_initial_population_preview, mutate_genome, random_creature, run_cuda_probe_batch,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
