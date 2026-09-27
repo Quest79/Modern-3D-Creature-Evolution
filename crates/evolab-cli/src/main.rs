@@ -919,8 +919,8 @@ fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
     }
-    if !playback_speed.is_finite() || !(0.01..=2.0).contains(&playback_speed) {
-        return Err("playback_speed must be between 0.01 and 2.0".into());
+    if !playback_speed.is_finite() || !(0.01..=10.0).contains(&playback_speed) {
+        return Err("playback_speed must be between 0.01 and 10.0".into());
     }
 
     let config = simulation_config(seconds, dt, world_json, world_file)?;
@@ -950,7 +950,8 @@ fn run_stream(request: StreamRequest<'_>) -> Result<(), String> {
         if realtime {
             let target = wall_start
                 + Duration::from_secs_f64(
-                    snapshot.simulated_seconds as f64 / STREAM_TRANSPORT_SPEED,
+                    snapshot.simulated_seconds as f64
+                        / STREAM_TRANSPORT_SPEED.max(playback_speed as f64 * 1.25),
                 );
             let now = Instant::now();
             if target > now {
@@ -1052,8 +1053,8 @@ fn run_creature_stream_inner(
     if !frame_hz.is_finite() || !(1.0..=240.0).contains(&frame_hz) {
         return Err("frame_hz must be between 1 and 240".into());
     }
-    if !playback_speed.is_finite() || !(0.01..=2.0).contains(&playback_speed) {
-        return Err("playback_speed must be between 0.01 and 2.0".into());
+    if !playback_speed.is_finite() || !(0.01..=10.0).contains(&playback_speed) {
+        return Err("playback_speed must be between 0.01 and 10.0".into());
     }
 
     let mut config = simulation_config(seconds, dt, world_json, world_file)?;
@@ -1131,7 +1132,8 @@ fn run_creature_stream_inner(
         if realtime {
             let target = wall_start
                 + Duration::from_secs_f64(
-                    snapshot.simulated_seconds as f64 / STREAM_TRANSPORT_SPEED,
+                    snapshot.simulated_seconds as f64
+                        / STREAM_TRANSPORT_SPEED.max(playback_speed as f64 * 1.25),
                 );
             let now = Instant::now();
             if target > now {
