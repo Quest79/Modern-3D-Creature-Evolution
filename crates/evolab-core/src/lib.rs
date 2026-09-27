@@ -54,9 +54,10 @@ pub use evolution::{
 pub use experiment::{EXPERIMENT_FORMAT_VERSION, ExperimentFile};
 pub use fitness::{FitnessConfig, FitnessMetrics, FitnessResult, FitnessWeights, evaluate_fitness};
 pub use ga::{
-    EvaluatedCreature, EvolutionConfig, EvolutionResult, GenerationSummary, GenerationTiming,
+    EvaluatedCreature, EvolutionConfig, EvolutionResult, EvolutionVisualCandidateCapture,
+    EvolutionVisualCapture, EvolutionVisualCaptureRequest, GenerationSummary, GenerationTiming,
     OffspringTelemetry, PopulationTelemetry, evolve_population, evolve_population_checkpointed,
-    generate_initial_population_preview,
+    evolve_population_checkpointed_with_visual_capture, generate_initial_population_preview,
 };
 pub use rapier_cpu::RapierCpuBackend;
 pub use results::{

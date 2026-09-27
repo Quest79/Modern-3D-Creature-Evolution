@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceleratorConfig, AcceleratorMode, CHECKPOINT_FORMAT_VERSION, ChampionArchiveEntry,
-    CheckpointCandidate, ConditionContext, CreatureGenome, DiversitySummary,
-    EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance, FitnessConfig,
-    FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell, MutationConfig,
-    MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary, TimelineConfig,
-    TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome, random_creature,
-    run_cuda_creature_batch,
+    CheckpointCandidate, ConditionContext, CreatureGenome, CudaCreatureTrajectory,
+    DiversitySummary, EffectiveEvolutionSettings, EvolutionCheckpoint, ExecutionPerformance,
+    FitnessConfig, FitnessMetrics, FitnessResult, GenomeRng, LineageRecord, MapEliteCell,
+    MutationConfig, MutationRecord, MutationResult, ParetoEntry, SimulationConfig, SpeciesSummary,
+    TimelineConfig, TrialAggregation, crossover_brain_subtree, evaluate_fitness, mutate_genome,
+    random_creature, run_cuda_creature_batch, run_cuda_creature_visual_batch,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -160,6 +160,28 @@ pub struct EvaluatedCreature {
     pub unstable_trials: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct EvolutionVisualCaptureRequest {
+    pub sample_hz: f32,
+    pub every_generation: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct EvolutionVisualCandidateCapture {
+    pub world_index: usize,
+    pub part_start: usize,
+    pub part_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct EvolutionVisualCapture {
+    pub trajectory: CudaCreatureTrajectory,
+    pub candidates: BTreeMap<u64, EvolutionVisualCandidateCapture>,
+    /// The captured trajectory is trial 0 for each candidate. It comes from the
+    /// same CUDA evaluation launch that produced the candidate's fitness inputs.
+    pub trial_index: usize,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GenerationTiming {
     pub total_wall_seconds: f64,
@@ -302,12 +324,45 @@ pub fn evolve_population_checkpointed<F, C>(
     resume: Option<&EvolutionCheckpoint>,
     checkpointing_enabled: bool,
     mut on_generation: F,
-    mut on_checkpoint: C,
+    on_checkpoint: C,
 ) -> Result<EvolutionResult, String>
 where
     F: FnMut(&GenerationSummary, &[EvaluatedCreature]) -> Result<(), String>,
     C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
 {
+    evolve_population_checkpointed_with_visual_capture(
+        ancestor,
+        config,
+        resume,
+        checkpointing_enabled,
+        None,
+        |summary, population, _visual_capture| on_generation(summary, population),
+        on_checkpoint,
+    )
+}
+
+pub fn evolve_population_checkpointed_with_visual_capture<F, C>(
+    ancestor: &CreatureGenome,
+    config: &EvolutionConfig,
+    resume: Option<&EvolutionCheckpoint>,
+    checkpointing_enabled: bool,
+    visual_capture_request: Option<EvolutionVisualCaptureRequest>,
+    mut on_generation: F,
+    mut on_checkpoint: C,
+) -> Result<EvolutionResult, String>
+where
+    F: FnMut(
+        &GenerationSummary,
+        &[EvaluatedCreature],
+        Option<&EvolutionVisualCapture>,
+    ) -> Result<(), String>,
+    C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
+{
+    if let Some(request) = visual_capture_request
+        && (!request.sample_hz.is_finite() || request.sample_hz <= 0.0 || request.sample_hz > 60.0)
+    {
+        return Err("visual capture sample rate must be greater than 0 and at most 60 Hz".into());
+    }
     config.validate()?;
     ancestor.validate()?;
 
@@ -440,8 +495,16 @@ where
         offspring_telemetry.accumulate(&expansion_telemetry);
 
         let evaluation_started = Instant::now();
-        let (mut evaluated, execution) =
-            evaluate_population(&pool, &evaluation_pool, &settings, &config.accelerator)?;
+        let generation_visual_sample_hz = visual_capture_request
+            .filter(|request| request.every_generation || generation == config.generations)
+            .map(|request| request.sample_hz);
+        let (mut evaluated, execution, visual_capture) = evaluate_population(
+            &pool,
+            &evaluation_pool,
+            &settings,
+            &config.accelerator,
+            generation_visual_sample_hz,
+        )?;
         timing.evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
         evaluations_completed += evaluated.len() * settings.trials_per_creature;
         let population_telemetry = summarize_population_telemetry(&evaluated);
@@ -624,6 +687,7 @@ where
                 .last()
                 .expect("generation summary was just appended"),
             &evaluated,
+            visual_capture.as_ref(),
         )?;
         timing.generation_callback_seconds = callback_started.elapsed().as_secs_f64();
         timing.total_wall_seconds = generation_started.elapsed().as_secs_f64();
@@ -963,27 +1027,63 @@ fn evaluate_population(
     population: &[Candidate],
     settings: &EffectiveEvolutionSettings,
     accelerator: &AcceleratorConfig,
-) -> Result<(Vec<EvaluatedCreature>, ExecutionPerformance), String> {
+    visual_sample_hz: Option<f32>,
+) -> Result<
+    (
+        Vec<EvaluatedCreature>,
+        ExecutionPerformance,
+        Option<EvolutionVisualCapture>,
+    ),
+    String,
+> {
     let requested_mode = accelerator.mode;
 
     if requested_mode != AcceleratorMode::Cpu {
         let preparation_started = Instant::now();
         let mut gpu_genomes = Vec::with_capacity(population.len() * settings.trials_per_creature);
-        for candidate in population {
+        let mut capture_candidates = BTreeMap::new();
+        let mut part_start = 0usize;
+        for (candidate_index, candidate) in population.iter().enumerate() {
+            capture_candidates.insert(
+                candidate.individual_id,
+                EvolutionVisualCandidateCapture {
+                    world_index: candidate_index * settings.trials_per_creature,
+                    part_start,
+                    part_count: candidate.genome.segments.len(),
+                },
+            );
             for _ in 0..settings.trials_per_creature {
                 gpu_genomes.push(candidate.genome.clone());
+                part_start += candidate.genome.segments.len();
             }
         }
         let host_preparation_seconds = preparation_started.elapsed().as_secs_f64();
 
-        match run_cuda_creature_batch(
-            &gpu_genomes,
-            &settings.simulation,
-            &settings.fitness,
-            accelerator,
-        ) {
+        let cuda_result = if let Some(sample_hz) = visual_sample_hz {
+            run_cuda_creature_visual_batch(
+                &gpu_genomes,
+                &settings.simulation,
+                &settings.fitness,
+                accelerator,
+                sample_hz,
+            )
+        } else {
+            run_cuda_creature_batch(
+                &gpu_genomes,
+                &settings.simulation,
+                &settings.fitness,
+                accelerator,
+            )
+        };
+
+        match cuda_result {
             Ok(batch) => {
                 let result_processing_started = Instant::now();
+                let visual_capture = batch.trajectory.map(|trajectory| EvolutionVisualCapture {
+                    trajectory,
+                    candidates: capture_candidates,
+                    trial_index: 0,
+                });
                 let mut evaluated = Vec::with_capacity(population.len());
                 for (candidate_index, candidate) in population.iter().enumerate() {
                     let start = candidate_index * settings.trials_per_creature;
@@ -1021,7 +1121,7 @@ fn evaluate_population(
                 let mut execution = batch.execution;
                 execution.host_preparation_seconds += host_preparation_seconds;
                 execution.result_processing_seconds += result_processing_seconds;
-                return Ok((evaluated, execution));
+                return Ok((evaluated, execution, visual_capture));
             }
             Err(error) if !accelerator.cpu_fallback => return Err(error),
             Err(_) => {}
@@ -1062,7 +1162,7 @@ fn evaluate_population(
         cuda: Default::default(),
     };
 
-    Ok((evaluated, performance))
+    Ok((evaluated, performance, None))
 }
 
 fn evaluate_creature(
