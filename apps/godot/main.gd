@@ -4468,6 +4468,7 @@ func _on_resume_evolution_pressed() -> void:
         "--event-port", str(_event_port),
         "--champion-output", champion_path,
         "--result-output", results_path,
+        "--top5-visual-output", top5_visual_path,
         "--experiment-name", _experiment_name,
         "--resume-checkpoint", checkpoint_path,
     ])
@@ -4484,25 +4485,108 @@ func _on_resume_evolution_pressed() -> void:
         _set_status("Resuming evolution from the latest completed generation...")
 
 
+func _single_candidate_population_visual(
+    visual_data: Dictionary,
+    candidate_index: int
+) -> Dictionary:
+    var genomes_value = visual_data.get("genomes", [])
+    var frames_value = visual_data.get("frames", [])
+    if (
+        typeof(genomes_value) != TYPE_ARRAY
+        or typeof(frames_value) != TYPE_ARRAY
+        or candidate_index < 0
+        or candidate_index >= genomes_value.size()
+    ):
+        return {}
+
+    var selected_frames: Array = []
+    for frame_value in frames_value:
+        if typeof(frame_value) != TYPE_DICTIONARY:
+            return {}
+        var frame: Dictionary = frame_value.duplicate(true)
+        var creatures_value = frame.get("creatures", [])
+        if (
+            typeof(creatures_value) != TYPE_ARRAY
+            or candidate_index >= creatures_value.size()
+        ):
+            return {}
+        frame["creatures"] = [creatures_value[candidate_index]]
+        selected_frames.append(frame)
+
+    var selected := visual_data.duplicate(true)
+    selected["genomes"] = [genomes_value[candidate_index]]
+    selected["frames"] = selected_frames
+
+    var fitness_value = visual_data.get("fitness", [])
+    if (
+        typeof(fitness_value) == TYPE_ARRAY
+        and candidate_index < fitness_value.size()
+    ):
+        selected["fitness"] = [fitness_value[candidate_index]]
+
+    return selected
+
+
 func _on_watch_champion_pressed() -> void:
     if _job_pid > 0 or _current_genome.is_empty():
         return
 
-    var champion_path := _evolution_champion_path()
-    if not FileAccess.file_exists(champion_path):
-        if not _write_genome_file(champion_path, _current_genome):
-            _set_status("Could not prepare champion genome.")
-            return
+    var top5_path := _evolution_top5_visual_path()
+    var visual_data := _load_population_visual_file(top5_path)
+    if visual_data.is_empty():
+        _set_status(
+            "Champion replay is unavailable. Run evolution again to capture its trajectory."
+        )
+        return
 
-    _prepare_creature_run()
-    var args := _base_creature_args(
-        _champion_world,
-        _champion_motor_strength
+    var trajectory_source := str(visual_data.get("trajectory_source", ""))
+    if trajectory_source.is_empty():
+        _set_status(
+            "Champion replay predates trajectory capture. Run evolution again."
+        )
+        return
+    if trajectory_source == "cpu_fallback":
+        _set_status(
+            "CUDA champion trajectory capture failed; refusing inaccurate CPU replay."
+        )
+        return
+
+    var champion_visual := _single_candidate_population_visual(visual_data, 0)
+    if champion_visual.is_empty():
+        _set_status("Champion trajectory file is invalid.")
+        return
+
+    _reset_population_visual()
+    var event := {
+        "display_label": "Evolution champion",
+        "generation": int(champion_visual.get("generation", 0)),
+        "generations": int(champion_visual.get("generation", 0)),
+        "population": 1,
+        "sample_hz": float(champion_visual.get("sample_hz", 0.0)),
+        "duration_seconds": float(
+            champion_visual.get("duration_seconds", _seconds_spin.value)
+        ),
+        "world_geometry": champion_visual.get("world_geometry", []),
+    }
+    _activate_population_visual_data(
+        event,
+        champion_visual,
+        false,
+        _handoff_profile_last_file_read_ms,
+        _handoff_profile_last_json_parse_ms,
+        _handoff_profile_last_file_bytes
     )
-    args.append_array(PackedStringArray(["--genome", champion_path]))
 
-    if _start_job("creature", args):
-        _set_status("Watching evolution champion in real time...")
+    var fitness_value = champion_visual.get("fitness", [])
+    if typeof(fitness_value) == TYPE_ARRAY and not fitness_value.is_empty():
+        _metrics.text = (
+            "[b]Evolution champion[/b]\n"
+            + "Score: %.4f\n"
+            + "Trajectory: %s"
+        ) % [
+            float(fitness_value[0]),
+            trajectory_source,
+        ]
 
 
 func _on_watch_top5_pressed() -> void:
@@ -4513,6 +4597,11 @@ func _on_watch_top5_pressed() -> void:
     var visual_data := _load_population_visual_file(top5_path)
     if visual_data.is_empty():
         _set_status("Top-5 replay is not available for this evolution run.")
+        return
+    if str(visual_data.get("trajectory_source", "")) == "cpu_fallback":
+        _set_status(
+            "CUDA finalist trajectory capture failed; refusing inaccurate CPU replay."
+        )
         return
 
     _reset_population_visual()
