@@ -160,6 +160,12 @@ pub struct EvaluatedCreature {
     pub unstable_trials: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct EvolutionVisualCaptureRequest {
+    pub sample_hz: f32,
+    pub every_generation: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct EvolutionVisualCandidateCapture {
     pub world_index: usize,
@@ -330,7 +336,6 @@ where
         resume,
         checkpointing_enabled,
         None,
-        false,
         |summary, population, _visual_capture| on_generation(summary, population),
         on_checkpoint,
     )
@@ -341,8 +346,7 @@ pub fn evolve_population_checkpointed_with_visual_capture<F, C>(
     config: &EvolutionConfig,
     resume: Option<&EvolutionCheckpoint>,
     checkpointing_enabled: bool,
-    visual_capture_sample_hz: Option<f32>,
-    capture_every_generation: bool,
+    visual_capture_request: Option<EvolutionVisualCaptureRequest>,
     mut on_generation: F,
     mut on_checkpoint: C,
 ) -> Result<EvolutionResult, String>
@@ -354,8 +358,10 @@ where
     ) -> Result<(), String>,
     C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
 {
-    if let Some(sample_hz) = visual_capture_sample_hz
-        && (!sample_hz.is_finite() || sample_hz <= 0.0 || sample_hz > 60.0)
+    if let Some(request) = visual_capture_request
+        && (!request.sample_hz.is_finite()
+            || request.sample_hz <= 0.0
+            || request.sample_hz > 60.0)
     {
         return Err("visual capture sample rate must be greater than 0 and at most 60 Hz".into());
     }
@@ -491,8 +497,9 @@ where
         offspring_telemetry.accumulate(&expansion_telemetry);
 
         let evaluation_started = Instant::now();
-        let generation_visual_sample_hz = visual_capture_sample_hz
-            .filter(|_| capture_every_generation || generation == config.generations);
+        let generation_visual_sample_hz = visual_capture_request
+            .filter(|request| request.every_generation || generation == config.generations)
+            .map(|request| request.sample_hz);
         let (mut evaluated, execution, visual_capture) = evaluate_population(
             &pool,
             &evaluation_pool,
