@@ -1699,7 +1699,6 @@ mod tests {
         let (next, _) = super::breed_next_generation(
             &pool,
             &evaluated,
-            None,
             &config,
             &settings,
             &mut rng,
