@@ -359,9 +359,7 @@ where
     C: FnMut(&EvolutionCheckpoint) -> Result<(), String>,
 {
     if let Some(request) = visual_capture_request
-        && (!request.sample_hz.is_finite()
-            || request.sample_hz <= 0.0
-            || request.sample_hz > 60.0)
+        && (!request.sample_hz.is_finite() || request.sample_hz <= 0.0 || request.sample_hz > 60.0)
     {
         return Err("visual capture sample rate must be greater than 0 and at most 60 Hz".into());
     }
