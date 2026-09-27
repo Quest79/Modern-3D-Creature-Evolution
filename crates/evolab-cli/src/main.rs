@@ -684,7 +684,6 @@ fn run() -> Result<(), String> {
     }
 }
 
-
 #[cfg(windows)]
 fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
     use std::ffi::c_void;
@@ -793,7 +792,6 @@ fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
     Ok(())
 }
 
-
 #[cfg(not(windows))]
 fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
     if pid == 0 {
@@ -819,7 +817,6 @@ fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 struct BatchRequest<'a> {
     batch: usize,
