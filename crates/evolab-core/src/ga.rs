@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     time::Instant,
 };
 
@@ -451,46 +451,12 @@ where
         timing.sorting_seconds = sorting_started.elapsed().as_secs_f64();
 
         let statistics_started = Instant::now();
-        let verified_best = if execution.actual_mode == AcceleratorMode::Cuda {
-            // CUDA searches the current generation. Rapier verifies the leading
-            // current-generation finalists only. Previous champions are archived,
-            // while their elite lineages continue as mutated descendants, so an
-            // exact previous champion genome is not expected to still exist.
-            let verification_count = evaluated
-                .len()
-                .min(config.elite_count.saturating_mul(4).max(8));
-            let verification_candidates = evaluated[..verification_count].to_vec();
-
-            let verified =
-                verify_top_candidates_with_rapier(&pool, &verification_candidates, &settings)?;
-            let best_verified = verified
-                .iter()
-                .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
-                .cloned()
-                .ok_or_else(|| "Rapier verification produced no finalist".to_string())?;
-
-            let mut verified_by_id = verified
-                .into_iter()
-                .map(|item| (item.individual_id, item))
-                .collect::<HashMap<_, _>>();
-            for candidate in &mut evaluated {
-                if let Some(verified_candidate) = verified_by_id.remove(&candidate.individual_id) {
-                    *candidate = verified_candidate;
-                }
-            }
-            evaluated.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-            Some(best_verified)
-        } else {
-            None
-        };
-
-        let best = if let Some(best_verified) = verified_best.as_ref() {
-            best_verified
-        } else {
-            evaluated
-                .first()
-                .ok_or_else(|| "evolution population unexpectedly empty".to_string())?
-        };
+        // Evolution ranking stays on the selected accelerator. In CUDA mode,
+        // do not re-simulate finalists on CPU/Rapier here; Rapier is reserved
+        // for visual playback paths, not non-visual evolution.
+        let best = evaluated
+            .first()
+            .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
         let worst = evaluated
             .last()
             .ok_or_else(|| "evolution population unexpectedly empty".to_string())?;
@@ -599,7 +565,6 @@ where
             let (next_population, breeding_telemetry) = breed_next_generation(
                 &pool,
                 &evaluated,
-                verified_best.as_ref(),
                 config,
                 &next_settings,
                 &mut rng,
@@ -1143,35 +1108,6 @@ fn evaluate_creature(
     })
 }
 
-fn verify_top_candidates_with_rapier(
-    pool: &rayon::ThreadPool,
-    gpu_ranked: &[EvaluatedCreature],
-    settings: &EffectiveEvolutionSettings,
-) -> Result<Vec<EvaluatedCreature>, String> {
-    if gpu_ranked.is_empty() {
-        return Err("cannot verify an empty CUDA candidate set".into());
-    }
-
-    let results: Vec<Result<EvaluatedCreature, String>> = pool.install(|| {
-        gpu_ranked
-            .par_iter()
-            .map(|candidate| {
-                let candidate = Candidate {
-                    individual_id: candidate.individual_id,
-                    parent_ids: candidate.parent_ids.clone(),
-                    genome: candidate.genome.clone(),
-                    mutations: candidate.mutations.clone(),
-                };
-                evaluate_creature(&candidate, settings)
-            })
-            .collect()
-    });
-
-    let mut verified = results.into_iter().collect::<Result<Vec<_>, _>>()?;
-    verified.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-    Ok(verified)
-}
-
 fn trial_seed(base: u64, trial_index: usize) -> u64 {
     let mut value = base ^ (trial_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     value ^= value >> 30;
@@ -1287,7 +1223,6 @@ fn validate_effective_settings(settings: &EffectiveEvolutionSettings) -> Result<
 fn breed_next_generation(
     pool: &rayon::ThreadPool,
     evaluated: &[EvaluatedCreature],
-    verified_champion: Option<&EvaluatedCreature>,
     config: &EvolutionConfig,
     next_settings: &EffectiveEvolutionSettings,
     rng: &mut GenomeRng,
@@ -1304,9 +1239,6 @@ fn breed_next_generation(
     // unique elite genomes, then force every carried lineage to produce a
     // genuinely mutated descendant for the next generation.
     let mut elite_sources: Vec<&EvaluatedCreature> = Vec::with_capacity(elite_count);
-    if let Some(champion) = verified_champion {
-        elite_sources.push(champion);
-    }
     for candidate in evaluated {
         if elite_sources.len() >= elite_count {
             break;
