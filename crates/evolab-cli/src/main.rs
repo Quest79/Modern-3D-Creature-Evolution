@@ -2014,10 +2014,24 @@ fn write_population_visualization(
     let serialize_started = Instant::now();
     write!(
         writer,
-        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"genomes\":[",
+        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"world_geometry\":",
         generation, sample_hz, settings.simulation.duration_seconds
     )
     .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+    serde_json::to_writer(&mut writer, &settings.simulation.world.geometry())
+        .map_err(|err| format!("failed to serialize visual world geometry: {err}"))?;
+    writer
+        .write_all(b",\"fitness\":")
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
+    let ranked_fitness = population
+        .iter()
+        .map(|creature| creature.fitness)
+        .collect::<Vec<_>>();
+    serde_json::to_writer(&mut writer, &ranked_fitness)
+        .map_err(|err| format!("failed to serialize visual fitness ranking: {err}"))?;
+    writer
+        .write_all(b",\"genomes\":[")
+        .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
     for (index, creature) in population.iter().enumerate() {
         if index > 0 {
