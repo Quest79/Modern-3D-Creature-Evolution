@@ -1429,8 +1429,7 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
 
 fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> Result<(), String> {
     if request.slow_visual
-        && (!request.playback_speed.is_finite()
-            || !(0.01..=10.0).contains(&request.playback_speed))
+        && (!request.playback_speed.is_finite() || !(0.01..=10.0).contains(&request.playback_speed))
     {
         return Err("playback_speed must be between 0.01 and 10.0".into());
     }
@@ -1694,8 +1693,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     .max(0.0);
                 let playback_wall_duration_seconds =
                     simulation_duration_seconds / request.playback_speed;
-                let duration =
-                    Duration::from_secs_f32(playback_wall_duration_seconds);
+                let duration = Duration::from_secs_f32(playback_wall_duration_seconds);
 
                 if let Some(socket) = socket {
                     let first_visual = slow_visual_release_at.is_none();
