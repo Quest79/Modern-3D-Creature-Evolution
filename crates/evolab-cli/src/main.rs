@@ -708,6 +708,7 @@ fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
         flags: u32,
     }
 
+    #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
         fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
