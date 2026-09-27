@@ -445,6 +445,16 @@ enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Pause or resume a running Evolab process by PID.
+    ProcessControl {
+        #[arg(long)]
+        pid: u32,
+
+        /// Action to perform: pause or resume.
+        #[arg(long)]
+        action: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -670,7 +680,142 @@ fn run() -> Result<(), String> {
             world_file,
         } => run_world_geometry(world_json.as_deref(), world_file.as_ref()),
         Command::Capabilities { json: json_output } => run_capabilities(json_output),
+        Command::ProcessControl { pid, action } => run_process_control(pid, &action),
     }
+}
+
+#[cfg(windows)]
+fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+
+    type Handle = *mut c_void;
+
+    const TH32CS_SNAPTHREAD: u32 = 0x00000004;
+    const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+    const INVALID_DWORD: u32 = u32::MAX;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+
+    #[repr(C)]
+    struct ThreadEntry32 {
+        dw_size: u32,
+        cnt_usage: u32,
+        thread_id: u32,
+        owner_process_id: u32,
+        base_priority: i32,
+        delta_priority: i32,
+        flags: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
+        fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
+        fn Thread32Next(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
+        fn OpenThread(access: u32, inherit_handle: i32, thread_id: u32) -> Handle;
+        fn SuspendThread(thread: Handle) -> u32;
+        fn ResumeThread(thread: Handle) -> u32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    if pid == 0 {
+        return Err("process-control requires a nonzero PID".into());
+    }
+    let pause = match action {
+        "pause" => true,
+        "resume" => false,
+        other => {
+            return Err(format!(
+                "invalid process-control action '{other}'; expected pause or resume"
+            ));
+        }
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err("could not enumerate process threads".into());
+    }
+
+    let mut entry = ThreadEntry32 {
+        dw_size: size_of::<ThreadEntry32>() as u32,
+        cnt_usage: 0,
+        thread_id: 0,
+        owner_process_id: 0,
+        base_priority: 0,
+        delta_priority: 0,
+        flags: 0,
+    };
+    let mut matched = 0usize;
+    let mut failed = 0usize;
+
+    let mut has_entry = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while has_entry {
+        if entry.owner_process_id == pid {
+            matched += 1;
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.thread_id) };
+            if thread.is_null() {
+                failed += 1;
+            } else {
+                let result = unsafe {
+                    if pause {
+                        SuspendThread(thread)
+                    } else {
+                        ResumeThread(thread)
+                    }
+                };
+                if result == INVALID_DWORD {
+                    failed += 1;
+                }
+                unsafe {
+                    CloseHandle(thread);
+                }
+            }
+        }
+        entry.dw_size = size_of::<ThreadEntry32>() as u32;
+        has_entry = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+
+    if matched == 0 {
+        return Err(format!("process {pid} has no accessible threads"));
+    }
+    if failed > 0 {
+        return Err(format!(
+            "could not {} {failed} of {matched} threads for process {pid}",
+            if pause { "pause" } else { "resume" }
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn run_process_control(pid: u32, action: &str) -> Result<(), String> {
+    if pid == 0 {
+        return Err("process-control requires a nonzero PID".into());
+    }
+    let signal = match action {
+        "pause" => "-STOP",
+        "resume" => "-CONT",
+        other => {
+            return Err(format!(
+                "invalid process-control action '{other}'; expected pause or resume"
+            ));
+        }
+    };
+    let status = std::process::Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .map_err(|err| format!("failed to invoke kill for process {pid}: {err}"))?;
+    if !status.success() {
+        return Err(format!(
+            "kill {signal} failed for process {pid} with status {status}"
+        ));
+    }
+    Ok(())
 }
 
 struct BatchRequest<'a> {
