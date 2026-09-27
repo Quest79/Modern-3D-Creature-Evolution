@@ -394,6 +394,10 @@ enum Command {
         #[arg(long, default_value_t = 10.0)]
         visual_sample_hz: f32,
 
+        /// Slow-visual playback multiplier used to pace generation handoffs.
+        #[arg(long, default_value_t = 1.0)]
+        playback_speed: f32,
+
         /// Emit final evolution result as JSON.
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -606,6 +610,7 @@ fn run() -> Result<(), String> {
             slow_visual,
             visual_output,
             visual_sample_hz,
+            playback_speed,
             json,
         } => run_evolve(EvolveRequest {
             genome_path: genome.as_ref(),
@@ -656,6 +661,7 @@ fn run() -> Result<(), String> {
             slow_visual,
             visual_output: visual_output.as_ref(),
             visual_sample_hz,
+            playback_speed,
             json_output: json,
         }),
         Command::Run {
@@ -1397,6 +1403,7 @@ struct EvolveRequest<'a> {
     slow_visual: bool,
     visual_output: Option<&'a PathBuf>,
     visual_sample_hz: f32,
+    playback_speed: f32,
     json_output: bool,
 }
 
@@ -1421,6 +1428,12 @@ fn run_evolve(request: EvolveRequest<'_>) -> Result<(), String> {
 }
 
 fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> Result<(), String> {
+    if request.slow_visual
+        && (!request.playback_speed.is_finite() || !(0.01..=10.0).contains(&request.playback_speed))
+    {
+        return Err("playback_speed must be between 0.01 and 10.0".into());
+    }
+
     let mutation_config = MutationConfig {
         max_segments: request.max_segments.max(2),
         structural_mutation_chance: request.structural_mutation_chance,
@@ -1673,13 +1686,14 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     .iter()
                     .position(|candidate| candidate.individual_id == summary.champion_id)
                     .unwrap_or(0);
-                let duration = Duration::from_secs_f32(
-                    summary
-                        .effective_settings
-                        .simulation
-                        .duration_seconds
-                        .max(0.0),
-                );
+                let simulation_duration_seconds = summary
+                    .effective_settings
+                    .simulation
+                    .duration_seconds
+                    .max(0.0);
+                let playback_wall_duration_seconds =
+                    simulation_duration_seconds / request.playback_speed;
+                let duration = Duration::from_secs_f32(playback_wall_duration_seconds);
 
                 if let Some(socket) = socket {
                     let first_visual = slow_visual_release_at.is_none();
@@ -1729,6 +1743,8 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                             "duration_seconds":
                                 summary.effective_settings.simulation.duration_seconds,
                             "sample_hz": request.visual_sample_hz,
+                            "playback_speed": request.playback_speed,
+                            "playback_wall_duration_seconds": playback_wall_duration_seconds,
                             "world_geometry":
                                 summary.effective_settings.simulation.world.geometry(),
                         }),
