@@ -12,12 +12,11 @@ use clap::{Parser, Subcommand};
 use evolab_core::{
     AcceleratorConfig, AcceleratorMode, BatchRunner, CreatureGenome, CreatureSimulator,
     CreatureSnapshot, EffectiveEvolutionSettings, EvaluatedCreature, EvolutionCheckpoint,
-    EvolutionConfig, EvolutionResultsFile, EvolutionVisualCapture, EvolutionVisualCaptureRequest,
-    ExperimentFile, FitnessConfig, FitnessWeights, GenomeRng, MutationConfig, PhysicsBackend,
-    ProbeSpec, RapierCpuBackend, SimulationConfig, ThroughputMode, TimelineConfig,
-    TrialAggregation, WorldConfig, WorldSnapshot, discover_cuda_devices,
-    evolve_population_checkpointed, evolve_population_checkpointed_with_visual_capture,
-    generate_initial_population_preview, mutate_genome, random_creature, run_cuda_probe_batch,
+    EvolutionConfig, EvolutionResultsFile, ExperimentFile, FitnessConfig, FitnessWeights,
+    GenomeRng, MutationConfig, PhysicsBackend, ProbeSpec, RapierCpuBackend, SimulationConfig,
+    ThroughputMode, TimelineConfig, TrialAggregation, WorldConfig, WorldSnapshot,
+    discover_cuda_devices, evolve_population_checkpointed, generate_initial_population_preview,
+    mutate_genome, random_creature, run_cuda_creature_visual_batch, run_cuda_probe_batch,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -1620,18 +1619,12 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
     let started = Instant::now();
     let mut slow_visual_release_at: Option<Instant> = None;
     let mut pending_generation_complete: Option<Value> = None;
-    let capture_visuals = request.slow_visual || request.top5_visual_output.is_some();
-    let visual_capture_request = capture_visuals.then_some(EvolutionVisualCaptureRequest {
-        sample_hz: request.visual_sample_hz,
-        every_generation: request.slow_visual,
-    });
-    let result = evolve_population_checkpointed_with_visual_capture(
+    let result = evolve_population_checkpointed(
         &ancestor,
         &config,
         resume_checkpoint.as_ref(),
         request.checkpoint_output.is_some(),
-        visual_capture_request,
-        |summary, visual_population, visual_capture| {
+        |summary, visual_population| {
             let generation_complete_event = json!({
                 "protocol_version": 1,
                 "kind": "generation_complete",
@@ -1688,19 +1681,13 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                 && let Some(top5_path) = request.top5_visual_output
             {
                 let top_count = visual_population.len().min(5);
-                if summary.execution.actual_mode == AcceleratorMode::Cuda
-                    && visual_capture.is_none()
-                {
-                    return Err(
-                        "final CUDA evaluation did not return its captured trajectory".into(),
-                    );
-                }
                 write_population_visualization(
                     top5_path,
                     summary.generation,
                     &visual_population[..top_count],
                     &summary.effective_settings,
-                    visual_capture,
+                    &config.accelerator,
+                    summary.execution.actual_mode == AcceleratorMode::Cuda,
                     request.visual_sample_hz,
                 )?;
             }
@@ -1710,19 +1697,13 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
                     .visual_output
                     .ok_or_else(|| "--slow-visual requires --visual-output".to_string())?;
                 let visual_path = population_visual_slot_path(visual_base_path, summary.generation);
-                if summary.execution.actual_mode == AcceleratorMode::Cuda
-                    && visual_capture.is_none()
-                {
-                    return Err(
-                        "CUDA Slow Visual generation did not return its captured trajectory".into(),
-                    );
-                }
                 let visual_profile = write_population_visualization(
                     &visual_path,
                     summary.generation,
                     visual_population,
                     &summary.effective_settings,
-                    visual_capture,
+                    &config.accelerator,
+                    false,
                     request.visual_sample_hz,
                 )?;
                 let generation_best_index = visual_population
@@ -1981,7 +1962,8 @@ fn write_population_visualization(
     generation: usize,
     population: &[EvaluatedCreature],
     settings: &EffectiveEvolutionSettings,
-    visual_capture: Option<&EvolutionVisualCapture>,
+    accelerator: &AcceleratorConfig,
+    use_cuda_capture: bool,
     sample_hz: f32,
 ) -> Result<PopulationVisualWriteProfile, String> {
     if population.is_empty() {
@@ -2004,37 +1986,32 @@ fn write_population_visualization(
         .sum::<usize>();
 
     let replay_started = Instant::now();
+    let mut cuda_trajectory = None;
     let mut cpu_trajectories = Vec::new();
     let mut replay_workers = 0usize;
-    let replay_source: &'static str;
+    let mut replay_source = "cpu";
 
-    if let Some(capture) = visual_capture {
-        if capture.trajectory.frame_count != frame_count {
-            return Err(format!(
-                "CUDA evaluation capture frame mismatch: expected {frame_count}, got {}",
-                capture.trajectory.frame_count
-            ));
+    if use_cuda_capture {
+        let genomes = population
+            .iter()
+            .map(|creature| creature.genome.clone())
+            .collect::<Vec<_>>();
+        if let Ok(batch) = run_cuda_creature_visual_batch(
+            &genomes,
+            &settings.simulation,
+            &settings.fitness,
+            accelerator,
+            sample_hz,
+        ) && let Some(trajectory) = batch.trajectory
+            && trajectory.frame_count == frame_count
+            && trajectory.part_count == body_count
+        {
+            cuda_trajectory = Some(trajectory);
+            replay_source = "cuda_capture";
         }
-        for creature in population {
-            let candidate_capture =
-                capture
-                    .candidates
-                    .get(&creature.individual_id)
-                    .ok_or_else(|| {
-                        format!(
-                            "CUDA evaluation capture is missing candidate {}",
-                            creature.individual_id
-                        )
-                    })?;
-            if candidate_capture.part_count != creature.genome.segments.len() {
-                return Err(format!(
-                    "CUDA evaluation capture body mismatch for candidate {}",
-                    creature.individual_id
-                ));
-            }
-        }
-        replay_source = "cuda_evaluation";
-    } else {
+    }
+
+    if cuda_trajectory.is_none() {
         replay_workers = visual_replay_worker_count();
         let replay_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(replay_workers)
@@ -2058,26 +2035,17 @@ fn write_population_visualization(
                 })
                 .collect::<Vec<_>>()
         });
-        replay_source = "cpu_replay";
+        if use_cuda_capture {
+            replay_source = "cpu_fallback";
+        }
     }
 
     let replay_ms = replay_started.elapsed().as_secs_f64() * 1000.0;
-    let frozen_creatures = if let Some(capture) = visual_capture {
-        population
+    let frozen_creatures = if let Some(trajectory) = cuda_trajectory.as_ref() {
+        trajectory
+            .valid_frames
             .iter()
-            .filter(|creature| {
-                let Some(candidate_capture) = capture.candidates.get(&creature.individual_id)
-                else {
-                    return true;
-                };
-                (capture
-                    .trajectory
-                    .valid_frames
-                    .get(candidate_capture.world_index)
-                    .copied()
-                    .unwrap_or(0) as usize)
-                    < frame_count
-            })
+            .filter(|valid| (**valid as usize) < frame_count)
             .count()
     } else {
         cpu_trajectories
@@ -2095,12 +2063,8 @@ fn write_population_visualization(
     let serialize_started = Instant::now();
     write!(
         writer,
-        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"trajectory_source\":\"{}\",\"trajectory_trial\":{},\"world_geometry\":",
-        generation,
-        sample_hz,
-        settings.simulation.duration_seconds,
-        replay_source,
-        visual_capture.map(|capture| capture.trial_index).unwrap_or(0)
+        "{{\"generation\":{},\"sample_hz\":{},\"duration_seconds\":{},\"trajectory_source\":\"{}\",\"world_geometry\":",
+        generation, sample_hz, settings.simulation.duration_seconds, replay_source
     )
     .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
     serde_json::to_writer(&mut writer, &settings.simulation.world.geometry())
@@ -2148,18 +2112,15 @@ fn write_population_visualization(
         write!(writer, "{{\"t\":{},\"creatures\":", simulated_seconds)
             .map_err(|err| format!("failed to write visual file {}: {err}", path.display()))?;
 
-        let compact = if let Some(capture) = visual_capture {
+        let compact = if let Some(trajectory) = cuda_trajectory.as_ref() {
+            let mut part_start = 0usize;
             population
                 .iter()
-                .map(|creature| {
-                    let candidate_capture = capture
-                        .candidates
-                        .get(&creature.individual_id)
-                        .expect("capture candidate validated above");
-                    let valid_frames = capture
-                        .trajectory
+                .enumerate()
+                .map(|(creature_index, creature)| {
+                    let valid_frames = trajectory
                         .valid_frames
-                        .get(candidate_capture.world_index)
+                        .get(creature_index)
                         .copied()
                         .unwrap_or(0) as usize;
                     let source_frame = if valid_frames == 0 {
@@ -2167,26 +2128,25 @@ fn write_population_visualization(
                     } else {
                         Some(frame_index.min(valid_frames - 1))
                     };
-
-                    creature
+                    let parts = creature
                         .genome
                         .segments
                         .iter()
                         .enumerate()
                         .map(|(body_index, segment)| {
                             if let Some(source_frame) = source_frame {
-                                let base = (source_frame * capture.trajectory.part_count
-                                    + candidate_capture.part_start
+                                let base = (source_frame * trajectory.part_count
+                                    + part_start
                                     + body_index)
                                     * 7;
                                 [
-                                    capture.trajectory.transforms[base],
-                                    capture.trajectory.transforms[base + 1],
-                                    capture.trajectory.transforms[base + 2],
-                                    capture.trajectory.transforms[base + 3],
-                                    capture.trajectory.transforms[base + 4],
-                                    capture.trajectory.transforms[base + 5],
-                                    capture.trajectory.transforms[base + 6],
+                                    trajectory.transforms[base],
+                                    trajectory.transforms[base + 1],
+                                    trajectory.transforms[base + 2],
+                                    trajectory.transforms[base + 3],
+                                    trajectory.transforms[base + 4],
+                                    trajectory.transforms[base + 5],
+                                    trajectory.transforms[base + 6],
                                 ]
                             } else {
                                 [
@@ -2200,7 +2160,9 @@ fn write_population_visualization(
                                 ]
                             }
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    part_start += creature.genome.segments.len();
+                    parts
                 })
                 .collect::<Vec<_>>()
         } else {
