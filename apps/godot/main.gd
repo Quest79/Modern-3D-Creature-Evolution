@@ -171,6 +171,7 @@ var _population_visual_active := false
 var _population_visual_clock := 0.0
 var _population_visual_duration := 0.0
 var _population_visual_generation := 0
+var _last_evolution_generations_completed := 0
 var _population_visual_frame_index := 0
 var _population_prefetch_thread: Thread
 var _population_prefetch_event: Dictionary = {}
@@ -4302,6 +4303,7 @@ func _start_evolution_run(continue_current: bool) -> void:
     _probe_mesh.visible = false
     _progress_bar.value = 0
     _has_evolution_champion = false
+    _last_evolution_generations_completed = 0
     _results_data.clear()
     _latest_results_path = ""
     _results_button.disabled = true
@@ -4324,6 +4326,12 @@ func _start_evolution_run(continue_current: bool) -> void:
         DirAccess.remove_absolute(results_path)
     if FileAccess.file_exists(top5_visual_path):
         DirAccess.remove_absolute(top5_visual_path)
+    for slot_path in [
+        _runtime_path("population_visual.slot0.json"),
+        _runtime_path("population_visual.slot1.json"),
+    ]:
+        if FileAccess.file_exists(slot_path):
+            DirAccess.remove_absolute(slot_path)
     if FileAccess.file_exists(checkpoint_path):
         DirAccess.remove_absolute(checkpoint_path)
 
@@ -4485,19 +4493,24 @@ func _on_resume_evolution_pressed() -> void:
         _set_status("Resuming evolution from the latest completed generation...")
 
 
-func _single_candidate_population_visual(
+func _population_visual_subset(
     visual_data: Dictionary,
-    candidate_index: int
+    first_count: int
 ) -> Dictionary:
     var genomes_value = visual_data.get("genomes", [])
     var frames_value = visual_data.get("frames", [])
     if (
         typeof(genomes_value) != TYPE_ARRAY
         or typeof(frames_value) != TYPE_ARRAY
-        or candidate_index < 0
-        or candidate_index >= genomes_value.size()
+        or first_count <= 0
+        or genomes_value.is_empty()
     ):
         return {}
+
+    var selected_count: int = min(first_count, genomes_value.size())
+    var selected_genomes: Array = []
+    for index in range(selected_count):
+        selected_genomes.append(genomes_value[index])
 
     var selected_frames: Array = []
     for frame_value in frames_value:
@@ -4507,32 +4520,43 @@ func _single_candidate_population_visual(
         var creatures_value = frame.get("creatures", [])
         if (
             typeof(creatures_value) != TYPE_ARRAY
-            or candidate_index >= creatures_value.size()
+            or creatures_value.size() < selected_count
         ):
             return {}
-        frame["creatures"] = [creatures_value[candidate_index]]
+        var selected_creatures: Array = []
+        for index in range(selected_count):
+            selected_creatures.append(creatures_value[index])
+        frame["creatures"] = selected_creatures
         selected_frames.append(frame)
 
     var selected := visual_data.duplicate(true)
-    selected["genomes"] = [genomes_value[candidate_index]]
+    selected["genomes"] = selected_genomes
     selected["frames"] = selected_frames
 
     var fitness_value = visual_data.get("fitness", [])
-    if (
-        typeof(fitness_value) == TYPE_ARRAY
-        and candidate_index < fitness_value.size()
-    ):
-        selected["fitness"] = [fitness_value[candidate_index]]
+    if typeof(fitness_value) == TYPE_ARRAY:
+        var selected_fitness: Array = []
+        for index in range(min(selected_count, fitness_value.size())):
+            selected_fitness.append(fitness_value[index])
+        selected["fitness"] = selected_fitness
 
     return selected
+
+
+func _single_candidate_population_visual(
+    visual_data: Dictionary,
+    candidate_index: int
+) -> Dictionary:
+    if candidate_index != 0:
+        return {}
+    return _population_visual_subset(visual_data, 1)
 
 
 func _on_watch_champion_pressed() -> void:
     if _job_pid > 0 or _current_genome.is_empty():
         return
 
-    var top5_path := _evolution_top5_visual_path()
-    var visual_data := _load_population_visual_file(top5_path)
+    var visual_data := _load_final_evolution_replay_visual()
     if visual_data.is_empty():
         _set_status(
             "Champion replay is unavailable. Run evolution again to capture its trajectory."
@@ -4540,11 +4564,6 @@ func _on_watch_champion_pressed() -> void:
         return
 
     var trajectory_source := str(visual_data.get("trajectory_source", ""))
-    if trajectory_source.is_empty():
-        _set_status(
-            "Champion replay predates trajectory capture. Run evolution again."
-        )
-        return
     if trajectory_source == "cpu_fallback":
         _set_status(
             "CUDA champion trajectory capture failed; refusing inaccurate CPU replay."
@@ -4593,8 +4612,7 @@ func _on_watch_top5_pressed() -> void:
     if _job_pid > 0:
         return
 
-    var top5_path := _evolution_top5_visual_path()
-    var visual_data := _load_population_visual_file(top5_path)
+    var visual_data := _load_final_evolution_replay_visual()
     if visual_data.is_empty():
         _set_status("Top-5 replay is not available for this evolution run.")
         return
@@ -4602,6 +4620,11 @@ func _on_watch_top5_pressed() -> void:
         _set_status(
             "CUDA finalist trajectory capture failed; refusing inaccurate CPU replay."
         )
+        return
+
+    visual_data = _population_visual_subset(visual_data, 5)
+    if visual_data.is_empty():
+        _set_status("Top-5 replay trajectory is invalid.")
         return
 
     _reset_population_visual()
@@ -5102,6 +5125,26 @@ func _evolution_results_path() -> String:
 
 func _evolution_top5_visual_path() -> String:
     return _runtime_path("active_evolution_top5_visual.json")
+
+
+func _population_visual_slot_path_for_generation(generation: int) -> String:
+    return _runtime_path("population_visual.slot%d.json" % (generation % 2))
+
+
+func _load_final_evolution_replay_visual() -> Dictionary:
+    if _last_evolution_generations_completed > 0:
+        var final_visual_path := _population_visual_slot_path_for_generation(
+            _last_evolution_generations_completed
+        )
+        var final_visual := _load_population_visual_file(final_visual_path)
+        if (
+            not final_visual.is_empty()
+            and int(final_visual.get("generation", -1))
+                == _last_evolution_generations_completed
+        ):
+            return final_visual
+
+    return _load_population_visual_file(_evolution_top5_visual_path())
 
 
 func _evolution_checkpoint_path() -> String:
@@ -6818,6 +6861,9 @@ func _handle_event(event: Dictionary) -> void:
                 return
 
             _handoff_profile_finish()
+            _last_evolution_generations_completed = int(
+                event.get("generations_completed", 0)
+            )
             _reset_population_visual()
             _clear_population_preview()
             var completed_checkpoint := _evolution_checkpoint_path()
@@ -6845,8 +6891,17 @@ func _handle_event(event: Dictionary) -> void:
             _build_creature_from_genome(_current_genome)
             _has_evolution_champion = not _current_genome.is_empty()
             _continue_champion_button.disabled = _current_genome.is_empty()
-            _watch_top5_button.disabled = not FileAccess.file_exists(
-                _evolution_top5_visual_path()
+            var final_visual_available := (
+                _last_evolution_generations_completed > 0
+                and FileAccess.file_exists(
+                    _population_visual_slot_path_for_generation(
+                        _last_evolution_generations_completed
+                    )
+                )
+            )
+            _watch_top5_button.disabled = (
+                not final_visual_available
+                and not FileAccess.file_exists(_evolution_top5_visual_path())
             )
 
             var final_settings_value = event.get("final_settings", {})
