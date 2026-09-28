@@ -1678,6 +1678,7 @@ fn run_evolve_inner(request: &EvolveRequest<'_>, socket: Option<&UdpSocket>) -> 
             });
 
             if summary.generation == config.generations
+                && !request.slow_visual
                 && let Some(top5_path) = request.top5_visual_output
             {
                 let top_count = visual_population.len().min(5);
